@@ -70,6 +70,7 @@ Deep-dives (the exemplars — more added over time):
 - [Kubernetes](deep-dives/kubernetes.md) — declarative state, informers, reconcile loops
 - [CPython](deep-dives/cpython.md) — object model, refcounting, adaptive interpreter, GIL
 - [Moby/Docker](deep-dives/moby.md) — content-addressed layers, graphdrivers, delegation to containerd/runc
+- [VS Code](deep-dives/vscode.md) — extension host isolation, RPC object graph, LSP/DAP seams
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,

@@ -605,7 +605,7 @@ projects:
     license: MIT
     domains: [editor]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 4 }
     why: >
       The most-used code editor of the era, built on an unfashionable bet
