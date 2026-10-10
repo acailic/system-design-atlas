@@ -252,7 +252,7 @@ request.
 - The Elasticsearch reference: "Near real-time search", "Translog",
   and "Shard allocation awareness" pages — operational twins of the
   code read here.
-- Compare with [LevelDB](deep-dives/leveldb.md) (the same
+- Compare with [LevelDB](leveldb.md) (the same
   immutable-segment + amortized-merge skeleton) and
-  [etcd](deep-dives/etcd.md) (the same consensus/diff-publishing
+  [etcd](etcd.md) (the same consensus/diff-publishing
   skeleton, in the small).
