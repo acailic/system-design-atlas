@@ -25,7 +25,7 @@ C file with the best comments in the industry. It is possible to understand
 dump the bytecode for `CREATE TABLE t(x); INSERT INTO t VALUES (1);` and map
 each opcode to its handler in the VDBE switch.
 
-**Companions.** [How SQLite Works](https://fly.io/blog/how-sqlite-works/);
+**Companions.** [SQLite architecture](https://www.sqlite.org/arch.html);
 *SQLite Database System: Design and Implementation* (Gaffney & Owens).
 
 ---
@@ -104,7 +104,7 @@ descent with page splits) → `mdb_txn_commit` (COW root update).
 despite having no journal, and what it trades for that (write amplification).
 
 **Companions.** LMDB author's
-[WriteConf](https://www.symas.com/symas-post/lmdb-write-conf) posts.
+[symas LMDB intro](https://symas.com/lmdb/) and the `mdb.c` header comments.
 
 ---
 
@@ -139,7 +139,7 @@ LevelDB's original design).
 shows how a completely different query model (vectorized batches, columnar
 storage) is engineered in practice.
 
-**Reading path.** Read the [architecture](https://duckdb.org/docs/dev/architecture/overview/devarchitectureoverview.html):
+**Reading path.** Read the [architecture overview](https://duckdb.org/why_duckdb):
 parser → binder → logical optimizer → physical planner → vectorized
 execution. Trace a simple aggregate query from `src/execution/`.
 
@@ -157,7 +157,7 @@ executors you read.
 
 - [Bigtable](https://research.google/pubs/bigtable-a-distributed-storage-system-for-structured-data/) — SSTables/LSM lineage.
 - [Amazon Dynamo](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf) — consistent hashing, vector clocks, hinted handoff.
-- [The Log: What every software engineer should know](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) — why logs are everywhere.
+- [The Log: What every software engineer should know](https://www.linkedin.com/pulse/log-what-every-software-engineer-should-know-about-real-time-jay-kreps) — why logs are everywhere.
 
 ## Verified paths
 

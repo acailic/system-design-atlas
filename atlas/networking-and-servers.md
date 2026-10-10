@@ -52,7 +52,7 @@ composable: L3/L4 vs L7 filter chains, dynamic config via xDS, and the
 extension points that make a mesh sidecar possible.
 
 **Reading path.**
-1. [Life of a request](https://raw.githubusercontent.com/envoyproxy/envoy/main/docs/intro/arch_overview/intro/what_is_envoy.rst) — start from the architecture overview.
+1. [Life of a request](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/arch_overview) — start from the architecture overview.
 2. `source/common/network/` — connection, listener, and the filter-manager pattern.
 3. Pick one L7 filter (router) — `source/common/router/router.cc`.
 4. `source/common/config/` — how xDS subscriptions update the system at runtime.
@@ -96,7 +96,7 @@ verbose line to the state transition in `lib/http.c`.
 
 - *TCP/IP Illustrated Vol. 1* (Stevens) — the foundation the code assumes.
 - *The C10K problem* page — why these architectures look like they do.
-- Envoy's [blog posts](https://blog.envoyproxy.io/) on why it was built this way.
+- Envoy's [docs](https://www.envoyproxy.io/) and the arch-overview chapters on why it was built this way.
 
 ## Verified paths
 

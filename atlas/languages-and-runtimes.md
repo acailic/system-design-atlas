@@ -80,7 +80,7 @@ kernel boundary crossed to read one line from a file.
 ## Companion materials
 
 - *Crafting Interpreters* (Nystrom) — before CPython.
-- [Go runtime scheduler slides](https://docs.google.com/document/d/1TTj4T2DS42LyOQxo39o3NMwbaLYJP76Q90y2j2awcufo/edit) — history & design.
+- [Scheduling in Go (Ardan Labs, 3 parts)](https://www.ardanlabs.com/blog/2018/08/scheduling-in-go-part1.html) — history & design; then read `runtime/proc.go` on go.dev.
 - CPython devguide internals section.
 
 ## Verified paths

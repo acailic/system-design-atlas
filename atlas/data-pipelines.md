@@ -115,7 +115,7 @@ identify where templating ended and SQL began.
 Upstream commits verified on 2026-10-10: kafka@3de09ca, flink@60846c0, spark@215a146, airflow@df7b8a7, dbt@a0fc53e.
 
 - [Kafka paper](https://notes.stephenholiday.com/Kafka.pdf) · [Flink](https://www.vldb.org/pvldb/vol8/p1804-carbone.pdf) · [RDD](https://www.usenix.org/system/files/conference/nsdi12/nsdi12-final138.pdf)
-- [The Log](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying)
+- [The Log (Jay Kreps)](https://www.linkedin.com/pulse/log-what-every-software-engineer-should-know-about-real-time-jay-kreps)
 - Kappa architecture / Lambda architecture write-ups.
 
 ## Companion papers

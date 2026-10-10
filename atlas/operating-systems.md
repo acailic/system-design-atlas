@@ -44,7 +44,7 @@ pointing at the code in `src/object/cnode.c`.
 
 ### Redox OS (Rust, ~400k lines) — difficulty ★★★★
 
-<https://gitlab.redox-os.org/redox-os/kernel> · keywords: Rust microkernel, URL schemes, drivers in userspace
+<https://github.com/redox-os/kernel> (repo: [redox-os/redox](https://github.com/redox-os/redox)) · keywords: Rust microkernel, URL schemes, drivers in userspace
 
 **Why it's here.** A modern Rust microkernel where drivers run in userspace
 and "everything is a URL scheme" — see Unix ideas rebuilt with modern
