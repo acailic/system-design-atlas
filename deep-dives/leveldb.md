@@ -31,12 +31,12 @@ with almost no incidental complexity around it.
                         ▼
               compaction merges SSTables level by level
               (db/db_impl.cc:BackgroundCompaction:708)
-              
+
  read path  Get(key)  (db/db_impl.cc:1121)
    mem_ → imm_ → levels 0..N (newest → oldest), via
    Version (db/version_set.cc:324) → Table (table/table.cc)
    + Bloom filters (util/bloom.cc) to skip files
- 
+
  SSTable (table/*.cc):  [data block | ... | meta/filter block | index block | footer]
  manifest: CURRENT → MANIFEST-…: log of VersionEdits (the level layout itself)
 ```

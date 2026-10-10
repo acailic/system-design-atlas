@@ -17,9 +17,9 @@ quality bars differ; follow the checklist for what you're adding.
 ## Adding a catalog entry
 
 1. Read [`CURATION.md`](CURATION.md). Score the candidate on the four axes
-   (1–5 each). If any axis is below 3 or the total is under 15, it does not
-   belong in the catalog — propose it in an issue instead, with what you'd
-   fix.
+   (1–5 each) against the inclusion bar defined there — including its
+   reference-reading carve-out. Below the bar, it does not belong in the
+   catalog — propose it in an issue instead, with what you'd fix.
 2. Check domain balance: if the domain already has 3+ representatives, your
    entry must either beat an incumbent (say which, and why) or wait.
 3. Append the entry to `catalog.yaml` following the documented schema.

@@ -34,7 +34,7 @@ process of its own.
          ▼                       ▼
    btree layer             btree layer
    src/btree.c (table & index btrees over pages,
-   src/btreeInt.h:MemPage) 
+   src/btreeInt.h:MemPage)
          ▼
    pager layer  src/pager.c (page cache, journal, WAL, savepoints)
          ▼
