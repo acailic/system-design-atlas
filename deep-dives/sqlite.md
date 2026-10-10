@@ -14,33 +14,47 @@ through pager to disk, and how crash-safety is layered (journal vs WAL) —
 the same problems a client/server database solves, solved without a
 process of its own.
 
+## Explain like I'm 10
+
+**A magic cookbook that lives inside your toy box.** Most databases are
+restaurants: you phone a waiter (a server process) who talks to the
+kitchen. SQLite is a cookbook that lives in YOUR box — nothing to
+install, nothing to call. You ask a question in a special language (SQL);
+the book turns your question into a little recipe card (a bytecode
+program for the VDBE virtual machine); a tiny cook follows the card one
+step at a time (`sqlite3VdbeExec`). The cook reads and writes recipe
+pages stored in one box (b-tree pages in the single database file), and a
+careful librarian (the pager) makes sure nothing is ever half-rewritten:
+either the librarian photocopies a page before changing it, so juice
+spilled mid-recipe can be undone (the rollback journal), or the librarian
+writes new pages at the back of a notebook so friends can keep reading
+the old pages while you write (WAL mode). The book even works on any
+shelf — phones, browsers, planes — because the only thing it needs to
+know about the outside world is one small adapter (the VFS).
+
+**Why the grown-ups did it this way:** putting the whole database in one
+file, built from layers that each only talk to their neighbor, made it
+run anywhere with zero setup — which is why it is the most deployed
+database on earth.
+
 ## 1. Architecture overview
 
-```
- SQL text
-    │  sqlite3_prepare  (src/prepare.c:sqlite3Prepare, line 703)
-    ▼
- tokenizer ─► parser ─► code generator
- src/tokenize.c   src/parse.y    src/build.c, insert.c, select.c...
- (lemon grammar,  (parse tree)    (emit VDBE opcodes)
-  src/tokenize.c:600)
-    │
-    ▼  VDBE program: array of Op + registers + cursors
- ┌──────────────────────────────────────────────┐
- │ VDBE  src/vdbe.c:sqlite3VdbeExec (line 903)  │  ← sqlite3_step drives this
- │  giant switch: OP_Transaction, OP_OpenRead,  │
- │  OP_Column, OP_Seek, OP_Insert, OP_ResultRow │
- └───────┬───────────────────────┬──────────────┘
-         ▼                       ▼
-   btree layer             btree layer
-   src/btree.c (table & index btrees over pages,
-   src/btreeInt.h:MemPage)
-         ▼
-   pager layer  src/pager.c (page cache, journal, WAL, savepoints)
-         ▼
-   VFS  src/os_unix.c / os_win.c (sqlite3_vfs_register, src/os.c:408)
-         ▼
-   database file + journal/WAL/shm files on disk
+```mermaid
+flowchart TD
+    SQL["SQL text"]
+    PREP["sqlite3_prepare — src/prepare.c sqlite3Prepare 703"]
+    TOK["tokenizer — src/tokenize.c<br/>(lemon grammar in src/parse.y)"]
+    GEN["code generators — src/build.c, insert.c, select.c<br/>emit VDBE opcodes"]
+    subgraph vdbe["VDBE — src/vdbe.c sqlite3VdbeExec 903<br/>giant switch: OP_Transaction, OP_OpenRead,<br/>OP_Column, OP_Seek, OP_Insert, OP_ResultRow<br/>sqlite3_step drives this loop"]
+        PROG["Op array + registers aMem + cursors"]
+    end
+    BT["btree layer — src/btree.c<br/>table and index b-trees over 4KB pages"]
+    PG["pager — src/pager.c<br/>page cache, rollback journal, WAL, savepoints"]
+    VFS["VFS — src/os_unix.c / os_win.c<br/>sqlite3_vfs_register (os.c 408)"]
+    FILES[("database file +<br/>journal / -wal / -shm files")]
+
+    SQL --> PREP --> TOK --> GEN -->|"VDBE program"| PROG
+    PROG --> BT --> PG --> VFS --> FILES
 ```
 
 - The **spine** — the story of one `SELECT`/`INSERT` — is the vertical
@@ -53,6 +67,68 @@ process of its own.
 - No network, no daemon: `sqlite3_open` (`src/main.c:3757` →
   `openDatabase` at 3388) is a library call; concurrency is file locking
   (POSIX advisory locks in `src/os_unix.c`).
+
+## Walkthrough: one INSERT from SQL text to bytes on disk
+
+The spine as a story — step through it on the site, or read it top to
+bottom here. One `INSERT INTO users VALUES (7, 'ada')` travels the whole
+stack.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as App (sqlite3_step)
+    participant V as VDBE (vdbe.c 903)
+    participant B as btree layer
+    participant P as pager
+    participant D as VFS / disk
+    A->>V: sqlite3_step — run the compiled program
+    V->>P: OP_Transaction — begin write, lock state machine
+    V->>B: OP_OpenWrite — cursor on the table b-tree
+    V->>B: OP_Insert — write the new row into a leaf page
+    B->>P: dirty page — journal original (or append to -wal)
+    V->>P: OP_Halt — commit
+    P->>D: journal deleted / WAL kept for readers, fsync per policy
+    A-->>A: sqlite3_step returns SQLITE_DONE
+    Note over P,D: crash before commit? next open replays the hot journal (pager_playback 2872)
+```
+
+**Step 1 — Compile the question.** `sqlite3_prepare` (`src/prepare.c:703`)
+runs the pipeline: the tokenizer (`src/tokenize.c:sqlite3GetToken`, 273)
+feeds the LEMON-generated parser (`src/parse.y` is the readable grammar),
+the planner picks a strategy, and code generators emit a VDBE program —
+for our INSERT, `src/insert.c:sqlite3Insert` (888) emits constraint
+checks, rowid assignment, and index maintenance as opcodes.
+
+**Step 2 — Step the machine.** `sqlite3_step` (`src/vdbeapi.c:980`) is a
+thin driver around `sqlite3VdbeExec` (`src/vdbe.c:903`): one `for(;;)`
+loop, one colossal switch, operands in registers `aMem[]`.
+
+**Step 3 — Open the transaction.** `OP_Transaction` (4246) asks the
+pager to begin a write: its state machine walks `PAGER_READER →
+WRITER_LOCKED → WRITER_CACHEMOD`, and in journal mode the original pages
+are saved to the rollback journal before any modification.
+
+**Step 4 — Position and write.** `OP_OpenWrite` (the write-side sibling
+of `OP_OpenRead` at 4530) opens a cursor on the table b-tree; `OP_Insert`
+(5913) descends to the leaf page and adds the row as a cell —
+`maxLocal/minLocal` decide whether large payloads spill to overflow
+pages.
+
+**Step 5 — Commit.** `OP_Halt` ends the program: the pager syncs the
+journal (or leaves the new pages in the `-wal` log), releases locks, and
+`sqlite3_step` returns `SQLITE_DONE`. "Committed" means the log record is
+durable — the database pages themselves may still be flushed lazily.
+
+**Step 6 — The crash subplot.** If the process dies mid-transaction,
+nothing repairs anything at crash time. The next `sqlite3_open` finds a
+hot journal and `pager_playback` (`src/pager.c:2872`) restores the
+pre-transaction page images — recovery on open, not on crash.
+
+**Outcome — One row, durably.** A SQL sentence became a bytecode
+program, executed against pages behind a pager, behind a VFS — five
+layers, each only knowing its neighbor. `EXPLAIN` shows you the exact
+recipe card your query compiled to.
 
 ## 2. Core data structures — and why these
 
@@ -119,6 +195,28 @@ reader/writer concurrency SQLite couldn't offer with rollback journals.
   (The project's famous testing regime — TH3, 100% branch coverage
   ambitions, dozens of generated test DBs — is the credibility engine
   behind this promise; see sqlite.org/testing.html.)
+
+```mermaid
+flowchart LR
+    subgraph procs["many processes, one file"]
+        R1["reader A — shared lock,<br/>sees a consistent snapshot"]
+        R2["reader B — same or older snapshot"]
+        W["the one writer —<br/>whole-file write lock"]
+    end
+    subgraph walmode["WAL mode (journal_mode = wal)"]
+        WALF["-wal — writer appends new page versions"]
+        SHM["-shm — wal-index hash table in shared memory:<br/>which pages live in the log"]
+        CKPT["checkpoint — walCheckpoint (wal.c 2281)<br/>folds the log back into the main file"]
+    end
+    HOT["hot journal on crash —<br/>next open replays it (pager_playback 2872)"]
+
+    R1 -->|"never blocks the writer"| WALF
+    R2 --> WALF
+    W --> WALF
+    WALF --> SHM
+    WALF --> CKPT
+    W -.->|"rollback-journal mode instead"| HOT
+```
 
 ## 4. API and extension design
 

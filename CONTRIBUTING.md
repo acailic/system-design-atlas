@@ -6,7 +6,11 @@ quality bars differ; follow the checklist for what you're adding.
 
 ## Ground rules
 
-- Markdown-first. No build step, no UI.
+- Markdown-first. The prose under `deep-dives/`, `PATTERNS.md`, and
+  `catalog.yaml` is the source of truth; the GitHub Pages site under
+  `docs/` is *generated from it* by `site/build.mjs` (run `npm run build`
+  and commit the regenerated `docs/` in the same change — `npm run check`
+  fails if it is stale).
 - Never vendor, mirror, or commit upstream code into this repository.
   Clones live in `clones/` and are gitignored.
 - Every factual claim in a deep-dive must be verifiable in a clone of the
@@ -61,12 +65,19 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
 5. Snippets: ≤ 10 lines, few, attributed, upstream license named inline.
    Prefer paraphrase when prose carries the point (see
    [`LICENSES.md`](LICENSES.md)).
-6. Fill difficulty/prerequisites honestly, including an hour budget.
-7. Update the catalog entry: `status: deep-dived`.
-8. Add the deep-dive to the coverage list in `README.md`.
-9. Cross-link `PATTERNS.md`: if the deep-dive instantiates (or adds) a
-   recurring pattern, add/extend its "Seen in" pointer list.
-10. PR title: `deep-dive: <id>`.
+6. Write the **Explain like I'm 10** analogy (honest mapping to the real
+   mechanism — see the template) and the **Walkthrough** steps
+   (`**Step N — Title.**` paragraphs, exactly that shape — the site
+   builder turns them into the step-through; anything else stays a plain
+   paragraph).
+7. Fill difficulty/prerequisites honestly, including an hour budget.
+8. Update the catalog entry: `status: deep-dived`.
+9. Add the deep-dive to the coverage list in `README.md`.
+10. Cross-link `PATTERNS.md`: if the deep-dive instantiates (or adds) a
+    recurring pattern, add/extend its "Seen in" pointer list.
+11. Rebuild the site: `npm ci && npm run build`, commit the regenerated
+    `docs/`.
+12. PR title: `deep-dive: <id>`.
 
 ### Quality bar (reviewers check this)
 
@@ -77,8 +88,13 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
 - [ ] Trade-offs have evidence and a "when would this be wrong for you"
       verdict.
 - [ ] "What to steal" is transferable, not a summary of features.
+- [ ] The ELI10 analogy maps onto the real mechanism; the walkthrough
+      steps walk the same spine as the reading path.
+- [ ] Mermaid diagrams render (check on GitHub) and cite only facts the
+      prose also cites.
 - [ ] Snippets within policy; no vendored upstream files.
 - [ ] Catalog entry and README updated.
+- [ ] `npm run check` passes (docs/ regenerated and committed).
 
 ## Re-reviewing entries
 

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patterns index — System Design Atlas</title>
+<meta name="description" content="Cross-cutting design lessons that recur across the atlas deep-dives, from content addressing to reconcile loops.">
+<meta property="og:title" content="Patterns index — System Design Atlas">
+<meta property="og:description" content="Cross-cutting design lessons that recur across the atlas deep-dives, from content addressing to reconcile loops.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../#dives">Deep-dives</a>
+  <a href="./">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
+<div>
+  <header class="article-header"><h1>Patterns index: design lessons that recur</h1>
+  <p class="lead">The deep-dives teach systems; this index teaches <strong>design</strong>. Each pattern appears in two or more canonical codebases — the recurrence is the signal.</p></header>
+  <article>
+<p>The deep-dives teach systems; this index teaches <strong>design</strong>. Each
+pattern below appears independently in two or more canonical
+codebases — usually invented by one and rediscovered (or inherited) by
+the others. That recurrence is the strongest signal in the atlas: when
+very different teams under different constraints converge on the same
+shape, you are looking at a real pattern, not a fashion.</p>
+<p>Read this file two ways: top-down as a course in applied system design
+(each pattern ends with &quot;reach for it when…&quot;), or bottom-up as a
+back-of-the-book index into the deep-dives.</p>
+<hr>
+<h2 id="1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</h2>
+<p><strong>Shape:</strong> immutable artifacts whose identifier is a digest of their
+bytes; identity, integrity, and dedup collapse into one mechanism.</p>
+<p><strong>Seen in:</strong> <a href="../dive/git/">git</a> — the entire object database is
+hash-keyed, so verification and dedup are free;
+<a href="../dive/moby/">Moby</a> — image layers are digest-named, which is
+why registries are dumb blob stores and builds cache globally.</p>
+<p><strong>Why it recurs:</strong> it deletes an entire class of coordination problems
+(no registry to maintain, no trust needed in transport), and it makes
+caching trivially correct.</p>
+<p><strong>Reach for it when:</strong> artifacts are immutable or versioned, produced
+once and consumed many times. Beware: it converts &quot;update&quot; into &quot;add
+new + garbage-collect old&quot; — you are signing up for a GC story.</p>
+<h2 id="2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</h2>
+<p><strong>Shape:</strong> append the change to a log before (or instead of) mutating
+data pages; recovery = replay; durability = fsync the log.</p>
+<p><strong>Seen in:</strong> <a href="../dive/sqlite/">SQLite</a> — journal and WAL as
+selectable modes behind the pager; <a href="../dive/postgresql/">PostgreSQL</a>
+— XLogInsert/redo as <em>the</em> durability mechanism for every subsystem;
+<a href="../dive/leveldb/">LevelDB</a> — WAL as the boundary between
+&quot;durable&quot; and &quot;cache&quot;; <a href="../dive/kafka/">Kafka</a> — where the log
+stops being a technique and becomes the product; <a href="../dive/etcd/">etcd</a>
+— raft entries and snapshots framed in a WAL the server replays on
+restart; <a href="../dive/elasticsearch/">Elasticsearch</a> — the translog
+is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&quot; (flush).</p>
+<p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
+does; a single log turns unbounded crash-consistency problems into one
+mechanical replay.</p>
+<p><strong>Reach for it when:</strong> you must survive crashes — which is always.
+The pattern&#39;s costs are write amplification and a checkpoint/compaction
+story, both cheaper than the alternative.</p>
+<h2 id="3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</h2>
+<p><strong>Shape:</strong> the bulk of state is append-only/immutable; all mutation is
+concentrated in one small, carefully synchronized component.</p>
+<p><strong>Seen in:</strong> <a href="../dive/git/">git</a> — objects never change; refs are
+the only mutable pointers; <a href="../dive/leveldb/">LevelDB</a> — SSTables
+are immutable; the manifest (itself a log) is the mutable layout;
+<a href="../dive/kafka/">Kafka</a> — KRaft moved broker metadata into an
+append-only raft log.</p>
+<p><strong>Why it recurs:</strong> small mutable surfaces are auditable, lockable, and
+crash-safe; everything else becomes shareable and cacheable.</p>
+<p><strong>Reach for it when:</strong> reads dominate writes and history matters. The
+price is always a GC/compaction subsystem — budget it from day one.</p>
+<h2 id="4-supervisor-expendable-workers">4. Supervisor + expendable workers</h2>
+<p><strong>Shape:</strong> a stateless supervisor owns listening sockets/lifecycle;
+per-connection or per-job work happens in workers whose death is an
+incident, not an outage.</p>
+<p><strong>Seen in:</strong> <a href="../dive/nginx/">nginx</a> — master holds the sockets,
+workers die and respawn; <a href="../dive/postgresql/">PostgreSQL</a> — the
+postmaster forks backends, one connection per process;
+<a href="../dive/redis/">Redis</a> — persistence by fork: the child is an
+expendable snapshotter over copy-on-write memory.</p>
+<p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
+precisely when the supervisor owns nothing user-visible.</p>
+<p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
+small. Workers that hold large in-memory state (databases&#39; backends
+mid-transaction) pay on restart — that&#39;s the trade PostgreSQL accepts
+knowingly.</p>
+<h2 id="5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</h2>
+<p><strong>Shape:</strong> one thread per process blocks in epoll/kqueue and dispatches
+callbacks; concurrency without shared-memory parallelism.</p>
+<p><strong>Seen in:</strong> <a href="../dive/redis/">Redis</a> — <code>ae</code> loop, plus the
+evolution of IO threads around a still-serial command core;
+<a href="../dive/nginx/">nginx</a> — one loop per worker with state
+machines instead of threads. (The catalog&#39;s libuv/node entries
+generalize it to any runtime.)</p>
+<p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
+not by CPU; a loop removes per-connection stacks and most locking.</p>
+<p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
+work. The moment per-event work is CPU-heavy you need the worker/
+process variants (pattern 4) or threads — C10K logic does not survive
+a 100ms handler.</p>
+<h2 id="6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</h2>
+<p><strong>Shape:</strong> rehash, expiry, compaction, and freeing move a bounded
+amount of work per operation or per tick, never in one burst.</p>
+<p><strong>Seen in:</strong> <a href="../dive/redis/">Redis</a> — incremental rehash and
+time-budgeted active expiry; <a href="../dive/leveldb/">LevelDB</a> —
+leveled compaction with slowdown/stop triggers;
+<a href="../dive/postgresql/">PostgreSQL</a> — vacuum as a background GC
+with autovacuum tuning; <a href="../dive/kubernetes/">Kubernetes</a> —
+resync periods as a safety net under the event stream.</p>
+<p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
+inside a request path eventually lands in someone&#39;s tail.</p>
+<p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
+codebases: if the work is unbounded, it belongs to a background loop
+with a budget, not to the request.</p>
+<h2 id="7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</h2>
+<p><strong>Shape:</strong> clients write desired state; controllers observe and
+converge; events are hints, truth is compared, not remembered.</p>
+<p><strong>Seen in:</strong> <a href="../dive/kubernetes/">Kubernetes</a> — the entire
+control plane; <a href="../dive/moby/">Moby</a> — Config/HostConfig/State
+is the same spec/status split at container granularity (and restart
+policies are a reconcile loop over exit states).</p>
+<p><strong>Why it recurs:</strong> distributed systems miss events; idempotent
+convergence from any state survives what edge-triggered designs
+cannot.</p>
+<p><strong>Reach for it when:</strong> multiple unreliable actors must eventually
+agree on a world state. Cost: everything becomes eventually
+consistent, and debugging means diffing desired vs actual.</p>
+<h2 id="8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</h2>
+<p><strong>Shape:</strong> all OS/platform dependency funnels through a narrow
+abstraction; ports are implementations of it.</p>
+<p><strong>Seen in:</strong> <a href="../dive/sqlite/">SQLite</a> — VFS is why it runs from
+phones to airliners; <a href="../dive/leveldb/">LevelDB</a> — <code>Env</code> as the
+whole OS surface; <a href="../dive/nginx/">nginx</a> — event-module vtables
+(epoll/kqueue/select behind one macro).</p>
+<p><strong>Why it recurs:</strong> portability is architectural, not a build flag; the
+interface is where testing doubles (in-memory VFS, memdb) come from.</p>
+<p><strong>Reach for it when:</strong> the system must outlive your current platform
+assumptions. The failure mode is a leaky abstraction — SQLite&#39;s VFS
+survived because its contract stayed small and honest.</p>
+<h2 id="9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</h2>
+<p><strong>Shape:</strong> writers create new versions; readers pick a snapshot;
+&quot;current&quot; is a query, not a location.</p>
+<p><strong>Seen in:</strong> <a href="../dive/postgresql/">PostgreSQL</a> — xmin/xmax and
+snapshots from the procarray; <a href="../dive/kubernetes/">Kubernetes</a> —
+resourceVersion optimistic concurrency over every object; <a href="../dive/leveldb/">LevelDB</a> —
+compaction drops versions below the oldest live snapshot; <a href="../dive/etcd/">etcd</a>
+— the whole keyspace is revision-stamped history, watch replays it,
+compaction truncates it.</p>
+<p><strong>Why it recurs:</strong> locking readers against writers is the bottleneck
+MVCC deletes; every system that did it never went back.</p>
+<p><strong>Reach for it when:</strong> read concurrency matters more than write
+amplification. Always pair it with a GC story (vacuum, compaction).</p>
+<h2 id="10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</h2>
+<p><strong>Shape:</strong> third parties extend the system without forking it,
+through hooks located at genuine joints (planner, filters, drivers,
+process boundaries).</p>
+<p><strong>Seen in:</strong> <a href="../dive/postgresql/">PostgreSQL</a> — planner/
+executor hooks spawned Citus and TimescaleDB; <a href="../dive/nginx/">nginx</a>
+— phase handlers and filter chains; <a href="../dive/sqlite/">SQLite</a> —
+VFS, virtual tables, loadable extensions; <a href="../dive/kubernetes/">Kubernetes</a>
+— CRDs turn the API server into a platform; <a href="../dive/cpython/">CPython</a>
+— the C API whose safety shaped (and constrained) everything,
+including the GIL; <a href="../dive/moby/">Moby</a> — plugin protocols and
+OCI-standardized boundaries; <a href="../dive/vscode/">VS Code</a> — the
+stable/proposed two-tier API plus LSP/DAP as protocol-level seams.</p>
+<p><strong>Why it recurs:</strong> ecosystems compound only where extension is
+contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
+<p><strong>Reach for it when:</strong> you can name who will extend you and what they
+will want to change. Misplaced hooks become load-bearing mistakes
+(CPython&#39;s is both its greatest asset and its hardest constraint).</p>
+<h2 id="11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</h2>
+<p><strong>Shape:</strong> move bytes by appending and by kernel page-cache handoff;
+avoid copies and random access on the hot path.</p>
+<p><strong>Seen in:</strong> <a href="../dive/kafka/">Kafka</a> — <code>transferFrom</code> to sockets,
+sparse index + ≤4KB scan instead of per-record pointers;
+<a href="../dive/leveldb/">LevelDB</a> — LSM writes are sequential by
+construction, reads amortized by Bloom filters;
+<a href="../dive/git/">git</a> — pack files and delta chains trade random
+access for density on the shipping path.</p>
+<p><strong>Why it recurs:</strong> hardware grants sequential bandwidth an order of
+magnitude beyond random; the designs that treat this as physics, not
+preference, win throughput decades.</p>
+<p><strong>Reach for it when:</strong> volume is the product. Costs are read
+amplification and index machinery to find things again.</p>
+<h2 id="12-generate-the-surface-from-data">12. Generate the surface from data</h2>
+<p><strong>Shape:</strong> commands/APIs/config described as data (tables, JSON,
+schemas) and compiled into dispatch, docs, validation, and clients.</p>
+<p><strong>Seen in:</strong> <a href="../dive/redis/">Redis</a> — commands.json → table →
+dispatch/ACL/docs; <a href="../dive/kubernetes/">Kubernetes</a> — OpenAPI
+schemas → typed clients for unknown future types;
+<a href="../dive/cpython/">CPython</a> — bytecodes.c DSL generating the
+interpreter and its metadata.</p>
+<p><strong>Why it recurs:</strong> one source of truth removes drift between
+implementation, documentation, and tooling — the places large systems
+rot first.</p>
+<p><strong>Reach for it when:</strong> the surface is large and regular. For small
+surfaces it is ceremony; past a few dozen operations it is survival.</p>
+<hr>
+<h2 id="how-to-use-this-index-while-learning">How to use this index while learning</h2>
+<ol>
+<li>After finishing any deep-dive, return here and find the patterns it
+instantiated — the recognition is the lesson compounding.</li>
+<li>When designing your own system, scan the &quot;reach for it when&quot; lines:
+most architecture mistakes visible in review are a pattern applied
+where its &quot;when&quot; doesn&#39;t hold (MVCC without GC, event loop with
+CPU-heavy handlers, CAS without a retention story).</li>
+<li>When two patterns conflict (amortization vs responsiveness,
+immutability vs latency), the deep-dives&#39; trade-off sections show
+real systems pricing the conflict — that pricing, not the choice,
+is the transferable skill.</li>
+</ol>
+
+  </article>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../assets/site.js" defer></script>
+</body>
+</html>

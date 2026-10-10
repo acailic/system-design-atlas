@@ -14,33 +14,53 @@ This deep-dive teaches how architecture (not tuning) produces both the
 throughput and the operational properties nginx is famous for: zero-
 downtime reload and binary upgrade.
 
+## Explain like I'm 10
+
+**An ice cream shop where every order gets a tray.** nginx is a shop with
+one manager (the master process) who never scoops ice cream — the
+manager's whole job is hiring, watching, and replacing scoop workers
+(worker processes). Each worker serves MANY customers at once by taking
+tiny turns — one spoonful for you, one for the next person, round and
+round (the event loop + state machines) — instead of standing next to
+one customer until they finish licking. Every order gets a tray (a memory
+pool): all the mess goes on the tray, and when the order is done the
+whole tray is thrown away — nobody washes individual spoons mid-shift.
+And because workers each have their own tray and scoop, one clumsy worker
+dropping theirs closes one lane, not the shop; the manager just hires a
+replacement instantly.
+
+**Why the grown-ups did it this way:** serving thousands of customers at
+once needs turns, not one staff member per customer — and workers that
+share nothing can't trip each other, which is also why the menu can
+change (reload) without ever closing the shop.
+
 ## 1. Architecture overview
 
-```
-                  nginx binary start
-                        │ src/core/nginx.c:main
-                        ▼
-        ┌───────────────────────────────┐
-        │ MASTER (src/os/unix/          │  no client connections!
-        │ ngx_process_cycle.c:74)       │  owns: listening sockets,
-        │  - spawn/supervise workers    │  config cycle, pid file
-        │  - SIGHUP  → reload config    │
-        │  - SIGUSR2 → binary upgrade   │
-        │  - SIGCHLD → respawn          │
-        └──────┬────────────────────────┘
-               │ fork (inherits listening fds)
-   ┌───────────┼───────────┐
-   ▼           ▼           ▼
- WORKER     WORKER      WORKER      (× worker_processes; also
-   │           │           │         cache manager/loader helpers)
-   ▼           ▼           ▼
- one event loop per worker — src/event/ngx_event.c:195
-   epoll/kqueue/select (src/event/modules/*)
-   accept mutex serializes accept() storms
-   timers = rbtree (src/event/ngx_event_timer.c)
-        each connection = ngx_connection_t + state machines:
-        HTTP: request line → headers → phases → content
-              → upstream (proxy) → filters → out
+```mermaid
+flowchart TD
+    START["nginx binary start — src/core/nginx.c main"]
+    M["MASTER — os/unix/ngx_process_cycle.c 74<br/>owns listening sockets, config, pid file<br/>SIGHUP reload · SIGUSR2 upgrade · SIGCHLD respawn<br/>never touches a client connection"]
+    subgraph workers["workers — fork inherits the listening fds"]
+        W1["worker 1"]
+        W2["worker 2"]
+        WN["worker N (worker_processes)<br/>+ cache manager / loader helpers"]
+    end
+    subgraph loop["each worker: one event loop — src/event/ngx_event.c 195"]
+        EP["epoll / kqueue / select — src/event/modules/*"]
+        ACC["accept mutex — one worker calls accept() at a time"]
+        TIM["timers — rbtree (ngx_event_timer.c)"]
+        CONN["each connection: ngx_connection_t + state machines<br/>request line → headers → phases → content<br/>→ upstream proxy → filters → out"]
+    end
+
+    START --> M
+    M -->|"fork"| W1
+    M -->|"fork"| W2
+    M -->|"fork"| WN
+    W1 --> loop
+    W2 --> loop
+    WN --> loop
+    EP --> ACC --> CONN
+    TIM --> CONN
 ```
 
 - The **spine** — one HTTP request — is: accept →
@@ -53,6 +73,70 @@ downtime reload and binary upgrade.
   machines toward the backend) → output filters → finalize.
 - Every step is a callback driven by socket readiness; nothing between
   accept and response is ever blocked on I/O.
+
+## Walkthrough: one proxied request, accept to pool teardown
+
+Follow one HTTP request through a worker — step through it on the site,
+or read it top to bottom. Notice how every "waiting" is a yield, never
+a block.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant E as event loop (worker)
+    participant P as phase engine
+    participant U as upstream (backend)
+    E->>E: accept — new connection, install request-line handler
+    C->>E: GET /api/x HTTP/1.1 (may arrive in pieces)
+    E->>E: request line → headers (each return = yield)
+    E->>P: process request → run phases (POST_READ → … → CONTENT)
+    P->>U: proxy_pass — connect, send, read: own state machine
+    U-->>P: response headers + body
+    P->>C: output filters rewrite buffer chains → sendfile / writev
+    P->>P: finalize → LOG phase → destroy_pool frees everything at once
+```
+
+**Step 1 — The knock.** A listening socket becomes readable; the worker
+holding the accept mutex calls `ngx_event_accept`
+(`src/event/ngx_event_accept.c:21`): a new `ngx_connection_t` is
+created and `ngx_http_init_connection` (`src/http/ngx_http_request.c:211`)
+installs the first state — `ngx_http_process_request_line` (1115) — as
+the read handler.
+
+**Step 2 — Read the request line, piecewise.** Bytes arrive in dribs;
+`ngx_http_process_request_line` parses what it has and *returns* on a
+partial line (a yield — the loop goes off to serve other connections).
+Complete line → install the next handler:
+`ngx_http_process_request_headers` (1229).
+
+**Step 3 — Headers, then the phase engine.** With headers done,
+`ngx_http_process_request` (2126) hands over to
+`ngx_http_core_run_phases` (`src/http/ngx_http_core_module.c:894`) — a
+resumable loop over POST_READ, SERVER_REWRITE, FIND_CONFIG, REWRITE,
+PREACCESS, ACCESS, PRECONTENT, CONTENT. Async handlers return
+`NGX_AGAIN` and resume exactly where they stopped on a later event.
+
+**Step 4 — Proxy to the backend.** The content handler for `proxy_pass`
+is `ngx_http_upstream_init` (`src/http/ngx_http_upstream.c:549`): its
+own state machines connect, send the request, parse the upstream
+response, buffer to disk if needed, mark failures, retry peers — never
+blocking the worker.
+
+**Step 5 — Filters and out.** The response flows as chains of
+`ngx_buf_t` — filters (charset, gzip, ranges) rewrite chains, not
+streams; whole file ranges can be handed to `sendfile` without copying.
+A partial write leaves the chain pointing at the unsent remainder.
+
+**Step 6 — Tear down the tray.** finalize → LOG phase →
+`ngx_destroy_pool` (`src/core/ngx_palloc.c:47`): every allocation made
+for this request disappears in one call (cleanup handlers close files
+first). Ownership by lifetime: free is O(1).
+
+**Outcome — One request, zero blocks.** From accept to teardown the
+worker never slept on this connection: it rotated among hundreds of
+them, resuming each state machine exactly where it yielded. That, plus
+tray-shaped memory, is the throughput story — architecture, not tuning.
 
 ## 2. Core data structures — and why these
 
@@ -123,6 +207,29 @@ survives "the socket accepted 3KB of 10KB."
   choreography that survives failure at every step.
 - **Graceful vs immediate shutdown**: SIGQUIT drains (no new requests,
   existing finish), SIGTERM stops; timeouts hard-stop stragglers.
+
+```mermaid
+flowchart TD
+    M["master — owns no client state"]
+    subgraph wk["workers — shared nothing"]
+        A["worker A<br/>(own buffers, own open-file cache)"]
+        B["worker B"]
+        C["worker C — crashed!"]
+    end
+    SHM["shared-memory zones — the rare exception:<br/>ssl session cache, rate limits, upstream health<br/>(spinlocks / atomics, never the heap)"]
+    SIGCHLD["SIGCHLD → ngx_reap_children (174)<br/>reap and respawn"]
+    HUP["SIGHUP → ngx_init_cycle (39) with new config<br/>spawn NEW workers on the same listening fds<br/>old workers drain, then exit"]
+    USR2["SIGUSR2 → binary upgrade: exec new master,<br/>pass listening fds via environment, pid-file handover,<br/>old master lingers as fallback"]
+
+    M -->|"fork, inherit fds"| A
+    M -->|"fork"| B
+    M -->|"fork"| C
+    C -->|"one connection set lost, never the site"| SIGCHLD
+    M --> HUP
+    M --> USR2
+    A -.-> SHM
+    B -.-> SHM
+```
 
 ## 4. API and extension design
 

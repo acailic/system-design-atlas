@@ -14,27 +14,46 @@ and **heavy tool integrations (LSP, DAP) are data protocols at the
 edge**, so ecosystems can be polyglot. This deep-dive teaches how to
 design extensibility so a plugin explosion cannot kill the host.
 
+## Explain like I'm 10
+
+**A school where guest teachers get their own room — never the office.**
+VS Code is a school. The front office (the workbench — the UI you see)
+never lets guest teachers (extensions) teach from inside the office:
+each guest gets their own room next door (the extension host process),
+and talks to the office only through a mail slot with strict rules (a
+versioned API marshalled over RPC). A guest who breaks things can only
+wreck their own room — the school stays open, and the principal just
+reopens the room. The fanciest helpers — the ones who understand Python
+or C++ — don't even get a room in the building: they live in a separate
+building (their own process) and communicate by postcards written in a
+standard format (LSP) that ANY school can read — which is why the same
+helper works in other editors too.
+
+**Why the grown-ups did it this way:** with thousands of guest teachers
+of every skill level, isolation IS the feature — one bad guest must
+never be able to freeze or crash the editor everyone is typing in.
+
 ## 1. Architecture overview
 
-```
- ┌───────────────────────────────────────────────────────────┐
- │ Electron main (src/vs/code/electron-main)                 │
- │  windows, lifecycle, IPC plumbing                         │
- ├───────────────┬───────────────────────────────────────────┤
- │ Renderer /   │ Shared process        Utility process      │
- │ workbench    │ (file watchers, etc.) │ (electron-utility) │
- │ (src/vs/workbench) — UI, services, editor (src/vs/editor) │
- └──────┬────────────────────────────────────────────────────┘
-        │ dedicated child process, socket + PersistentProtocol
- ┌──────▼────────────────────────────────────────────────────┐
- │ EXTENSION HOST (src/vs/workbench/api/node/extensionHost-  │
- │  Process.ts) — runs all extension code (Node.js)          │
- │  API = vscode.d.ts surface, implemented by extHost*.ts    │
- │  proxies marshalled over RPCProtocol (rpcProtocol.ts:115) │
- └──────┬────────────────────────────────────────────────────┘
-        │ language servers run as MORE separate processes
- extensions/*-language-features: vscode-languageclient →
-   LSP servers (JSON, TS, CSS...) in any language
+```mermaid
+flowchart TD
+    subgraph desktop["Electron app"]
+        EM["electron main — src/vs/code/electron-main<br/>windows, lifecycle, IPC plumbing"]
+        WB["renderer / workbench — src/vs/workbench<br/>UI, services, editor (src/vs/editor)"]
+        SH["shared process — file watchers etc."]
+        UT["utility process"]
+    end
+    EH["EXTENSION HOST — src/vs/workbench/api/node/extensionHostProcess.ts<br/>runs ALL extension code (Node.js)<br/>API = vscode.d.ts, implemented by extHost*.ts<br/>proxies marshalled over RPCProtocol (rpcProtocol.ts 115)"]
+    subgraph edges["at the edge: data protocols"]
+        LSP["LSP language servers — own processes,<br/>any language (JSON, TS, CSS...)"]
+        DAP["DAP debug adapters"]
+    end
+
+    WB -->|"dedicated child process, socket + PersistentProtocol"| EH
+    WB --> SH
+    WB --> UT
+    EH --> LSP
+    EH --> DAP
 ```
 
 - The **spine** — "open a .json file, get completions" — is: the
@@ -45,6 +64,65 @@ design extensibility so a plugin explosion cannot kill the host.
   _activateByEvent:298` → `_activateExtension:421` → `_callActivate:494`)
   → the extension spawns/attaches a language server over LSP →
   completions flow back as data, rendered by built-in UI widgets.
+
+## Walkthrough: open a .json file, type a dot, get completions
+
+The spine as a story — step through it on the site or read straight
+down. Watch how many process boundaries the keystroke crosses without
+the UI ever risking a crash.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User (types in editor)
+    participant W as Workbench (renderer)
+    participant EH as Extension host (own process)
+    participant LS as Language server (LSP, another process)
+    U->>W: open config.json, type "na"
+    W->>EH: onLanguage:json activation event fires
+    EH->>EH: activate json-language-features (_activateByEvent 298)
+    EH->>LS: spawn / attach, capabilities handshake
+    W->>EH: completion request — marshalled over RPCProtocol (115)
+    EH->>LS: textDocument/completion (LSP, JSON over stdio)
+    LS-->>EH: completion items as data
+    EH-->>W: items return through the RPC object graph
+    W-->>U: built-in widget renders the list
+```
+
+**Step 1 — The file opens.** The workbench resolves the file's language
+from the `json` extension's declarative contribution. Nothing has run
+yet: contributions in `package.json` are data, merged at startup and
+rendered without executing extension code.
+
+**Step 2 — The activation event.** Opening a JSON file fires the
+`onLanguage:json` activation event declared in
+`extensions/json-language-features/package.json:16`. The host side
+asks the extension host to activate that extension:
+`_activateByEvent` (298) → `_activateExtension` (421) →
+`_callActivate` (494), with per-extension error capture.
+
+**Step 3 — The mail slot.** The extension's code runs in the extension
+host process and calls the `vscode` API — but every call is a proxy
+marshalled by `RPCProtocol` (`rpcProtocol.ts:115`): contexts hold
+named object references; arguments (URIs, buffers, positions) are
+serialized with revivers. The rich typed API is one uniform
+marshalling problem.
+
+**Step 4 — The postcard.** The extension starts (or attaches) a JSON
+language server in yet another process and speaks LSP: capabilities
+handshake, then `textDocument/completion` as JSON over stdio. The
+helper could be written in any language — the protocol is the contract,
+not the runtime.
+
+**Step 5 — Data comes home.** Completion items arrive as plain data,
+cross back through the RPC boundary, and are rendered by built-in UI
+widgets. The extension never touched a DOM node; the editor never ran
+extension code on its thread.
+
+**Outcome — Intelligence without risk.** A third-party language expert
+added deep editor behavior while isolated two process boundaries away.
+If it hangs, its requests time out; if it crashes, its process restarts
+— your unsaved buffer never noticed.
 
 ## 2. Core data structures — and why these
 
@@ -109,6 +187,26 @@ build config.
   protocol aggressively avoids round trips (bulk registration,
   buffered writes in `PersistentProtocol` from
   `base/parts/ipc/common/ipc.net.js`).
+
+```mermaid
+flowchart LR
+    subgraph procmap["the process map — isolation is the safety model"]
+        MAIN["electron main<br/>windows, lifecycle"]
+        REN["renderer / workbench<br/>the UI — NEVER runs extension code"]
+        EHP["extension host (child process)<br/>all extension code; RPCProtocol 115<br/>capability-checked API, no DOM"]
+        LS2["LSP / DAP servers<br/>own processes, often third-party binaries"]
+    end
+    HANG["hanging extension → its requests time out,<br/>one subsystem degrades, UI stays responsive"]
+    CRASH["crashing extension host → restarted,<br/>extensions reactivated, editor state intact"]
+    CRASH2["crashing language server → restarted,<br/>extension host untouched"]
+
+    MAIN --> REN
+    REN -->|"socket + PersistentProtocol"| EHP
+    EHP --> LS2
+    EHP -.-> HANG
+    EHP -.-> CRASH
+    LS2 -.-> CRASH2
+```
 
 ## 4. API and extension design
 

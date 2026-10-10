@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPython: the interpreter that won by making extensions easy — System Design Atlas</title>
+<meta name="description" content="CPython is the most widely run language implementation on earth, and it earned that through design decisions made decades before its popularity: a stable, approachable C API over a reference">
+<meta property="og:title" content="CPython: the interpreter that won by making extensions easy — System Design Atlas">
+<meta property="og:description" content="CPython is the most widely run language implementation on earth, and it earned that through design decisions made decades before its popularity: a stable, approachable C API over a reference">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-x-y-source-to-destruction">Walkthrough: x + y, source to destruction</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>CPython: the interpreter that won by making extensions easy</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/python/cpython" rel="noopener">Python-2.0 (PSF)</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>0ec3aee262b03276a18aeb23cb9957e1b57c9d08</code> · 2026-10-09, 3.16.0a0 trunk · <a href="https://github.com/python/cpython" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">CPython is the most widely run language implementation on earth, and it
+earned that through design decisions made decades before its
+popularity: a <strong>stable, approachable C API over a reference-counted
+object model</strong> (which is why NumPy, and thus the scientific stack,
+chose it), <strong>batteries-included stdlib</strong>, and the <strong>GIL</strong> — the
+trade-off that bought C-extension safety and single-threaded
+simplicity at the price of parallelism, now being unbundled via
+free-threading (PEP 703). This deep-dive teaches a complete interpreter
+in readable C: the bytecode loop, the object protocol, memory
+management, and how a runtime&#39;s extension contract decides its
+ecosystem.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A puppet theater where every puppet wears a name tag.</strong> Every puppet
+(every value) wears a tag that counts how many hands are holding it
+(the reference count). The moment the count reaches zero, that puppet is
+put away INSTANTLY — no waiting for cleanup day. Puppets holding hands
+with each other in a circle (reference cycles) never reach zero, so a
+periodic inspector (the garbage collector) walks the theater and finds
+those circles. And there&#39;s one house rule: only one storyteller (the
+GIL) may move puppets at a time — outside helpers who build new puppets
+(in C extensions) would otherwise yank the same puppet in two
+directions at once. Best of all: when the storyteller performs the same
+line about eight times, they memorize a shortcut for exactly that line
+(adaptive specialization) without changing the story.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> the name-tag rule made it safe
+for anyone to build new puppets in C — which grew the biggest puppet
+collection in the world (NumPy, PyTorch...), a prize worth more than
+the parallelism the one-storyteller rule postponed.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    SRC[&quot;.py source&quot;]
+    PEG[&quot;tokenize + parse (Parser/, PEG) → AST&quot;]
+    COMPILE[&quot;compile — Python/compile.c + codegen.c&quot;]
+    BC[&quot;bytecode code object&lt;br/&gt;co_code, consts, names&quot;]
+    subgraph eval[&quot;eval — Python/ceval.c _PyEval_EvalFrameDefault 1231&quot;]
+        SWITCH[&quot;giant switch over opcodes&lt;br/&gt;generated_cases.c.h (from bytecodes.c DSL)&quot;]
+        SPEC[&quot;adaptive: specialize.c —&lt;br/&gt;hot opcodes rewrite into specialized forms&quot;]
+        T2[&quot;tier-2 uops — executor_cases.c.h&quot;]
+    end
+    subgraph obj[&quot;object model — Include/object.h&quot;]
+        PYO[&quot;PyObject: refcount + type pointer&lt;br/&gt;Py_INCREF / Py_DECREF&quot;]
+        GCD[&quot;cycle GC — Python/gc.c (containers only)&quot;]
+        ALLOC[&quot;pymalloc arenas — Objects/obmalloc.c&quot;]
+    end
+    STDLIB[&quot;builtins &amp; stdlib — Objects/*object.c, Modules/*.c&lt;br/&gt;extension modules via PyModuleDef&quot;]
+    GIL[&quot;threading: GIL — Python/ceval_gil.c&lt;br/&gt;or free-threaded build (Py_GIL_DISABLED)&quot;]
+
+    SRC --&gt; PEG --&gt; COMPILE --&gt; BC --&gt; SWITCH
+    SWITCH --&gt; SPEC --&gt; T2
+    SWITCH --&gt;|&quot;PyObject* on a value stack&quot;| PYO
+    PYO --&gt; GCD
+    PYO --&gt; ALLOC
+    PYO --&gt; STDLIB
+    GIL -.-&gt; SWITCH
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — one <code>x + y</code> — is: the compiler emits
+<code>BINARY_OP</code>; the eval loop&#39;s <code>TARGET(BINARY_OP)</code> case
+(<code>Python/generated_cases.c.h:21</code>) pops two <code>PyObject*</code> and calls the
+slot in <code>ob_type</code>; after ~8 executions the instruction specializes
+to <code>BINARY_OP_ADD_FLOAT</code> (<code>generated_cases.c.h:99</code>) which inlines
+the float fast-path.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-x-y-source-to-destruction">Walkthrough: x + y, source to destruction</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. One tiny expression exercises the compiler, the eval loop,
+specialization, the object protocol, and the allocator.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant S as Source (x + y)
+    participant C as compiler (compile.c)
+    participant E as eval loop (ceval.c 1231)
+    participant O as object protocol (ob_type slots)
+    participant M as memory (pymalloc + GC)
+    S-&gt;&gt;C: compile → stack program, one opcode: BINARY_OP
+    C-&gt;&gt;E: execute generated_cases.c.h TARGET(BINARY_OP) 21
+    E-&gt;&gt;E: pop two PyObject* from the value stack
+    E-&gt;&gt;O: dispatch via ob_type slot (nb_add)
+    O--&gt;&gt;E: result PyObject* pushed
+    Note over E: after ~8 runs: specialize.c rewrites to BINARY_OP_ADD_FLOAT 99&lt;br/&gt;with a guard that deopts back if types change
+    E-&gt;&gt;M: later: last DECREF → dealloc → pymalloc pool / cycle GC
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="compile-to-a-stack-program">Compile to a stack program</h3>
+<p><code>Python/compile.c</code> +
+<code>Python/codegen.c</code> turn the AST for <code>x + y</code> into a tiny bytecode
+program: load <code>x</code>, load <code>y</code>, <code>BINARY_OP</code> (add). Operands will be
+<code>PyObject*</code> values on a per-frame stack.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="enter-the-loop">Enter the loop</h3>
+<p><code>_PyEval_EvalFrameDefault</code>
+(<code>Python/ceval.c:1231</code>) is one <code>for(;;)</code> with a colossal switch —
+but the cases are <em>generated</em>: <code>Python/bytecodes.c</code> is the DSL that
+produces <code>generated_cases.c.h</code> and the tier-2 uop executor.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="dispatch-through-the-type">Dispatch through the type</h3>
+<p><code>TARGET(BINARY_OP)</code>
+(<code>generated_cases.c.h:21</code>) pops two <code>PyObject*</code> and calls the slot in
+<code>ob_type</code> — behavior lives in the type object, never in the instance
+(<code>Include/object.h:127</code>). A <code>float</code> plus a <code>float</code> takes the float
+path; a custom class takes its <code>__add__</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-shortcut-forms">The shortcut forms</h3>
+<p>After ~8 executions, <code>specialize.c</code>
+rewrites the instruction in place to <code>BINARY_OP_ADD_FLOAT</code> (99): a
+guarded fast path that inlines the float add. If a string ever shows
+up, the guard fails and the instruction deoptimizes to the generic
+case — same semantics, faster common case, portable C everywhere.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="death-by-name-tag">Death by name tag</h3>
+<p>When the result&#39;s refcount drops to
+zero, <code>Py_DECREF</code> runs the type&#39;s dealloc immediately — deterministic
+cleanup. The bytes return to a pymalloc pool (<code>Objects/obmalloc.c</code>);
+only objects inside reference cycles wait for the generational GC
+(<code>Python/gc.c</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-complete-life-of-a-value">The complete life of a value</h3>
+<p>Source text → bytecode →
+generated interpreter → type dispatch → specialized fast path →
+reference-counted destruction: you have traced what &quot;everything is an
+object&quot; costs and pays, opcode by opcode.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="pyobject-one-header-to-rule-everything-include-object-h-127"><code>PyObject</code>: one header to rule everything (<code>Include/object.h:127</code>)</h3>
+<p>Every value is a <code>struct _object</code>: a refcount (with immortal-object
+special values, since 3.12 — see the union at the top of the struct)
+and a pointer to its type object. Everything else — &quot;methods&quot;,
+&quot;attributes&quot;, &quot;subclassing&quot; — is <em>behavior of the type object</em>, not of
+instances. Why: one uniform memory layout lets C code hold &quot;any
+Python value&quot; as <code>PyObject*</code> and dispatch through <code>ob_type</code> slots —
+the entire C API falls out of this single decision.</p>
+<h3 id="the-eval-loop-as-generated-switch">The eval loop as generated switch</h3>
+<p>(<code>Python/bytecodes.c</code> → <code>Python/generated_cases.c.h</code>)</p>
+<p>The interpreter&#39;s cases live in <code>bytecodes.c</code> in a DSL; the build
+generates the C switch (<code>generated_cases.c.h</code>) <strong>and</strong> the tier-2
+micro-op executor (<code>Python/executor_cases.c.h</code>). Since 3.11,
+instructions adapt at runtime (<code>Python/specialize.c</code>): hot generic
+opcodes rewrite themselves into specialized variants
+(<code>BINARY_OP_ADD_FLOAT</code>) with guards that deoptimize back to the
+generic case. Why: portable C (no JIT per-architecture) plus
+data-driven codegen keeps one interpreter across 30+ build targets
+while still beating the naive switch by large factors.</p>
+<h3 id="frames-and-the-value-stack-python-ceval-c">Frames and the value stack (<code>Python/ceval.c</code>)</h3>
+<p>Execution state is a <code>_PyInterpreterFrame</code> — locals, a stack of
+<code>PyObject*</code>, a bytecode pointer — making coroutines/generators cheap:
+suspend = save the frame (no thread, no copy of the world). The eval
+breaker (checked between bytecodes) is where signals, GIL handoffs,
+and async exceptions enter; it is the interpreter&#39;s cooperative
+scheduling point.</p>
+<h3 id="pymalloc-arenas-objects-obmalloc-c">pymalloc arenas (<code>Objects/obmalloc.c</code>)</h3>
+<p>Small objects come from size-class pools packed into mmap&#39;d arenas
+(<code>ARENAS_USE_MMAP</code> around line 544); arenas are returned to the OS when
+empty. Why: Python programs allocate millions of tiny objects; a
+dedicated allocator for the ≤512B world halves the cost of the
+refcount-heavy object model. (Free-threaded builds swap in mimalloc.)</p>
+<h3 id="the-gil-python-ceval-gil-c">The GIL (<code>Python/ceval_gil.c</code>)</h3>
+<p>One mutex-like lock per interpreter guards the whole object graph:
+<code>take_gil</code> (575) / <code>drop_gil</code> (203) wrap sections of the eval loop,
+with a switch-interval so threads rotate fairly. The same file carries
+the future: <code>#ifdef Py_GIL_DISABLED</code> (75, 231, 313) is the
+free-threaded build where the GIL disappears and per-object
+synchronization (biased refcounting, deferred RC) takes over.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Threads exist, but the GIL serializes bytecode</strong> — by design, so
+that C extensions written against a simple memory model do not
+corrupt the heap. I/O and C extensions release the GIL explicitly
+(<code>Py_BEGIN_ALLOW_THREADS</code>); that is why Python threads work fine for
+I/O-bound and wrapping-C workloads.</li>
+<li><strong>The escape hatches are architectural</strong>: multiprocessing (processes
+over the same interpreter), async (event loop <em>in libraries</em> — the
+runtime provides generators/frames, not a scheduler), and now the
+free-threaded build (PEP 703) where the interpreter itself goes
+GIL-less.</li>
+<li><strong>Memory safety by refcounting + cycle GC</strong>: objects die
+deterministically when the last reference drops (<code>Py_DECREF</code> →
+dealloc); reference <em>cycles</em> are collected by the generational GC
+(<code>Python/gc.c</code>, <code>gc_alloc</code> at 2012) which tracks only
+container objects. Failure = exceptions: every C API call returns
+NULL/-1 and sets an error indicator — no unwinding machinery beyond
+a per-thread error state plus <code>try/finally</code> frames.</li>
+<li><strong>Startup is bootstrap-by-frozen-module</strong>: <code>Python/frozen.c</code>
+compiles importlib <em>into</em> the binary so the interpreter can bootstrap
+its module system without a working filesystem story first.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph rt[&quot;the runtime&quot;]
+        LOOP2[&quot;eval loop — checks the eval breaker&lt;br/&gt;between bytecodes: signals, GIL handoff&quot;]
+        GIL2[&quot;the GIL — ceval_gil.c&lt;br/&gt;take_gil 575 / drop_gil 203,&lt;br/&gt;switch interval for fairness&quot;]
+        FT[&quot;free-threaded build — Py_GIL_DISABLED (75/231/313):&lt;br/&gt;biased refcounts, deferred RC, per-object sync&quot;]
+    end
+    subgraph threads[&quot;Python threads&quot;]
+        T1[&quot;thread 1 — bytecode&quot;]
+        T2[&quot;thread 2 — bytecode&lt;br/&gt;(serialized by the GIL)&quot;]
+        T3[&quot;thread 3 — in C or I/O&lt;br/&gt;(Py_BEGIN_ALLOW_THREADS: GIL released)&quot;]
+    end
+    subgraph mem[&quot;memory&quot;]
+        POOL[&quot;pymalloc — size-class pools in mmap&#39;d arenas&lt;br/&gt;small objects never touch malloc&quot;]
+        GCO[&quot;cycle GC — generational,&lt;br/&gt;tracks container objects only&quot;]
+    end
+
+    T1 --&gt; GIL2
+    T2 --&gt; GIL2
+    T3 -.-&gt;|&quot;explicit release around blocking work&quot;| GIL2
+    LOOP2 --&gt; GIL2
+    GIL2 -.-&gt;|&quot;the successor&quot;| FT
+    LOOP2 --&gt; POOL
+    LOOP2 --&gt; GCO
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The <strong>C API is the product</strong>: <code>PyModuleDef</code>/<code>PyMethodDef</code>
+registration (see any <code>Modules/_csv.c</code>-style module, e.g. module def
+at line 41), <code>PyObject*</code> in/out, <code>METH_VARARGS</code> calling conventions,
+and the stable ABI (<code>Py_LIMITED_API</code>) that lets one compiled
+extension run across versions. This contract is why the ecosystem
+exists; its accidental complexity (borrowed vs owned references) is
+the tax every extension author pays.</li>
+<li><strong>Everything is overridable from the type object</strong>: <code>__add__</code>,
+<code>__getattr__</code>, iteration — the slots are the extension surface; pure
+Python and C extensions customize through the same mechanism.</li>
+<li>Honest wart: the GIL&#39;s memory-model simplicity made 25 years of
+extensions <em>possible</em> and is now the thing being carefully unbundled
+(biased refcounts, <code>Py_mod_gil</code> module flag to opt builds) — a live
+lesson in how a founding trade-off is retired without breaking the
+world.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-reference-counting-cycle-gc-over-tracing-only-gc">Trade-off 1: reference counting + cycle GC over tracing-only GC</h3>
+<ul>
+<li><strong>Tension:</strong> deterministic cleanup and C interop vs collection
+pause profiles.</li>
+<li><strong>Choice:</strong> every object counts references; containers additionally
+register with the generational cycle collector.</li>
+<li><strong>Evidence:</strong> <code>Include/object.h</code> refcount field + <code>Py_INCREF</code>/
+<code>Py_DECREF</code>; <code>Python/gc.c:gc_alloc:2012</code> for GC-tracked allocation;
+immortal objects (PEP 683) for the refcount-hot static ones.</li>
+<li><strong>Given up:</strong> perfect cycle handling (the GC only finds cycles among
+tracked containers), refcount churn on every assignment, and the
+famous GIL-refcount interplay in free-threading (biased counting).</li>
+<li><strong>Verdict:</strong> deterministic <code>__del__</code> and trivial C interop (just
+INCREF/DECREF) built the extension ecosystem. GC languages with
+better pause profiles paid in FFI friction — the opposite bet.</li>
+</ul>
+<h3 id="trade-off-2-the-gil-over-fine-grained-locking">Trade-off 2: the GIL over fine-grained locking</h3>
+<ul>
+<li><strong>Tension:</strong> threads exist in the runtime; C extensions were written
+by non-experts.</li>
+<li><strong>Choice:</strong> one global lock guarding bytecode execution; extensions
+release it around blocking work.</li>
+<li><strong>Evidence:</strong> <code>Python/ceval_gil.c</code> (<code>take_gil:575</code>, <code>drop_gil:203</code>,
+switch interval); <code>#ifdef Py_GIL_DISABLED</code> showing the successor.</li>
+<li><strong>Given up:</strong> CPU-parallel Python threads for 25 years; scaling meant
+processes (multiprocessing) or event loops (asyncio).</li>
+<li><strong>Verdict:</strong> the &quot;wrong&quot; trade-off that was right: it made CPython&#39;s
+C API safe enough that NumPy/Pandas/torch could exist, and those —
+not the language — won the workloads. Retiring it (free-threading)
+is a decade-scale surgery precisely because the contract was load-
+bearing.</li>
+</ul>
+<h3 id="trade-off-3-adaptive-bytecode-specialization-over-a-jit">Trade-off 3: adaptive bytecode specialization over a JIT</h3>
+<ul>
+<li><strong>Tension:</strong> near-JIT speed without per-platform compiler
+engineering.</li>
+<li><strong>Choice:</strong> instructions rewrite themselves into guarded
+specializations in the same C switch; an experimental JIT exists
+but the mainstream is specialization.</li>
+<li><strong>Evidence:</strong> <code>Python/specialize.c</code>; the generic <code>TARGET(BINARY_OP)</code>
+(<code>generated_cases.c.h:21</code>) vs <code>BINARY_OP_ADD_FLOAT</code> (99); tier-2
+uops in <code>executor_cases.c.h</code>; <code>Python/bytecodes.c</code> as single source
+for all tiers.</li>
+<li><strong>Given up:</strong> peak performance of a real JIT (though 3.13+ brings an
+optional one); complexity budget now spent on two tiers + deopt.</li>
+<li><strong>Verdict:</strong> portability-first thinking: one codegen source, many
+backends, correctness preserved by guards. The 3.11 speed-ups
+proved the ceiling was higher than &quot;interpreter&quot; implied.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>Include/object.h</code> (lines ~100-260) — <code>struct _object</code>, <code>PyVarObject</code>,
+refcount macros; read until &quot;everything is this header + a type
+object&quot; feels true.</li>
+<li><code>Objects/typeobject.c</code> — skim <code>tp_*</code> slots and <code>PyObject_GetAttr</code>:
+the entire attribute protocol as table lookups.</li>
+<li><code>Python/ceval.c:_PyEval_EvalFrameDefault</code> (1231) — read the loop
+scaffolding (stack, dispatch, eval-breaker checks), then three
+cases in <code>Python/generated_cases.c.h</code>: <code>TARGET(BINARY_OP)</code> (21),
+<code>BINARY_OP_ADD_FLOAT</code> (99), and <code>LOAD_FAST</code>; open
+<code>Python/bytecodes.c</code> to see the same cases in their source-of-truth
+DSL.</li>
+<li><code>Python/specialize.c</code> — how the adaptive rewrite decides (feedback
+counters) and what deoptimizes; then peek at
+<code>Python/executor_cases.c.h</code> for tier 2.</li>
+<li><code>Python/compile.c</code> + <code>Python/codegen.c</code> — symbol table pass, scopes,
+and how expressions become stack programs (compile a function with
+<code>dis</code> alongside).</li>
+<li><code>Objects/obmalloc.c</code> (~400-650) — arena mmap, pool size classes,
+the small-object lifecycle; note the free-threading alternative.</li>
+<li><code>Python/gc.c</code> — <code>gc_alloc</code> (2012) and the generation collection
+entry points: tracking containers, untrackable optimizations.</li>
+<li><code>Python/ceval_gil.c</code> — <code>take_gil</code> (575), <code>drop_gil</code> (203), the
+switch interval; then the <code>Py_GIL_DISABLED</code> blocks (75/231/313) to
+see what free-threading replaces them with.</li>
+<li><code>Objects/unicodeobject.c</code> (skim ~200 lines of the header comments)
+— the most engineered file in the tree: PEP 393 flexible string
+representation; it teaches what &quot;optimize the dominant object&quot;
+looks like.</li>
+<li><code>Modules/_csv.c</code> — a complete classic extension: <code>PyModuleDef</code>
+(41), method tables (687+), argument parsing, error returns.
+Write a 30-line module yourself against this template.</li>
+<li><code>Python/frozen.c</code> + <code>Python/import.c</code> — bootstrap: the interpreter
+unpacks a frozen importlib to get <code>import</code> working; follow the
+first import of a real module end-to-end.</li>
+</ol>
+<p>You have now traced <code>x + y</code> from source text through compilation,
+adaptive interpretation, object dispatch, allocation, and destruction —
+the complete life of a Python value.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>One uniform object header + type slots</strong> makes an FFI tractable:
+CPython&#39;s entire embedding story is <code>PyObject*</code> + <code>ob_type</code>.</li>
+<li><strong>Reference counting buys determinism and interop</strong>; if you add a
+cycle GC for containers only, you keep most of the benefit at a
+fraction of the cost.</li>
+<li><strong>Generate your interpreter, don&#39;t hand-write it</strong> (bytecodes.c):
+one DSL → switch + uops + metadata kept the codebase portable while
+it got fast.</li>
+<li><strong>Adaptive specialization over JIT</strong> when portability dominates:
+guarded instruction rewriting is a controllable performance ladder.</li>
+<li><strong>A founding simplification can be worth more than the feature it
+blocks</strong> — the GIL made the extension ecosystem possible; retiring
+it is possible only because that contract already won.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong> — genuinely one of the most readable large
+C codebases; the challenge is breadth, not obscurity.</li>
+<li>Budget: ~6 hours for the reading path; ceval + object model is a
+satisfying 3-hour core.</li>
+<li>Prerequisites: C pointers/structs fluency, what bytecode is, basic
+allocator concepts. No parser theory needed (the PEG parser is
+optional reading).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>PEPs 683 (immortal objects), 703 (free-threading), 659
+(specializing interpreter), 393 (unicode) — each documents a
+trade-off this deep-dive points at in code.</li>
+<li>&quot;Python&#39;s new interpreter&quot; talk series (Guido van Rossum /
+Brandt Bucher on 3.11 speed-ups) — the specialization story told by
+its authors.</li>
+<li>The devguide in-repo (<code>Doc/tools/</code> + <a href="https://devguide.python.org">https://devguide.python.org</a>)
+for building and instrumenting your clone.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../kubernetes/"><span class="dir">← Previous dive</span>Kubernetes: desired state + reconcile loops — an operating system as a control system</a>
+  <a href="../moby/" style="text-align:right"><span class="dir">Next dive →</span>Moby/Docker: images as content-addressed layers, execution as delegation</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 9 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

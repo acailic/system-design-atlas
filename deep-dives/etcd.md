@@ -17,24 +17,52 @@ teaches the gap between a consensus paper and a service: leases,
 linearizable reads, and why every read needs an explicit consistency
 decision.
 
+## Explain like I'm 10
+
+**A club notebook that most members must agree on.** etcd is a club with
+one precious notebook (the keyspace). Any important note (a Put) is
+only written after MOST members agree on the next line (a quorum in the
+Raft vote) — so the notebook never contradicts itself, even if some
+members nap or storm off. Every line gets a number (a revision), so you
+can ask "read me the notebook as of line 500" (a watch) or "read me only
+notes newer than line 500." Even "this note expired at noon" goes
+through the notebook (leases), so a member who missed the meeting can
+never secretly disagree later. And reading has two speeds: quick,
+straight from your copy (maybe slightly old), or confirmed-fresh — the
+leader first checks the club still agrees, then answers (ReadIndex).
+
+**Why the grown-ups did it this way:** with most-members agreement,
+even power cuts and split rooms can't produce two disagreeing
+notebooks — the difference between "probably fine" and "provably
+agreed," which is exactly what Kubernetes needs under it.
+
 ## 1. Architecture overview
 
-```
- client (gRPC: Range/Txn/Watch/Lease)
-        │
- ┌──────▼─────── EtcdServer (server/etcdserver/server.go) ─────────┐
- │ raftNode adapter (server.go raft.go:81) ── Ready() pump ──►      │
- │   raft library (etcd-io/raft: deterministic FSM)                │
- │ proposals → raft log → committed → apply loop (run:751,         │
- │   applyEntries:1180) → applier pipeline (apply/uber_applier)    │
- ├──────────────────────────────────────────────────────────────────┤
- │ storage: WAL (storage/wal/wal.go)  + backend (boltdb)           │
- │   MVCC keyspace (storage/mvcc/kvstore.go) + watchers            │
- │   (watchable_store.go), leases (lease/lessor.go)                │
- ├──────────────────────────────────────────────────────────────────┤
- │ reads: local (serializable) | ReadIndex (linearizable,          │
- │   etcdserver/read/read.go) — never trust stale local state      │
- └──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    C["client — gRPC: Range / Txn / Watch / Lease"]
+    subgraph server["EtcdServer — server/etcdserver/server.go"]
+        ADAPT["raftNode adapter (server.go raft.go 81)<br/>pumps Ready(): persist → send → apply"]
+        RAFT["raft library — etcd-io/raft<br/>deterministic FSM, no goroutines of its own"]
+        RUN["run loop (751) → applyEntries (1180)<br/>→ applier pipeline"]
+        READ["reads: serializable (local)<br/>| linearizable — ReadIndex (read/read.go 109)"]
+    end
+    subgraph store["storage"]
+        WALF["WAL — storage/wal/wal.go<br/>Save 1000, ReadAll 477"]
+        MVCC["MVCC keyspace — storage/mvcc/kvstore.go<br/>every mutation at a revision; currentRev 72"]
+        WATCH["watchable store — synced push (notify 470),<br/>unsynced catch-up"]
+        LEASE["leases — lease/lessor.go Grant 281<br/>expiry applied as normal entries"]
+    end
+    BE[("backend — boltdb B+tree")]
+
+    C --> ADAPT
+    ADAPT <--> RAFT
+    ADAPT --> WALF
+    RUN --> MVCC --> BE
+    MVCC --> WATCH
+    RUN --> LEASE
+    C --> READ
+    READ -.-> MVCC
 ```
 
 - The **spine** — one `Put` — is: gRPC handler wraps it as a proposal →
@@ -44,6 +72,67 @@ decision.
   runs a backend transaction on the MVCC store, bumping `currentRev`
   (`kvstore.go:72`) → watchers are notified
   (`watchable_store.go:470`) → the client's proposal future resolves.
+
+## Walkthrough: one Put, proposal to watch notification
+
+The spine as a story — step through it on the site or read straight
+down. Count the places where durability is bought before visibility.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client (gRPC Put)
+    participant R as raft library (Step 1089)
+    participant W as WAL (wal.go Save 1000)
+    participant F as follower peers
+    participant A as apply loop (run 751)
+    participant M as MVCC store + watchers
+    C->>R: proposal: Put key value
+    R->>R: leader appends entry to the raft log
+    R->>W: Save — fsync before anything else
+    R->>F: MsgApp replicate the entry
+    F-->>R: MsgAppResp — quorum reached
+    R->>R: commit index advances
+    A->>M: applyEntries (1180) — backend txn, currentRev++
+    M->>M: notify synced watchers (470)
+    A-->>C: proposal future resolves — done
+```
+
+**Step 1 — Wrap the wish as a proposal.** The gRPC handler turns
+`Put(key, value)` into a raft proposal and funnels it into `Step`
+(`etcd-io/raft/raft.go:1089`) — a single message-driven function. The
+raft state machine itself owns no goroutines: it only computes what
+should happen next.
+
+**Step 2 — Persist before you promise.** The leader appends the entry
+to its log and the host's `raftNode` adapter writes it to the WAL
+(`wal.go:Save:1000`, length-crc framed records) — persistence ordering
+is the host's explicit responsibility in the Ready contract.
+
+**Step 3 — Ask the club.** The entry ships to followers in `MsgApp`;
+peers persist it and answer `MsgAppResp`. When a quorum has it, the
+commit index advances — the line is now official.
+
+**Step 4 — Apply, don't improvise.** The server's single consumer loop
+(`run`, 751) picks up committed entries and `applyEntries` (1180) hands
+them to the applier, which runs a backend transaction on the MVCC
+store — deterministic, or it's a design bug.
+
+**Step 5 — Stamp and shout.** The mutation lands at a fresh revision
+(`currentRev`, `kvstore.go:72`); synced watchers are notified by push
+(`watchable_store.go:470`) — watchers that joined at an older revision
+are caught up from history first by `syncWatchers`.
+
+**Step 6 — The future resolves.** The client's Put returns only now:
+persisted on a quorum, applied, visible to watchers. Reads that need
+guaranteed freshness go through ReadIndex (`read/read.go:109`) — the
+leader confirms its commit index with one heartbeat round, then serves
+from local state.
+
+**Outcome — A write that survives the worst night.** As long as a
+majority of members (and their disks) live, this Put survives crashes,
+partitions, and restarted peers — and every watcher sees it at a
+numbered point in history.
 
 ## 2. Core data structures — and why these
 
@@ -118,6 +207,27 @@ resurrect expired keys differently than the majority.
   check (apply/ has an explicit corruption detector). Anything not
   through the log does not exist — same WAL discipline as PostgreSQL
   and LevelDB in this atlas.
+
+```mermaid
+flowchart LR
+    subgraph svc["service edges — where concurrency lives"]
+        GRPC["gRPC handlers<br/>(many concurrent callers)"]
+        WF["watcher fan-out"]
+    end
+    subgraph core2["the serialized core — one consumer"]
+        RUNL["EtcdServer.run (751)<br/>single consumer of committed entries"]
+        STEPF["proposals funnel through channels<br/>into raft Step (1089)"]
+    end
+    subgraph raftside["the deterministic library"]
+        RAFTS["struct raft (343) — no channels, no locks,<br/>same messages in → same state out"]
+        READY["Ready() bundle: entries to persist,<br/>messages to send, entries to apply —<br/>host executes all I/O"]
+    end
+    PART["minority partition: serves serializable (stale)<br/>reads; writes and linearizable reads fail;<br/>divergent tails truncated on heal"]
+
+    GRPC --> STEPF --> RAFTS --> READY --> RUNL
+    RUNL --> WF
+    PART -.-> RUNL
+```
 
 ## 4. API and extension design
 

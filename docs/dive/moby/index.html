@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moby/Docker: images as content-addressed layers, execution as delegation — System Design Atlas</title>
+<meta name="description" content="Docker (the Moby project) made containers the default unit of software delivery by wrapping Linux primitives in one product-shaped design: images as immutable, content-addressed, copy-on-wri">
+<meta property="og:title" content="Moby/Docker: images as content-addressed layers, execution as delegation — System Design Atlas">
+<meta property="og:description" content="Docker (the Moby project) made containers the default unit of software delivery by wrapping Linux primitives in one product-shaped design: images as immutable, content-addressed, copy-on-wri">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-docker-run-nginx-walkie-talkie-to-running-container">Walkthrough: docker run nginx, walkie-talkie to running container</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Moby/Docker: images as content-addressed layers, execution as delegation</h1>
+    <div class="meta-chips"><span class="chip domain">container</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/moby/moby" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>9fabd6dfbb926381278c436a866bc8d6ac222274</code> · 2026-10-09, master · <a href="https://github.com/moby/moby" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Docker (the Moby project) made containers the default unit of software
+delivery by wrapping Linux primitives in one product-shaped design:
+<strong>images as immutable, content-addressed, copy-on-write layer stacks</strong>
+plus <strong>one daemon with a REST API</strong> behind a single-command UX. This
+deep-dive teaches how a packaging format became an ecosystem contract
+(layer digests, registries, OCI), how the daemon delegates execution
+down a deliberate chain (dockerd → containerd → runc), and what the
+daemon-centric bet bought and cost.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A program shipped as a stack of clear plastic sheets.</strong> Instead of
+mailing someone a whole heavy toy box (a whole computer disk image),
+Docker ships a stack of clear sheets: each sheet has part of the drawing
+(a layer), plus a fingerprint of exactly what&#39;s drawn on it (a digest).
+Running the program = laying the stack on a lightbox and putting ONE
+blank sheet on top to draw on (the writable layer): everything you change
+shows up on the top sheet, and the sheets below never get ink on them —
+so a hundred people can share the same bottom sheets. A butler (the
+dockerd daemon) answers your walkie-talkie (the REST API), fetches the
+sheets from a library (the registry), checks every fingerprint, and
+hands the actual running-around work to specialists (containerd, then
+runc).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> fingerprints mean two strangers
+can exchange sheets with zero trust — if the fingerprint matches, the
+sheet is provably identical — so sharing, caching, and verifying
+programs became free, and that made &quot;works on my machine&quot; a solved
+problem.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CLI[&quot;docker CLI&quot;]
+    subgraph daemon[&quot;dockerd — cmd/dockerd, daemon/daemon.go&quot;]
+        IMG[&quot;image mgmt — daemon/images/&lt;br/&gt;image_pull.go PullImage 26&quot;]
+        LAYERS[&quot;layer mgmt — daemon/internal/layer/&lt;br/&gt;layer_store.go: chain IDs, refcounts&quot;]
+        GD[&quot;graphdrivers — daemon/graphdriver/&lt;br/&gt;overlay2 (default), btrfs, zfs, vfs&lt;br/&gt;priority list driver_linux.go 4&quot;]
+        CREAT[&quot;container records — daemon/create.go 44&lt;br/&gt;Config + HostConfig + State&quot;]
+    end
+    REG[&quot;registry (pull by digest)&quot;]
+    CD[&quot;containerd — per-host supervisor&quot;]
+    RUNC[&quot;runc — OCI runtime: namespaces + cgroups + pivot_root&quot;]
+
+    CLI --&gt;|&quot;REST /v1.xx&quot;| daemon
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<pre><code>IMG --&gt;|&quot;manifest → layer blobs&quot;| REG
+IMG --&gt; LAYERS --&gt; GD
+CREAT --&gt; LAYERS
+daemon --&gt;|&quot;prepare OCI bundle, delegate&quot;| CD --&gt; RUNC
+</code></pre>
+<ul>
+<li>The <strong>spine</strong> — <code>docker run nginx</code> — is: CLI POSTs to the daemon →
+image resolved/pulled (<code>daemon/images/image_pull.go:PullImage:26</code>) →
+layers registered in the layer store
+(<code>daemon/internal/layer/layer_store.go</code>) → container record created
+(<code>daemon/create.go:CreateManagedContainer:44</code>) → a writable layer
+mounted over the image stack (<code>CreateRWLayer:474</code> in the layer
+store) → start (<code>daemon/start.go:ContainerStart:49</code>) hands the
+prepared bundle to the runtime (containerd/runc).</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-docker-run-nginx-walkie-talkie-to-running-container">Walkthrough: docker run nginx, walkie-talkie to running container</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. Notice how the fingerprints do the heavy lifting.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant U as User (docker CLI)
+    participant D as dockerd (REST API)
+    participant R as Registry
+    participant L as Layer store + graphdriver
+    participant RT as containerd → runc
+    U-&gt;&gt;D: POST /containers/create + start (image: nginx)
+    D-&gt;&gt;R: PullImage (26) — manifest → layer blobs by digest
+    R--&gt;&gt;L: blobs arrive; every digest verified
+    L-&gt;&gt;L: register layers by ChainID, dedupe across images
+    L-&gt;&gt;L: CreateRWLayer (474) — blank sheet on top of the stack
+    D-&gt;&gt;RT: prepare OCI bundle, delegate start
+    RT--&gt;&gt;U: container running (namespaces + cgroups)
+    Note over L,RT: identical digests = identical filesystem, on any host
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-ask">The ask</h3>
+<p><code>docker run nginx</code> is two REST calls: create and
+start. The CLI is a thin client — every tool built on Docker speaks the
+same versioned API (<code>api/types/</code> is the typed surface).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="fetch-the-sheets">Fetch the sheets</h3>
+<p>The image isn&#39;t local, so
+<code>daemon/images/image_pull.go:PullImage</code> (26) talks to the registry:
+read the manifest, then download each layer blob — each one named by
+its digest, each one verified as it lands.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="file-them-once">File them once</h3>
+<p>The layer store
+(<code>daemon/internal/layer/layer_store.go:31</code>) registers each blob under
+its <code>ChainID</code> with reference counting. Two images sharing a base layer
+store it once; the fingerprint IS the name, so dedup is automatic.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="make-the-container-record">Make the container record</h3>
+<p><code>CreateManagedContainer</code>
+(<code>daemon/create.go:44</code>) writes the declarative triple — <code>Config</code>
+(what to run), <code>HostConfig</code> (where and how: mounts, resources, restart
+policy), <code>State</code> (what we observed) — and pins the image reference.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="blank-sheet-on-top">Blank sheet on top</h3>
+<p><code>CreateRWLayer</code> (474) mounts the image
+stack read-only through the graphdriver (overlay2 by default) plus one
+writable layer — copy-on-write: reads fall through the stack, writes
+land on top.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="delegate-the-running">Delegate the running</h3>
+<p><code>ContainerStart</code> (<code>daemon/start.go:49</code>)
+checks the state-machine gates, prepares an OCI bundle, and hands off
+down the chain: containerd supervises, runc sets up namespaces/cgroups
+and execs the process. The daemon re-adopts running containers on
+restart (live-restore) because execution state isn&#39;t in its memory.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="same-bytes-same-world">Same bytes, same world</h3>
+<p>The container runs in an
+environment provably identical on every host that trusts the same
+fingerprints — which is the entire product, delivered by content
+addressing plus delegation.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-layer-store-content-addressed-cow-stack">The layer store: content-addressed CoW stack</h3>
+<p>(<code>daemon/internal/layer/</code>)</p>
+<p>An image is a chain of layers; each layer is identified by a digest of
+its content, and a stack&#39;s identity is its <code>ChainID</code> (digest of
+parent+diff). <code>layerStore</code> (<code>layer_store.go:31</code>) maps chain IDs to
+read-only layers (<code>layer.go:62</code>) with reference counting; containers
+add one writable layer (<code>RWLayer:95</code>, created by <code>CreateRWLayer:474</code>).
+Why content-addressed: identical layers dedupe globally (across images
+and hosts), integrity is free, and registries become dumb digest-keyed
+blob stores — the same CAS bet git makes, applied to filesystems.</p>
+<h3 id="graphdrivers-pluggable-cow-filesystems">Graphdrivers: pluggable CoW filesystems</h3>
+<p>(<code>daemon/graphdriver/</code>)</p>
+<p>Layers materialize via a driver interface — <code>overlay2</code> by default,
+priority list at <code>driver_linux.go:4</code> (<code>overlay2,fuse-overlayfs,btrfs, zfs,vfs</code>). Each driver implements the same diff/apply/quotas surface;
+the daemon never learns filesystem specifics. Why: the CoW mechanism
+is kernel- and storage-backend-specific, but the <em>model</em> (stacked
+immutable diffs + one writable top) is universal — isolate the varying
+part.</p>
+<h3 id="container-records-config-hostconfig-state">Container records: Config + HostConfig + State</h3>
+<p>(<code>api/types/container/config.go:25</code>, <code>hostconfig.go:418</code>,
+<code>daemon/container/container.go:70</code>)</p>
+<p>A container is <em>declarative config</em> (<code>Config</code>: image, env, cmd) +
+<em>host binding</em> (<code>HostConfig</code>: mounts, resources, restart policy) +
+<em>observed state</em> (<code>Container</code> embeds <code>State</code>, JSON-marshaled back for
+<code>docker inspect</code>). The split mirrors Kubernetes&#39; spec/status — intent
+vs placement vs observation — and makes the REST API self-describing.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One daemon process</strong> owns all state: image metadata, layer mounts,
+container supervision. The daemon holds locks per container
+(<code>Container</code> embeds its <code>State</code>&#39;s mutex) and per store; the REST API
+serializes lifecycle transitions per container (create/start/stop
+are per-container state machines, restart policies implemented by a
+restart manager).</li>
+<li><strong>Delegation for execution</strong>: process supervision, OOM handling, and
+exit collection live one level down (containerd per-host supervisor,
+runc per-container). The daemon&#39;s failure story: dockerd can restart
+and re-adopt running containers (live-restore) because the runtime
+state is not the daemon&#39;s memory.</li>
+<li><strong>Storage failure = quarantine</strong>: a graphdriver error marks the
+store unusable rather than half-applying diffs; layer metadata lives
+on disk in its own files (<code>filestore.go</code>), so a crashed pull leaves
+unreferenced blobs for GC, never a corrupt chain.</li>
+<li><strong>Root daemon, by history</strong>: dockerd needed root for namespaces/
+mounts (hence the rootless mode work, <code>daemon/internal/rootless/</code>) —
+the security story is a direct consequence of the daemon-centric
+architecture.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph daemon2[&quot;dockerd — one process owns the state&quot;]
+        LOCKS[&quot;per-container locks + per-store locks;&lt;br/&gt;lifecycle = per-container state machines&quot;]
+        RESTART[&quot;restart manager — restart policies as&lt;br/&gt;a reconcile loop over exit states&quot;]
+    end
+    subgraph below[&quot;delegated execution&quot;]
+        CD[&quot;containerd — per-host supervisor:&lt;br/&gt;processes, OOM handling, exit collection&quot;]
+        RC[&quot;runc — per-container: namespaces, cgroups&quot;]
+    end
+    LR[&quot;live-restore: dockerd restarts and re-adopts running&lt;br/&gt;containers — runtime state is not the daemon&#39;s memory&quot;]
+    QUAR[&quot;storage failure = quarantine:&lt;br/&gt;graphdriver error marks the store unusable&lt;br/&gt;rather than half-applying diffs&quot;]
+
+    daemon2 --&gt;|&quot;OCI bundle + start&quot;| CD
+    CD --&gt; RC
+    CD -.-&gt;|&quot;exit events feed policies&quot;| RESTART
+    daemon2 -.-&gt; LR
+    daemon2 -.-&gt; QUAR
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The REST API <em>is</em> the interface that built the ecosystem: every
+tool (Compose, Swarm, Kubernetes-early, IDEs) speaks it; versioned
+(<code>/v1.xx/</code>) with negotiated deprecations, machine-readable types in
+<code>api/types/</code>. The CLI is a thin client — compare nginx&#39;s config
+language vs Docker&#39;s API-first surface.</li>
+<li><strong>Extension seams</strong>: volume plugins, network drivers, and log
+drivers are socket-based plugin protocols; graphdrivers are compile-
+time pluggable; OCI image/runtime formats made the <em>outputs</em> of the
+system interoperable with an entire ecosystem (podman, buildkit,
+registries).</li>
+<li>Honest wart: the monolithic daemon accumulated every subsystem
+(build, network, cluster, volumes), which is why execution was split
+out to containerd and build to BuildKit — a live example of a
+successful monolith deliberately decomposing along its natural
+seams.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-content-addressed-layers-cow-over-machine-images">Trade-off 1: content-addressed layers + CoW over machine images</h3>
+<ul>
+<li><strong>Tension:</strong> ship applications reproducibly without shipping whole
+disks.</li>
+<li><strong>Choice:</strong> images are ordered diffs, digest-named; running = mount
+the stack read-only plus one writable layer on top.</li>
+<li><strong>Evidence:</strong> <code>layerStore</code> chain IDs (<code>layer_store.go:31</code>); <code>RWLayer</code>
+creation (<code>CreateRWLayer:474</code>); <code>graphdriver/driver_linux.go:4</code> —
+the CoW backends that make mounting cheap.</li>
+<li><strong>Given up:</strong> in-place image edits (images are immutable — commit
+writes new layers), disk-space GC complexity, performance cliffs
+when the writable layer fills or many containers share small base
+images with heavy writes.</li>
+<li><strong>Verdict:</strong> the packaging format won because digests compose:
+registries cache, builds reuse cache, CI verifies. The same CAS
+lesson as git, paying off in a different domain.</li>
+</ul>
+<h3 id="trade-off-2-daemon-centric-rest-architecture-over-per-tool-clis">Trade-off 2: daemon-centric REST architecture over per-tool CLIs</h3>
+<ul>
+<li><strong>Tension:</strong> one coherent UX and API vs Unix-style small tools.</li>
+<li><strong>Choice:</strong> a single daemon owning images/containers/networks,
+fronted by REST; CLI talks to it.</li>
+<li><strong>Evidence:</strong> everything routes through <code>daemon/</code> (<code>create.go:44</code>,
+<code>start.go:49</code>, <code>images/image_pull.go:26</code>); <code>api/types/</code> is the typed
+surface.</li>
+<li><strong>Given up:</strong> the root-daemon attack surface, a single point of
+failure (mitigated by live-restore), and API-locked innovation
+(daemons must version carefully forever).</li>
+<li><strong>Verdict:</strong> for its era, overwhelmingly right: one daemon + one API
+turned kernel machinery into a product that developers (not admins)
+adopted. The cost profile is what later tools (podman, daemonless)
+market against.</li>
+</ul>
+<h3 id="trade-off-3-delegate-execution-containerd-runc-over-own-it">Trade-off 3: delegate execution (containerd/runc) over own it</h3>
+<ul>
+<li><strong>Tension:</strong> control the runtime vs share an ecosystem.</li>
+<li><strong>Choice:</strong> dockerd orchestrates images/lifecycle; containerd
+supervises; runc executes; all glued by OCI specs
+(<code>daemon/containerd/</code> adapters, image service there too).</li>
+<li><strong>Evidence:</strong> the adapter layer <code>daemon/containerd/</code> (image pull
+delegation alongside classic <code>daemon/images/</code>); container records
+prepared as OCI bundles before start.</li>
+<li><strong>Given up:</strong> latency (another IPC hop), cross-project coordination
+overhead for every runtime feature.</li>
+<li><strong>Verdict:</strong> standardizing the runtime boundary (OCI) grew the pie:
+Kubernetes, podman, and BuildKit all consume the same runtimes —
+a rare case where a market leader&#39;s openness amplified rather than
+diluted its position.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>cmd/dockerd/</code> (main) → <code>daemon/daemon.go</code> — boot order: graphdriver
+selection, layer store init, container re-adopt; note what a daemon
+owns vs delegates.</li>
+<li><code>daemon/graphdriver/driver_linux.go:4</code> + <code>overlay2/</code> — the priority
+list and one driver: how diffs become overlayfs mounts.</li>
+<li><code>daemon/internal/layer/layer_store.go</code> — <code>layerStore</code> (31),
+<code>Register</code> (digest computation), <code>CreateRWLayer</code> (474): reference
+counting, chain IDs, metadata files (<code>filestore.go</code>).</li>
+<li><code>daemon/images/image_pull.go:PullImage</code> (26) — the registry
+protocol in action: manifest → layer blobs → apply to graphdriver;
+run a pull with <code>--debug</code> alongside.</li>
+<li><code>api/types/container/config.go:25</code> + <code>hostconfig.go:418</code> — the
+declarative surface; compare to Kubernetes&#39; PodSpec.</li>
+<li><code>daemon/create.go:CreateManagedContainer</code> (44) — config → container
+record → RWLayer → image reference pinning.</li>
+<li><code>daemon/start.go:ContainerStart</code> (49) and <code>containerStart</code> (82) —
+state machine gates (already-running? paused?), then the handoff
+down the delegation chain.</li>
+<li><code>daemon/containerd/</code> (image service + adapters) — where dockerd
+meets containerd; then read the atlas <code>runc</code> entry for the syscall
+floor beneath.</li>
+<li><code>daemon/images/image_delete.go</code> — untagging vs layer GC: how
+reference counts decide what blobs can die; the classic &quot;dangling
+image&quot; explanation lives here.</li>
+<li><code>volume/</code> and one network driver — the other two extension axes;
+note both are plugin protocols, unlike the compile-time
+graphdrivers.</li>
+</ol>
+<p>You have now traced <code>docker run</code> from REST call through registry pull,
+layer dedup, CoW mount, and container creation to the delegation
+boundary — the full path of the packaging innovation.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Content-address your artifacts</strong> (layers as digests): caching,
+integrity, and distribution all become generic infrastructure —
+git, OCI, and Nix all harvested the same field.</li>
+<li><strong>Model intent/binding/observation separately</strong> (Config/HostConfig/
+State) — the split composes into REST APIs, inspect tools, and later
+orchestrators without redesign.</li>
+<li><strong>Isolate the varying backend behind a narrow interface</strong>
+(graphdrivers): CoW mechanism changed every few years without
+touching the layer model.</li>
+<li><strong>Standardize the boundary below you, integrate above you</strong>:
+OCI-under/Docker-API-over grew an ecosystem instead of a walled
+garden.</li>
+<li><strong>Watch for the monolith&#39;s natural seams</strong> — execution and builds
+left the daemon along exactly the boundaries the specs had already
+drawn.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — large Go codebase with historical
+sediment (classic + containerd-backed paths coexist); stick to the
+spine.</li>
+<li>Budget: ~6 hours for the reading path.</li>
+<li>Prerequisites: containers = namespaces+cgroups (read the <code>runc</code>
+catalog entry first), Go reading fluency, REST basics, overlayfs at
+a conceptual level.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>OCI image spec (<a href="https://github.com/opencontainers/image-spec">https://github.com/opencontainers/image-spec</a>) — the
+formalized version of the layer model read here.</li>
+<li>The atlas entries for <code>runc</code> (the syscall floor) and <code>kubernetes</code>
+(the orchestrator above) — this deep-dive sits between them.</li>
+<li>Docker docs on storage drivers (overlay2) for operational context
+on the graphdriver trade-offs.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../cpython/"><span class="dir">← Previous dive</span>CPython: the interpreter that won by making extensions easy</a>
+  <a href="../vscode/" style="text-align:right"><span class="dir">Next dive →</span>VS Code: extension architecture as the product — process isolation and protocol seams</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 10 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

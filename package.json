@@ -1,0 +1,16 @@
+{
+  "name": "system-design-atlas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Curated atlas of open-source design deep-dives. Markdown-first; the GitHub Pages site under docs/ is generated from it.",
+  "type": "module",
+  "scripts": {
+    "build": "node site/build.mjs",
+    "check": "node site/build.mjs --check",
+    "serve": "node site/build.mjs --serve"
+  },
+  "devDependencies": {
+    "marked": "18.1.0",
+    "js-yaml": "4.1.0"
+  }
+}

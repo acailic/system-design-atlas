@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes: desired state + reconcile loops — an operating system as a control system — System Design Atlas</title>
+<meta name="description" content="Kubernetes is the operating system of the datacenter, and it won that position with one architectural bet, repeated everywhere: declarative desired state stored in one versioned API, converg">
+<meta property="og:title" content="Kubernetes: desired state + reconcile loops — an operating system as a control system — System Design Atlas">
+<meta property="og:description" content="Kubernetes is the operating system of the datacenter, and it won that position with one architectural bet, repeated everywhere: declarative desired state stored in one versioned API, converg">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-scale-to-5-replicas-wish-to-running-containers">Walkthrough: scale to 5 replicas, wish to running containers</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Kubernetes: desired state + reconcile loops — an operating system as a control system</h1>
+    <div class="meta-chips"><span class="chip domain">orchestration</span><span class="chip domain">container</span><span class="chip domain">distributed</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/kubernetes/kubernetes" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>031bf130d6f34a01456892be80ee21c343ffb7a8</code> · 2026-10-09, master · <a href="https://github.com/kubernetes/kubernetes" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Kubernetes is the operating system of the datacenter, and it won that
+position with one architectural bet, repeated everywhere: <strong>declarative
+desired state stored in one versioned API, converged by level-triggered
+reconcile loops</strong>. Users describe the world they want; controllers
+continuously drive reality toward it. This deep-dive teaches the
+controller pattern (informer → workqueue → reconcile), the API machinery
+that makes &quot;the API is the product&quot; true (etcd store, watch cache, field
+management), and why level-triggered beats edge-triggered in systems
+that must survive missed events.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A wish list pinned to the fridge, and a helper robot that keeps
+comparing.</strong> You never tell the house what to do step by step — you pin a
+wish to the fridge: &quot;5 cupcakes on the table&quot; (a spec: desired state).
+A helper robot (a controller) keeps walking to the table and counting:
+only 3 cupcakes? It bakes 2 more. 7? It eats two. It doesn&#39;t need to be
+told when something changed — it just looks and compares, over and over
+(level-triggered reconcile) — so even if it naps through the doorbell or
+the doorbell breaks, the table still ends up matching the wish. Every
+room also has a mini robot (the kubelet) doing the same for its own room,
+and all the robots read the same fridge (the API server + etcd), which
+is the only place wishes are kept.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> in a huge house, messages get
+lost all the time — a robot that keeps comparing reality to the wish
+survives lost messages that would completely break a &quot;do X exactly when
+Y happens&quot; design.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    K[&quot;kubectl apply / scale&quot;]
+    API[&quot;kube-apiserver — versioned REST, RBAC, admission,&lt;br/&gt;field manager; watch stream via cacher&quot;]
+    ETCD[(&quot;etcd — single source of truth, raft&quot;)]
+    subgraph ctrl[&quot;kube-controller-manager — many controllers&quot;]
+        INF[&quot;informer: reflector → DeltaFIFO → local store + handlers&quot;]
+        WQ[&quot;rate-limited workqueue&quot;]
+        REC[&quot;reconcile — e.g. syncReplicaSet (756):&lt;br/&gt;create/delete pods until count matches Spec&quot;]
+    end
+    SCHED[&quot;scheduler — filter / score plugins, writes bindings&quot;]
+    subgraph node[&quot;per node&quot;]
+        KUBELET[&quot;kubelet — syncLoop (2684), pod workers (761)&quot;]
+        CRI[&quot;container runtime (CRI)&quot;]
+    end
+    ST[&quot;status written back through the same API&quot;]
+
+    K --&gt; API --&gt; ETCD
+    API --&gt;|&quot;watch&quot;| INF --&gt; WQ --&gt; REC
+    REC --&gt;|&quot;create pods&quot;| API
+    API --&gt;|&quot;pending pods&quot;| SCHED --&gt;|&quot;bind pod → node&quot;| API
+    API --&gt;|&quot;bound pods&quot;| KUBELET --&gt; CRI
+    KUBELET --&gt; ST --&gt; API
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — &quot;scale to 5 replicas&quot; — is: <code>kubectl scale</code> writes a
+<code>ReplicaSet.Spec.replicas=5</code> through the API into etcd; the
+ReplicaSet controller&#39;s informer sees the update event
+(<code>pkg/controller/replicaset/replica_set.go:273</code> wires the sync
+handler); <code>syncReplicaSet</code> (756) enqueues the key;
+<code>manageReplicas</code> (653) creates or deletes pods until reality
+matches; the scheduler binds new pods; each kubelet&#39;s <code>UpdatePod</code>
+(<code>pkg/kubelet/pod_workers.go:761</code>) starts containers and writes
+<code>Pod.Status</code> back.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-scale-to-5-replicas-wish-to-running-containers">Walkthrough: scale to 5 replicas, wish to running containers</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. Nobody is told what to do; every actor compares and converges.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant K as kubectl scale
+    participant A as kube-apiserver
+    participant E as etcd
+    participant RS as ReplicaSet controller
+    participant S as scheduler
+    participant KL as kubelet (node)
+    K-&gt;&gt;A: ReplicaSet spec.replicas = 5
+    A-&gt;&gt;E: validate, admission, write (resourceVersion++)
+    A--&gt;&gt;RS: watch event — a hint, not an instruction
+    RS-&gt;&gt;A: syncReplicaSet — re-read the world, diff pods vs spec
+    RS-&gt;&gt;A: create 2 pods (manageReplicas)
+    A--&gt;&gt;S: new pending pods
+    S-&gt;&gt;A: filter + score plugins → binding write
+    A--&gt;&gt;KL: bound pods on my node
+    KL-&gt;&gt;KL: UpdatePod → CRI starts containers
+    KL-&gt;&gt;A: Pod.Status = Running (observed, written back)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="pin-the-wish">Pin the wish</h3>
+<p><code>kubectl scale</code> sends a spec update:
+<code>ReplicaSet.Spec.replicas = 5</code>. The API server validates against the
+schema, runs admission, and writes it to etcd — the object&#39;s
+<code>resourceVersion</code> ticks up (<code>etcd3/store.go:Create:301</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-event-is-a-hint">The event is a hint</h3>
+<p>The ReplicaSet controller&#39;s informer
+(<code>pkg/controller/replicaset/replica_set.go:273</code> wires the handler)
+receives a watch event and enqueues the key — nothing more. If the event
+were lost, the resync period would re-enqueue everything anyway.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="compare-and-converge">Compare and converge</h3>
+<p><code>syncReplicaSet</code> (756) re-reads the
+world from its local cache and computes the diff; <code>manageReplicas</code> (653)
+creates or deletes pods until reality matches the spec — idempotent, so
+running twice creates 2 pods, not 4 (expectations guard against
+create-storms).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="place-the-pods">Place the pods</h3>
+<p>The scheduler watches for pending pods,
+runs its filter/score plugin phases (<code>pkg/scheduler/schedule_one.go:85</code>),
+and writes a binding — through the same API, like everyone else.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="run-them">Run them</h3>
+<p>The chosen node&#39;s kubelet sees the bound pod;
+<code>UpdatePod</code> (<code>pkg/kubelet/pod_workers.go:761</code>) drives the container
+runtime (CRI) to pull and start containers.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="report-observed-state">Report observed state</h3>
+<p>The kubelet writes <code>Pod.Status</code> back
+through the API — spec and status in one object, written by different
+actors (<code>PodSpec:4461</code> / <code>PodStatus:5694</code>). Anyone watching converges on
+the new world.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="5-cupcakes-no-instructions">5 cupcakes, no instructions</h3>
+<p>The cluster reached the wish
+through independent loops, each of which could have crashed and
+restarted mid-way without corrupting anything — because every actor
+re-derives the world instead of remembering what it was told.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="spec-status-split-staging-src-k8s-io-api-core-v1-types-go">Spec/Status split (<code>staging/src/k8s.io/api/core/v1/types.go</code>)</h3>
+<p>Every object is <code>metadata + Spec + Status</code> (e.g. <code>PodSpec:4461</code>,
+<code>PodStatus:5694</code>, <code>Pod:5899</code>). Spec is the <em>input</em> (what the user
+wants), Status is the <em>output</em> (what the system observed). Why: the
+split makes the control-theory contract physical — reconcile = f(Spec,
+observed) → actions; and it gives <code>kubectl diff</code>, server-side apply,
+and every controller a uniform shape.</p>
+<h3 id="informer-reflector-deltafifo-local-store-handlers">Informer: reflector → DeltaFIFO → local store + handlers</h3>
+<p>(<code>staging/src/k8s.io/client-go/tools/cache/</code>)</p>
+<p>A <code>SharedIndexInformer</code> (<code>shared_informer.go:419</code>) runs a <code>Reflector</code>
+(<code>reflector.go:106</code>) doing <code>ListAndWatch</code> (470): one initial LIST, then
+a WATCH stream; changes land in a <code>DeltaFIFO</code> (<code>delta_fifo.go:108</code>,
+<code>Pop:562</code>) which drains into a local cache and fires event handlers.
+Why: controllers read from the <strong>local cache</strong>, never hammering the
+API server; <em>shared</em> means N controllers per process reuse one
+connection and one cache. This structure is the difference between a
+control plane that scales and one that DDoSes its own database.</p>
+<h3 id="rate-limited-workqueue">Rate-limited workqueue</h3>
+<p>(<code>staging/src/k8s.io/client-go/util/workqueue/rate_limiting_queue.go</code>)</p>
+<p>Handlers never act; they enqueue keys. The queue
+(<code>TypedRateLimitingInterface:30</code>, <code>AddRateLimited:34</code>) requeues failed
+reconciles with exponential backoff. Why: failure is routine (node
+down, API conflict); a queue with per-item rate limits turns &quot;retry
+forever, gently&quot; into infrastructure rather than policy.</p>
+<h3 id="etcd-backed-store-watch-cache">etcd-backed store + watch cache</h3>
+<p>(<code>staging/src/k8s.io/apiserver/pkg/storage/</code>)</p>
+<p><code>etcd3/store.go</code> is the only writer (<code>Create:301</code>, <code>Get:252</code>,
+<code>Watch:1161</code>); a <code>Cacher</code> (<code>cacher/cacher.go:264</code>) fronts it with an
+in-memory versioned buffer (<code>watch_cache.go:83</code>) serving watches
+without loading etcd. Why: one serialized store (etcd, Raft) gives
+resourceVersions and optimistic concurrency (<code>resourceVersion</code>
+compare-and-swap) for every object type — transactions without a
+transaction service.</p>
+<h3 id="leader-epoch-free-ownership-labels-ownerreferences">Leader-epoch-free ownership: labels + ownerReferences</h3>
+<p>Controllers find their objects by <em>label selectors</em>, claim them by
+<em>ownerReferences</em>, and release orphans via GC. Why: grouping by query,
+not by pointer, is what lets CRDs and third-party controllers compose
+with built-ins without coordination.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Everything is eventually consistent, by design</strong>: events can be
+missed, dropped, duplicated, reordered — controllers tolerate it
+because reconcile is idempotent and level-triggered (compare current
+state vs spec, act on the difference). The resync period re-Lists as
+a safety net; expectations (<code>controller_utils.go</code>) avoid
+create-storms.</li>
+<li><strong>Work distribution</strong>: one API server (horizontally replicated,
+consistent through etcd), N schedulers (leader-elected), many
+controllers (leader-elected per manager), a kubelet per node. Each
+kubelet is a self-contained control loop over its node&#39;s pods
+(<code>syncLoop:2684</code>, <code>syncLoopIteration:2759</code>) fed by the PLEG
+(pod lifecycle event generator) — container runtime events become
+pod status updates through the same watch machinery.</li>
+<li><strong>Failure of any component is safe</strong>: a dead controller = drift
+unconverged until restart; a dead kubelet = node marked NotReady by
+the node controller, pods rescheduled. There is no component whose
+crash corrupts state — etcd&#39;s Raft is the only consistency-critical
+code.</li>
+<li><strong>Overload is absorbed by the queue</strong>: backpressure at the workqueue
+and API priority/fairness classes; watches fall back to re-List on
+resourceVersion too old.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph cp[&quot;control plane&quot;]
+        APIS[&quot;kube-apiserver (replicated,&lt;br/&gt;consistent through etcd raft)&quot;]
+        SCHED[&quot;N schedulers — leader-elected&quot;]
+        CTRL[&quot;controllers — leader-elected per manager,&lt;br/&gt;rate-limited workqueues + resync safety net&quot;]
+    end
+    ETCD2[(&quot;etcd raft — the only consistency-critical code&quot;)]
+    subgraph nodes[&quot;per node&quot;]
+        KL2[&quot;kubelet — its own control loop&lt;br/&gt;syncLoop fed by PLEG events&quot;]
+    end
+    FAIL[&quot;any component dies? drift stays unconverged&lt;br/&gt;until restart — state never corrupts&quot;]
+
+    SCHED --&gt; APIS
+    CTRL --&gt; APIS
+    APIS --&gt; ETCD2
+    KL2 --&gt; APIS
+    FAIL -.-&gt; CTRL
+    FAIL -.-&gt; KL2
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The API is the product</strong>: versioned groups (<code>apps/v1</code>, <code>batch/v1</code>…),
+generated clients, protobuf on the wire, and machine-readable OpenAPI
+schemas. <code>kubectl</code> is a generic client — it special-cases almost
+nothing.</li>
+<li><strong>Server-side apply / field manager</strong>
+(<code>staging/src/k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager/</code>)
+tracks <em>which actor owns which fields</em>, so multiple controllers (and
+humans) can write one object without clobbering each other — merge
+semantics as API infrastructure.</li>
+<li><strong>CRDs</strong> (<code>staging/src/k8s.io/apiextensions-apiserver/</code>,
+<code>CustomResourceDefinitionSpec</code> at <code>v1/types.go:41</code>) turn the API
+server into a platform: third parties register new resource types
+that get storage, watch, RBAC, and tooling for free. The scheduler
+is equally pluggable (<code>pkg/scheduler/framework/</code> — filter/score
+plugin phases).</li>
+<li>Honest wart: the object model&#39;s generality has costs —
+<code>resourceVersion</code> semantics, finalizers, and informer caches are the
+three places every seasoned k8s developer has been burned; and the
+API server/etcd remains a throughput ceiling the ecosystem works
+around (operators sharding by namespace, etc.).</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-level-triggered-reconcile-over-edge-triggered-actions">Trade-off 1: level-triggered reconcile over edge-triggered actions</h3>
+<ul>
+<li><strong>Tension:</strong> react to changes fast without missing any.</li>
+<li><strong>Choice:</strong> controllers don&#39;t react to events; they compare spec vs
+observed state and converge. Events are just a <em>hint</em> to look.</li>
+<li><strong>Evidence:</strong> <code>syncReplicaSet</code> (<code>pkg/controller/replicaset/replica_set.go:756</code>)
+re-reads the world each run; <code>manageReplicas</code> (653) computes pod
+diffs; resync periods re-enqueue everything; the workqueue&#39;s
+<code>AddRateLimited</code> handles failure retry.</li>
+<li><strong>Given up:</strong> minimal-work reactions (every reconcile does full
+reads), constant background churn, latency floors set by polling
+cadence in the worst case.</li>
+<li><strong>Verdict:</strong> in a distributed system, events <em>will</em> be missed; a
+system that converges from any state survives what an
+event-dispatch system cannot. This is the single most stealable idea
+in Kubernetes.</li>
+</ul>
+<h3 id="trade-off-2-declarative-spec-status-watch-over-imperative-rpcs">Trade-off 2: declarative spec/status + watch over imperative RPCs</h3>
+<ul>
+<li><strong>Tension:</strong> operators (humans and robots) need to express intent and
+observe results over flaky networks and long timescales.</li>
+<li><strong>Choice:</strong> everything is a declarative object; observation is a
+consistent watch stream from one store.</li>
+<li><strong>Evidence:</strong> <code>PodSpec:4461</code>/<code>PodStatus:5694</code> split;
+<code>etcd3/store.go</code> serializes writes behind <code>resourceVersion</code>
+(<code>Create:301</code>, <code>Watch:1161</code>); the <code>Cacher</code> (<code>cacher.go:264</code>) makes
+watch cheap; field manager resolves concurrent writers.</li>
+<li><strong>Given up:</strong> immediacy (no synchronous &quot;do it now&quot; semantics),
+familiar request/response programming model, and a large cognitive
+surface (resourceVersion, finalizers, ownership).</li>
+<li><strong>Verdict:</strong> right when the &quot;client&quot; is a long-lived automation that
+must survive disconnects and partial failures — i.e., exactly the
+datacenter case. Imperative wins for one-shot tools.</li>
+</ul>
+<h3 id="trade-off-3-one-api-gateway-one-store-over-per-service-backends">Trade-off 3: one API gateway + one store over per-service backends</h3>
+<ul>
+<li><strong>Tension:</strong> composability and uniform tooling vs component autonomy.</li>
+<li><strong>Choice:</strong> all state flows through kube-apiserver into etcd; every
+subsystem (scheduler, kubelet, controllers, CRDs) is a client of the
+same API.</li>
+<li><strong>Evidence:</strong> controllers and kubelet both consume informers;
+CRD types get storage/watch/RBAC via apiextensions for free;
+<code>kubectl describe</code> works on unknown future types.</li>
+<li><strong>Given up:</strong> the apiserver/etcd pair is a scalability choke point;
+subsystems can&#39;t optimize their own storage; startup ordering and
+versioning become everyone&#39;s problem.</li>
+<li><strong>Verdict:</strong> the uniformity is why an ecosystem of thousands of
+operators interoperates at all — the biggest &quot;API as architecture&quot;
+win in modern infrastructure, paid for in throughput ceilings the
+community manages rather than removes.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>staging/src/k8s.io/api/core/v1/types.go</code> — skim <code>Pod</code> (5899),
+<code>PodSpec</code> (4461), <code>PodStatus</code> (5694): internalize the
+spec/status/metadata shape; it repeats for every kind.</li>
+<li><code>staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go</code> — <code>Get</code>
+(252), <code>Create</code> (301), <code>Watch</code> (1161): the bottom of the stack —
+one store, versioned keys, watch as etcd prefix watch.</li>
+<li><code>staging/src/k8s.io/apiserver/pkg/storage/cacher/cacher.go:264</code> +
+<code>watch_cache.go:83</code> — how watches are served from memory; note
+resourceVersion bookkeeping.</li>
+<li><code>staging/src/k8s.io/client-go/tools/cache/reflector.go:106</code> —
+<code>ListAndWatch</code> (470) and <code>list</code> (674): reconnection and relist
+logic, the robustness that makes client caches trustworthy.</li>
+<li><code>staging/src/k8s.io/client-go/tools/cache/delta_fifo.go:108</code> + <code>Pop</code>
+(562) — the de-dup/delta machinery feeding handlers in order.</li>
+<li><code>staging/src/k8s.io/client-go/util/workqueue/rate_limiting_queue.go</code>
+(30/144) — keys, dedup, exponential backoff; the controller&#39;s
+tempo.</li>
+<li><code>pkg/controller/replicaset/replica_set.go</code> — the canonical loop:
+handler wiring (273), <code>syncReplicaSet</code> (756), <code>manageReplicas</code>
+(653): watch how <em>every</em> reconcile re-derives the world, and how
+expectations prevent create storms.</li>
+<li><code>pkg/scheduler/schedule_one.go:85</code> — one pod&#39;s scheduling pass:
+filter → score plugins (<code>pkg/scheduler/framework/plugins/</code>), then a
+binding write through the API.</li>
+<li><code>pkg/kubelet/kubelet.go:syncLoop</code> (2684) and <code>syncLoopIteration</code>
+(2759) + <code>pkg/kubelet/pod_workers.go:UpdatePod</code> (761) — the node
+agent as another reconciler; PLEG turns runtime events into syncs.</li>
+<li><code>staging/src/k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager/</code>
+— server-side apply: field ownership as merge conflict resolution.</li>
+<li><code>staging/src/k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1/types.go:41</code>
+— CRD spec: a resource type defined as data; then write a
+50-line controller with controller-runtime to feel the pattern
+from the outside.</li>
+</ol>
+<p>You have now traced &quot;scale to 5&quot; from API write through etcd, watch,
+informer, workqueue, reconcile, scheduling, and kubelet — the entire
+control loop of the datacenter operating system.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Level-triggered reconciliation</strong>: compare desired vs observed,
+act on the diff, idempotently, with retries — the pattern that makes
+systems self-healing; applicable from infra daemons to GUIs.</li>
+<li><strong>Serve reads from local caches built by watch streams</strong>
+(informer): scalable control planes read their database rarely.</li>
+<li><strong>Spec/status split with optimistic concurrency</strong>: intent and
+observation as separate documents with version-checked writes is a
+complete coordination model.</li>
+<li><strong>Make the API generic and the extensions typed</strong>: CRDs show that a
+versioned resource API with storage+watch+RBAC is a platform
+substrate, not just an interface.</li>
+<li><strong>Field ownership for concurrent writers</strong>: when many actors write
+one object, track <em>who owns which fields</em> instead of inventing
+ad-hoc locks.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — the codebase is enormous; the leverage
+is sticking to the spine above (informer → controller → kubelet)
+and refusing to wander.</li>
+<li>Budget: ~8 hours for the reading path; steps 4–7 are the core 3.</li>
+<li>Prerequisites: comfort with REST semantics and watches, basic
+control-loop thinking, Go reading fluency (generics, interfaces,
+goroutines).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The Kubernetes API conventions:
+<code>docs/devel/api-conventions.md</code> in-repo (the spec/status and
+level-trigger philosophy, written down).</li>
+<li>&quot;Kubernetes Components&quot; and &quot;Controller Pattern&quot; in the official
+docs (<a href="https://kubernetes.io/docs/concepts/architecture/">https://kubernetes.io/docs/concepts/architecture/</a>).</li>
+<li>controller-runtime + kubebuilder (<a href="https://book.kubebuilder.io/">https://book.kubebuilder.io/</a>) —
+the pattern extracted into a framework; read after step 7 to see it
+abstracted.</li>
+<li>&quot;Level Triggering and Reconciliation&quot; — the canonical blog post on
+level vs edge semantics (Brendan Burns / k8s design discussions).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../kafka/"><span class="dir">← Previous dive</span>Kafka: the append-only log as an operating system for data</a>
+  <a href="../cpython/" style="text-align:right"><span class="dir">Next dive →</span>CPython: the interpreter that won by making extensions easy</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 8 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

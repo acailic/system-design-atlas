@@ -13,23 +13,48 @@ deep-dive teaches how a packaging format became an ecosystem contract
 down a deliberate chain (dockerd → containerd → runc), and what the
 daemon-centric bet bought and cost.
 
+## Explain like I'm 10
+
+**A program shipped as a stack of clear plastic sheets.** Instead of
+mailing someone a whole heavy toy box (a whole computer disk image),
+Docker ships a stack of clear sheets: each sheet has part of the drawing
+(a layer), plus a fingerprint of exactly what's drawn on it (a digest).
+Running the program = laying the stack on a lightbox and putting ONE
+blank sheet on top to draw on (the writable layer): everything you change
+shows up on the top sheet, and the sheets below never get ink on them —
+so a hundred people can share the same bottom sheets. A butler (the
+dockerd daemon) answers your walkie-talkie (the REST API), fetches the
+sheets from a library (the registry), checks every fingerprint, and
+hands the actual running-around work to specialists (containerd, then
+runc).
+
+**Why the grown-ups did it this way:** fingerprints mean two strangers
+can exchange sheets with zero trust — if the fingerprint matches, the
+sheet is provably identical — so sharing, caching, and verifying
+programs became free, and that made "works on my machine" a solved
+problem.
+
 ## 1. Architecture overview
 
+```mermaid
+flowchart TD
+    CLI["docker CLI"]
+    subgraph daemon["dockerd — cmd/dockerd, daemon/daemon.go"]
+        IMG["image mgmt — daemon/images/<br/>image_pull.go PullImage 26"]
+        LAYERS["layer mgmt — daemon/internal/layer/<br/>layer_store.go: chain IDs, refcounts"]
+        GD["graphdrivers — daemon/graphdriver/<br/>overlay2 (default), btrfs, zfs, vfs<br/>priority list driver_linux.go 4"]
+        CREAT["container records — daemon/create.go 44<br/>Config + HostConfig + State"]
+    end
+    REG["registry (pull by digest)"]
+    CD["containerd — per-host supervisor"]
+    RUNC["runc — OCI runtime: namespaces + cgroups + pivot_root"]
+
+    CLI -->|"REST /v1.xx"| daemon
 ```
- docker CLI ──REST──► dockerd (cmd/dockerd, daemon/daemon.go)
-                       │  image mgmt     layer mgmt        volumes/networks
-                       │  daemon/images/ daemon/internal/  volume/, network drivers
-                       │                 layer/layer_store.go
-                       ▼
-                 registry pull (daemon/images/image_pull.go:26)
-                 layers land in the graphdriver
-                 daemon/graphdriver/ — overlay2 (default), btrfs, zfs, vfs
-                 (driver_linux.go:4 priority list)
-                       │ create & run
-                       ▼
-             containerd → runc (separate projects; OCI runtime)
-             namespaces + cgroups + pivot_root (see atlas `runc` entry)
-```
+    IMG -->|"manifest → layer blobs"| REG
+    IMG --> LAYERS --> GD
+    CREAT --> LAYERS
+    daemon -->|"prepare OCI bundle, delegate"| CD --> RUNC
 
 - The **spine** — `docker run nginx` — is: CLI POSTs to the daemon →
   image resolved/pulled (`daemon/images/image_pull.go:PullImage:26`) →
@@ -39,6 +64,64 @@ daemon-centric bet bought and cost.
   mounted over the image stack (`CreateRWLayer:474` in the layer
   store) → start (`daemon/start.go:ContainerStart:49`) hands the
   prepared bundle to the runtime (containerd/runc).
+
+## Walkthrough: docker run nginx, walkie-talkie to running container
+
+The spine as a story — step through it on the site or read straight
+down. Notice how the fingerprints do the heavy lifting.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User (docker CLI)
+    participant D as dockerd (REST API)
+    participant R as Registry
+    participant L as Layer store + graphdriver
+    participant RT as containerd → runc
+    U->>D: POST /containers/create + start (image: nginx)
+    D->>R: PullImage (26) — manifest → layer blobs by digest
+    R-->>L: blobs arrive; every digest verified
+    L->>L: register layers by ChainID, dedupe across images
+    L->>L: CreateRWLayer (474) — blank sheet on top of the stack
+    D->>RT: prepare OCI bundle, delegate start
+    RT-->>U: container running (namespaces + cgroups)
+    Note over L,RT: identical digests = identical filesystem, on any host
+```
+
+**Step 1 — The ask.** `docker run nginx` is two REST calls: create and
+start. The CLI is a thin client — every tool built on Docker speaks the
+same versioned API (`api/types/` is the typed surface).
+
+**Step 2 — Fetch the sheets.** The image isn't local, so
+`daemon/images/image_pull.go:PullImage` (26) talks to the registry:
+read the manifest, then download each layer blob — each one named by
+its digest, each one verified as it lands.
+
+**Step 3 — File them once.** The layer store
+(`daemon/internal/layer/layer_store.go:31`) registers each blob under
+its `ChainID` with reference counting. Two images sharing a base layer
+store it once; the fingerprint IS the name, so dedup is automatic.
+
+**Step 4 — Make the container record.** `CreateManagedContainer`
+(`daemon/create.go:44`) writes the declarative triple — `Config`
+(what to run), `HostConfig` (where and how: mounts, resources, restart
+policy), `State` (what we observed) — and pins the image reference.
+
+**Step 5 — Blank sheet on top.** `CreateRWLayer` (474) mounts the image
+stack read-only through the graphdriver (overlay2 by default) plus one
+writable layer — copy-on-write: reads fall through the stack, writes
+land on top.
+
+**Step 6 — Delegate the running.** `ContainerStart` (`daemon/start.go:49`)
+checks the state-machine gates, prepares an OCI bundle, and hands off
+down the chain: containerd supervises, runc sets up namespaces/cgroups
+and execs the process. The daemon re-adopts running containers on
+restart (live-restore) because execution state isn't in its memory.
+
+**Outcome — Same bytes, same world.** The container runs in an
+environment provably identical on every host that trusts the same
+fingerprints — which is the entire product, delivered by content
+addressing plus delegation.
 
 ## 2. Core data structures — and why these
 
@@ -96,6 +179,26 @@ vs placement vs observation — and makes the REST API self-describing.
   mounts (hence the rootless mode work, `daemon/internal/rootless/`) —
   the security story is a direct consequence of the daemon-centric
   architecture.
+
+```mermaid
+flowchart LR
+    subgraph daemon2["dockerd — one process owns the state"]
+        LOCKS["per-container locks + per-store locks;<br/>lifecycle = per-container state machines"]
+        RESTART["restart manager — restart policies as<br/>a reconcile loop over exit states"]
+    end
+    subgraph below["delegated execution"]
+        CD["containerd — per-host supervisor:<br/>processes, OOM handling, exit collection"]
+        RC["runc — per-container: namespaces, cgroups"]
+    end
+    LR["live-restore: dockerd restarts and re-adopts running<br/>containers — runtime state is not the daemon's memory"]
+    QUAR["storage failure = quarantine:<br/>graphdriver error marks the store unusable<br/>rather than half-applying diffs"]
+
+    daemon2 -->|"OCI bundle + start"| CD
+    CD --> RC
+    CD -.->|"exit events feed policies"| RESTART
+    daemon2 -.-> LR
+    daemon2 -.-> QUAR
+```
 
 ## 4. API and extension design
 

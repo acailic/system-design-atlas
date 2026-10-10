@@ -2,6 +2,14 @@
 
 Learn system design thinking by reading great open-source code.
 
+**🌐 Read the atlas as a website:**
+**https://acailic.github.io/system-design-atlas/** — every deep-dive with
+rendered architecture diagrams, an "explain like I'm 10" section, an
+interactive step-through walkthrough of each system's spine, and
+read-aloud on every paragraph (voice + speed of your choice). The
+markdown in this repo remains the source of truth; the site is generated
+from it.
+
 This is a curated atlas of public open-source projects, each chosen because its
 codebase *teaches system design* — not because it is popular. Every deep-dive
 is written from actually reading the source: real files, real functions, real
@@ -55,6 +63,8 @@ Time budget: a deep-dive plus its reading path is a focused 3–8 hours
 | [`PATTERNS.md`](PATTERNS.md) | Cross-cutting design index: lessons that recur across deep-dives |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to add catalog entries and write new deep-dives |
 | [`LICENSES.md`](LICENSES.md) | Licensing: MIT for tooling, CC-BY-4.0 for prose, snippet policy |
+| [`site/`](site/) | The static-site generator (`npm run build`) — no framework, marked + js-yaml |
+| [`docs/`](docs/) | The generated GitHub Pages site (committed; regenerate with `npm run build`) |
 
 ## Current coverage
 
@@ -83,5 +93,7 @@ targeted reading rather than deep-dives by design (see their entries).
 
 ## Status
 
-Seeded and growing. Markdown-first, no build step, no UI. See
-[CONTRIBUTING.md](CONTRIBUTING.md) to extend it.
+Seeded and growing. Markdown-first: the prose is the product, and the
+[website](https://acailic.github.io/system-design-atlas/) is generated
+from it (`npm run build` → committed `docs/`, served by GitHub Pages).
+See [CONTRIBUTING.md](CONTRIBUTING.md) to extend it.

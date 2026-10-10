@@ -13,25 +13,43 @@ and offline work are all *derived* operations on that model. This
 deep-dive teaches what choosing the right core data model buys you, and
 what it costs (garbage, packs, and protocol complexity).
 
+## Explain like I'm 10
+
+**A photo album where nothing is ever erased.** Every time you save your
+drawing, git takes a brand-new photo of each changed file (a **blob**), a
+new photo of each folder's list of contents (a **tree**), and a new photo
+of the whole moment (a **commit**) — and names each photo by a
+fingerprint of its exact pixels (the SHA hash). Identical photos get
+identical fingerprints, so they are stored only once, and if anyone
+sneakily changes one pixel, the fingerprint changes and the trick is
+caught. A branch is just a sticky note (a **ref**) pointing at a favorite
+photo; "merging" means comparing two photo collections and adding only
+the photos you're missing — you never need to phone a central office,
+because every computer that cloned the album owns every photo.
+
+**Why the grown-ups did it this way:** never overwriting anything means
+history can always be verified, duplicates disappear for free, and two
+people (or two laptops, offline) can always compare and combine safely —
+without anyone having to be in charge.
+
 ## 1. Architecture overview
 
-```
-             porcelain (git commit, git log, git merge...)
-                    │  libgit.a + builtin/*.c (130 builtins)
-                    ▼
-             plumbing (git hash-object, cat-file, rev-parse...)
-                    │
-        ┌───────────▼───────────────────────────────────┐
-        │  object database (odb.c + odb/*.c)            │
-        │   sources: in-memory → loose → packed         │
-        │   key = hash(type + bytes); value = bytes     │
-        ├───────────────┬───────────────────────────────┤
-        │  refs         │  index (read-cache.c)         │
-        │  refs.c       │  staging snapshot + stat cache│
-        │  files-backend│  (derived, rebuildable)       │
-        │  packed-backend, reftable-backend             │
-        └───────────────┴───────────────────────────────┘
-                 working tree (just files)
+```mermaid
+flowchart TD
+    PORC["porcelain — git commit, git log, git merge...<br/>libgit.a + builtin (130 builtins)"]
+    PLUMB["plumbing — hash-object, cat-file, rev-parse,<br/>update-ref (the data model as commands)"]
+    subgraph core["the object database — odb.c + odb/*.c"]
+        ODB["sources walked in order:<br/>in-memory → loose files → packs<br/>key = hash of type + bytes; value = the bytes"]
+    end
+    REFS["refs — refs.c<br/>files / packed / reftable backends<br/>name → oid: the only mutable state"]
+    IDX["index — read-cache.c<br/>staging snapshot + stat cache<br/>(derived, always rebuildable)"]
+    WT["working tree — just files"]
+
+    PORC --> PLUMB --> ODB
+    REFS -->|"point into"| ODB
+    IDX -->|"built from"| ODB
+    WT -->|"git add"| IDX
+    IDX -->|"git commit"| ODB
 ```
 
 - Four object types (`src` of truth: `object.c:29`
@@ -44,6 +62,63 @@ what it costs (garbage, packs, and protocol complexity).
   (`odb_write_object`) → new tree (bottom-up) → new commit (points at
   tree + parents) → move one ref. Note the asymmetry: writes create
   immutable objects; the *only* mutation is the ref update.
+
+## Walkthrough: git add + git commit, fingerprint to sticky note
+
+One save, end to end — step through it on the site or read it here. The
+sequence matters: objects are written first, the pointer moves last.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as working tree
+    participant I as index (read-cache.c)
+    participant O as object database
+    participant R as refs
+    W->>I: git add f — hash file, stage blob oid + stat
+    I->>O: write blob: deflate, temp file, rename into objects/xx/38hex
+    I->>O: git commit — write tree objects bottom-up from the index
+    O->>O: write commit: tree oid + parents + message
+    O->>R: update-ref moves the branch sticky note (atomic rename)
+    R->>R: reflog appends the move (the undo journal)
+    Note over O,R: a crash anywhere before the ref move = orphan objects, never corruption
+```
+
+**Step 1 — Fingerprint the file.** `git add f` runs the write path:
+`builtin/hash-object.c:hash_object` (38) → `odb_write_object` — note that
+by default "write" only *computes* the id; persistence is a flag. The
+content is prefixed `<type> <size>\0`, hashed, and deflated
+(`object-file.c:write_object_file_prepare`, 329).
+
+**Step 2 — Store the blob immutably.** `write_loose_object_common` (704)
+writes a temp file and renames it into
+`.git/objects/<2-hex>/<38-hex>` — the fanout directory. The rename is
+the atomicity: an object either exists whole or not at all.
+
+**Step 3 — Stage it.** The index (`read-cache.c:do_read_index`, 2198)
+gains a `cache_entry`: path, oid, stat data. The stat cache is why
+`git status` is O(changed files) — unchanged files are never re-hashed.
+
+**Step 4 — Write the trees.** `git commit` turns the index into tree
+objects bottom-up: one flat sorted list per directory
+(`tree.c:parse_tree_buffer`, 175), each named by its own hash, parents
+referenced by fingerprint — `decode_tree_entry` (17) shows the
+`<mode> <name>\0<raw oid>` format.
+
+**Step 5 — Write the commit.** `commit.c:parse_commit_buffer` (516) is
+the format in prose: `tree <oid>`, `parent <oid>`..., author, message.
+A new commit points at the new tree and at the old HEAD as parent —
+the DAG grows by append, never by edit.
+
+**Step 6 — Move the sticky note.** `update-ref` writes the new oid under
+`.git/refs/heads/<branch>` (temp file + rename) and the reflog appends a
+line. This one-line file update is the *entire* mutation git performed
+for your commit.
+
+**Outcome — History you can prove.** Everything else — log, diff, merge,
+push — is derived by walking fingerprints. If the process died at any
+earlier step, you'd have unreferenced objects (garbage for `git gc`),
+never a broken repository.
 
 ## 2. Core data structures — and why these
 
@@ -113,6 +188,29 @@ subset, delete the rest, nothing breaks.
 - **Failure of trust** (bitrot, hostile mirrors) is caught by the model
   itself: `check_object_signature` re-hashes content; transport
   (`index-pack`) verifies every received object's hash before install.
+
+```mermaid
+flowchart LR
+    subgraph locks["the filesystem is the coordinator — no daemon"]
+        IL["index.lock — serializes index writes"]
+        RL["per-ref locks — refs/files-backend.c"]
+        PL["packed-refs lock — one global<br/>(packed_refs_lock 1217)"]
+    end
+    W1["git process 1"]
+    W2["git process 2"]
+    OBJ["object writes: temp file → rename<br/>crash = orphan object, not corruption"]
+    REF["ref move: last write wins per ref,<br/>reflog records every move"]
+    FSCK["git fsck — re-verifies reachability<br/>and every object signature (101)"]
+
+    W1 --> IL
+    W2 --> IL
+    W1 --> OBJ
+    W2 --> OBJ
+    OBJ --> REF
+    REF --> FSCK
+    RL -.-> REF
+    PL -.-> REF
+```
 
 ## 4. API and extension design
 

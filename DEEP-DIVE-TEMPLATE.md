@@ -17,6 +17,12 @@ Rules for all deep-dives:
   license named. Paraphrase when prose works as well (see LICENSES.md).
 - **Trade-offs need evidence:** each trade-off section must show where in
   the code the choice is *made* (a flag, a flush point, a lock, a copy).
+- **Diagrams are mermaid** (```` ```mermaid ```` fenced blocks): they render
+  on GitHub and on the site, and degrade to the raw source without
+  JavaScript. Facts in a diagram must be citable like prose facts.
+- **Explain like I'm 10** and **Walkthrough** sections are part of the
+  template (below): the analogy must map honestly onto the real mechanism,
+  and the walkthrough steps must walk the same spine as the reading path.
 
 ---
 
@@ -30,13 +36,39 @@ Rules for all deep-dives:
 <One paragraph: what this system is, and the single design idea this
 deep-dive will teach. The headline names the lesson, not the product.>
 
+## Explain like I'm 10
+
+**<One vivid analogy a child gets.** 3–6 sentences. Every element of the
+analogy maps to a real mechanism (name it in parentheses or appositives —
+"the doorbell (the event loop)"); no dumbing down of facts, only of
+register.>
+
+**Why the grown-ups did it this way:** <one sentence: the engineering
+reason the design is shaped like this.>
+
 ## 1. Architecture overview
 
-- The layer map / process map of the system (ASCII diagram is ideal).
+- The layer map / process map of the system as a ```mermaid``` flowchart
+  (2–3 diagrams per deep-dive is the norm: architecture here, the spine
+  as a sequenceDiagram in the Walkthrough, and the concurrency/process
+  model in section 3 — only where they teach).
 - One paragraph per layer or process: responsibility, boundaries, what it
   does NOT do.
 - Where the "spine" is: the one path a request/operation/query walks
   end-to-end. Name the functions along the spine.
+
+## Walkthrough: <the spine as a story, e.g. "one SET, socket to keyspace">
+
+A short narrative that steps through the key sequence (request arrives →
+component A → decision → outcome). On the site this renders as an
+optional step-through (Next/Prev); in raw markdown it reads top to
+bottom. Include one ```mermaid``` sequenceDiagram of the same trip, then
+5–7 steps + an outcome, each exactly:
+
+**Step N — <plain-text title, no code ticks>.** <2–4 sentences of prose,
+citing `file:function` landmarks like anywhere else.>
+
+**Outcome — <what is now true>.** <closing prose.>
 
 ## 2. Core data structures — and why these
 
@@ -52,6 +84,8 @@ For each structure that carries the design (2–5 of them):
 
 - Processes/threads/event loop: what runs concurrently, what is serialized,
   and where the code draws the line (cite the loop, the fork, the lock).
+  A ```mermaid``` diagram of the process/thread model belongs here when it
+  teaches.
 - What happens when it crashes mid-operation? How does restart recovery
   work — which code performs it?
 - Backpressure / overload behavior, if the system has one.
