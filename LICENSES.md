@@ -33,6 +33,14 @@ CONTRIBUTING.md). Deep-dives quote from upstream code only as commentary:
   | git | GPL-2.0 | keep quotes minimal & commentary-bound; do not copy functional blocks |
   | LevelDB | BSD-3-Clause | permissive; short attributed quotes fine |
   | nginx | BSD-2-Clause | permissive; short attributed quotes fine |
+  | PostgreSQL | PostgreSQL | BSD-like; short attributed quotes fine |
+  | Kafka | Apache-2.0 | permissive; short attributed quotes fine |
+  | CPython | Python-2.0 | permissive; short attributed quotes fine |
+  | Elasticsearch | SSPL-1.0 OR Elastic-License-2.0 | source-available; keep quotes minimal & commentary-bound |
+  | Kubernetes | Apache-2.0 | permissive; short attributed quotes fine |
+  | Moby | Apache-2.0 | permissive; short attributed quotes fine |
+  | etcd | Apache-2.0 | permissive; short attributed quotes fine |
+  | VS Code | MIT | permissive; repo code only — product binaries are Microsoft-licensed |
 
 - When in doubt, paraphrase in prose and cite `file:function` as a pointer
   instead of quoting. A pointer is always license-clean.

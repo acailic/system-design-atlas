@@ -4,7 +4,7 @@
 > **Upstream:** https://github.com/etcd-io/etcd (core raft in
 > https://github.com/etcd-io/raft) · **License:** Apache-2.0 ·
 > **Pinned commits:** server `f061acd0902d489041448cdd19d71a345d27b9f5`
-> (2026-10-08), raft lib `638f42739b77572b5708eb0d8a776a272ade71ed` ·
+> (2026-10-08), raft lib `638f42739b77572b5708eb0d8a776a272ade71ed` (2026-10-09) ·
 
 etcd is the coordination store beneath Kubernetes and countless
 platforms: a small replicated key-value service whose entire design is

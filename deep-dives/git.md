@@ -2,7 +2,7 @@
 
 > **Atlas id:** `git` · **Domains:** `vcs, storage-engine` ·
 > **Upstream:** https://github.com/git/git · **License:** GPL-2.0 ·
-> **Pinned commit:** `e9019fcafe0040228b8631c30f97ae1adb61bcdc` (tag v2.55.0)
+> **Pinned commit:** `e9019fcafe0040228b8631c30f97ae1adb61bcdc` (tag v2.55.0, 2026-06-29)
 
 git displaced every centralized VCS incumbent with one structural bet:
 the repository is a **persistent, content-addressed object database** —

@@ -43,7 +43,8 @@ selectable modes behind the pager; [PostgreSQL](deep-dives/postgresql.md)
 "durable" and "cache"; [Kafka](deep-dives/kafka.md) — where the log
 stops being a technique and becomes the product; [etcd](deep-dives/etcd.md)
 — raft entries and snapshots framed in a WAL the server replays on
-restart.
+restart; [Elasticsearch](deep-dives/elasticsearch.md) — the translog
+is the WAL that decouples "searchable" (refresh) from "durable" (flush).
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -169,10 +170,8 @@ survived because its contract stayed small and honest.
 "current" is a query, not a location.
 
 **Seen in:** [PostgreSQL](deep-dives/postgresql.md) — xmin/xmax and
-snapshots from the procarray; [Redis](deep-dives/redis.md) — internal
-keys carry (key, sequence) pairs, snapshots pin sequence numbers;
-[Kubernetes](deep-dives/kubernetes.md) — resourceVersion optimistic
-concurrency over every object; [LevelDB](deep-dives/leveldb.md) —
+snapshots from the procarray; [Kubernetes](deep-dives/kubernetes.md) —
+resourceVersion optimistic concurrency over every object; [LevelDB](deep-dives/leveldb.md) —
 compaction drops versions below the oldest live snapshot; [etcd](deep-dives/etcd.md)
 — the whole keyspace is revision-stamped history, watch replays it,
 compaction truncates it.

@@ -10,6 +10,9 @@ design-trivial, does not belong here.
 
 Each candidate is scored 1–5 per axis by whoever proposes it (and re-scored
 in review). Rough bar for inclusion: **no axis below 3, total ≥ 15**.
+Entries scoped as reference reading (e.g. Linux, Chromium) may sit
+below the bar when their why-paragraph argues targeted-reading value;
+the bar governs deep-dive candidates.
 
 ### 1. Design influence (weight: high)
 

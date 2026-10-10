@@ -15,7 +15,7 @@ event loops for I/O-bound work", "content-address your data". Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.
 
-The atlas points at ~20 (and growing) canonical codebases and walks through
+The atlas points at 34 (and growing) canonical codebases and walks through
 the *decisions frozen into their code*: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
