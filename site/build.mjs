@@ -207,7 +207,7 @@ function parseDive(raw, id, catalogEntry) {
   if (eli) {
     const firstPara = eli.split(/\n\n/).find((p) => p.trim() && !p.trim().startsWith('**Why'));
     if (firstPara) {
-      eliTeaser = renderMd(firstPara).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      eliTeaser = decodeEntities(renderMd(firstPara).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
       if (eliTeaser.length > 200) eliTeaser = eliTeaser.slice(0, 197).replace(/\s\S*$/, '') + '…';
     }
   }
@@ -256,7 +256,7 @@ ${body}
   <span><a href="${GITHUB_BASE}">github.com/acailic/system-design-atlas</a></span>
 </footer>
 <noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
 <script src="${asset('assets/site.js')}" defer></script>
 </body>
 </html>
@@ -447,7 +447,7 @@ ${rewriteLinks(whySection, '')}
 <section class="home-section" id="dives">
   <h2>The deep-dives</h2>
   <div class="filter-row" role="group" aria-label="Filter by domain">
-    <button type="button" class="filter-chip" aria-pressed="false">All</button>
+    <button type="button" class="filter-chip" aria-pressed="true">All</button>
     ${domainSet.map((d) => `<button type="button" class="filter-chip" data-domain="${escapeAttr(d)}" aria-pressed="false">${escapeAttr(d)}</button>`).join('\n    ')}
   </div>
   <div class="dive-grid">

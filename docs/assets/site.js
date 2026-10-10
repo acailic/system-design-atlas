@@ -261,6 +261,7 @@ function initReadAloud() {
       if (r.top < 0 || r.bottom > innerHeight) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     };
     u.onend = () => {
+      if (u !== activeUtter) return; // stale: this utterance was cancelled/replaced
       const wasEl = activeEl;
       const advance = advanceBox.checked && !wantPaused;
       clearMark();
@@ -270,7 +271,11 @@ function initReadAloud() {
         if (nextIdx < blocks.length) setTimeout(() => speak(blocks[nextIdx], nextIdx), 260);
       }
     };
-    u.onerror = () => { clearMark(); activeUtter = null; };
+    u.onerror = () => {
+      if (u !== activeUtter) return; // stale: engines that emit error-on-cancel (e.g. Chrome 'interrupted')
+      clearMark();
+      activeUtter = null;
+    };
     synth.speak(u);
     markPlaying(); // some engines fire onstart late
   }
@@ -322,20 +327,29 @@ function initTocSpy() {
 
 /* ── home: domain filter ───────────────────────────────────────── */
 function initFilter() {
-  const chips = document.querySelectorAll('.filter-chip[data-domain]');
   const cards = document.querySelectorAll('.dive-card');
-  if (!chips.length || !cards.length) return;
+  const domainChips = document.querySelectorAll('.filter-chip[data-domain]');
+  const allChip = document.querySelector('.filter-chip:not([data-domain])');
+  if (!domainChips.length || !cards.length) return;
   let active = null;
-  chips.forEach((chip) => {
+  const apply = () => {
+    domainChips.forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.domain === active)));
+    if (allChip) allChip.setAttribute('aria-pressed', String(active === null));
+    cards.forEach((card) => {
+      const domains = (card.dataset.domains || '').split(' ');
+      card.style.display = !active || domains.includes(active) ? '' : 'none';
+    });
+  };
+  domainChips.forEach((chip) => {
     chip.addEventListener('click', () => {
       const d = chip.dataset.domain;
       active = active === d ? null : d;
-      chips.forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.domain === active)));
-      cards.forEach((card) => {
-        const domains = (card.dataset.domains || '').split(' ');
-        card.style.display = !active || domains.includes(active) ? '' : 'none';
-      });
+      apply();
     });
+  });
+  if (allChip) allChip.addEventListener('click', () => {
+    active = null;
+    apply();
   });
 }
 
