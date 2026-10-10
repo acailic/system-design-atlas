@@ -17,7 +17,7 @@ Systems thinking transfers directly between these and the rest of the atlas.
 2. `ReactFiber.js` — the node type.
 3. `ReactFiberBeginWork.js` / `ReactFiberCommitWork.js` — render vs commit phases.
 4. Hooks in `ReactFiberHooks.js`.
-5. `ReactUpdateQueue.js` — batching and priority.
+5. `ReactFiberClassUpdateQueue.js` — batching and priority (plus `ReactUpdateQueue` types in `packages/react/src/`).
 6. A guided reading helps: react.gg's React Internals, and the original Fiber architecture notes in the repo's `notes/`.
 
 **Exercise.** In a demo, toggle `StartTransition` vs normal setState and observe in the scheduler's tracing which lane each took. Then match to `ReactFiberLane.js`.
@@ -62,3 +62,7 @@ The core problems are the same problems elsewhere in the atlas:
 - Fine-grained reactivity → dataflow graphs (streams, spreadsheets, signal networks).
 
 If you design state-heavy systems, React/Vue internals are a direct masterclass.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): react@b618bbb, vue@4ab865a, svelte@707c281.

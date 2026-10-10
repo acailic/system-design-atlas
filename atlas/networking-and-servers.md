@@ -35,7 +35,7 @@ concern is connection lifecycle, backend selection, and failover. The
 scheduler and task model are exemplary systems code.
 
 **Reading path.** `src/haproxy.c` main loops; `src/task.c` the run queue;
-`src/backend.c` balancing algorithms; checkers in `src/checks.c`.
+`src/backend.c` balancing algorithms; checkers in `src/check.c`.
 
 **Exercise.** Add a new balancing algorithm "round-robin-2" (skip every
 second backend) behind the existing config keyword system.
@@ -80,7 +80,7 @@ extension points that make a mesh sidecar possible.
 
 **Why it's here.** Decades of disciplined API evolution and protocol
 implementation on every platform. The multi-protocol state machines
-(`lib/http.c`, `lib/tls.c`, `lib/url.c`) are quietly excellent.
+(`lib/http.c`, `lib/vtls/`, `lib/url.c`) are quietly excellent.
 
 **Exercise.** Enable `CURLOPT_VERBOSE` for an HTTPS request and map each
 verbose line to the state transition in `lib/http.c`.
@@ -97,3 +97,7 @@ verbose line to the state transition in `lib/http.c`.
 - *TCP/IP Illustrated Vol. 1* (Stevens) — the foundation the code assumes.
 - *The C10K problem* page — why these architectures look like they do.
 - Envoy's [blog posts](https://blog.envoyproxy.io/) on why it was built this way.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): nginx@2b5c2b6, haproxy@a8639b9, envoy@47da4b2, caddy@d588d5c, curl@098d3a0.

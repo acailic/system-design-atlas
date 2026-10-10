@@ -56,3 +56,7 @@ enough to read in a week.
 
 **Exercise.** Run `docker compose up` on a two-service config with
 `--verbose`; match each lifecycle step to the code that initiated it.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): terraform@d8e73fc, ansible@0d66197 (compose not tree-checked).

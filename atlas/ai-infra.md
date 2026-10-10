@@ -17,9 +17,9 @@ serving into a systems problem. Reading vLLM is like reading a modern mini-OS wh
 
 **Reading path.**
 1. The [PagedAttention paper](https://arxiv.org/abs/2309.06180).
-2. `vllm/engine/scheduler.py` — the batching loop.
-3. `vllm/core/scheduler.py` + block management — KV-cache pages, preemption, swapping.
-4. Sampling and prefix caching (`prefix_caching.py`).
+2. `vllm/v1/engine/core.py` — the (V1) engine loop.
+3. `vllm/v1/core/sched/` — continuous batching, KV-cache pages, preemption.
+4. Sampling and prefix caching (search for `prefix_caching` under `vllm/v1/`).
 
 **Exercise.** Run vLLM with `--enable-prefix-caching`; re-send a shared
 prefix and explain from the scheduler logs what got reused.
@@ -47,3 +47,7 @@ runners: a Go server managing model blobs, layer caching, and runner
 processes. A good architectural read for "wrapping a complex library into a product."
 
 **Exercise.** Trace a `POST /api/generate` from server to runner process and back; sketch the concurrency and streaming model.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): vllm@f1a3c60, llama.cpp@f2918ca, ollama@eab97e9.

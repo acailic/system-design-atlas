@@ -158,3 +158,7 @@ executors you read.
 - [Bigtable](https://research.google/pubs/bigtable-a-distributed-storage-system-for-structured-data/) — SSTables/LSM lineage.
 - [Amazon Dynamo](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf) — consistent hashing, vector clocks, hinted handoff.
 - [The Log: What every software engineer should know](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) — why logs are everywhere.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): sqlite@d76e14d, redis@3c7e951, postgres@f58ab18, lmdb@253ba52, rocksdb@4b44c2b, duckdb@6b6099a.

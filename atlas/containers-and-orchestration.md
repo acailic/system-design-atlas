@@ -14,10 +14,10 @@ scaling up to the largest distributed control loop in the industry.
 every Linux host. Reading it permanently demystifies containers.
 
 **Reading path.**
-1. `create.go` → `libcontainer/factory.go` → `standard_init_linux.go`:
-   namespace setup, rootfs pivot, capabilities.
-2. `start.go` → the parent/child handshake over a pipe.
-3. `libcontainer/cgroups/` — resource limits.
+1. `create.go` → `start.go` → `libcontainer/standard_init_linux.go`:
+   namespace setup, rootfs pivot, capabilities. (Factory plumbing was folded
+   away in recent releases; cgroup setup now comes from the vendored
+   `github.com/opencontainers/cgroups`.)
 
 **Exercise.** Run a container with `--debug` and list, from the logs, the
 ordered namespace/cgroup operations; then find each in the code.
@@ -32,7 +32,7 @@ ordered namespace/cgroup operations; then find each in the code.
 service decomposition — metadata store, image pull, snapshotter, task
 runtime — a blueprint for designing a long-running platform daemon.
 
-**Reading path.** `cmd/containerd/main.go` → `services/` (each subcommand a gRPC service) → `runtime/v2/` shim protocol.
+**Reading path.** `cmd/containerd/main.go` → `cmd/containerd/server/` (gRPC services wiring) → `core/` (content, events, transfer).
 
 **Exercise.** Follow `ctr pull` from CLI → `images/service.go` → snapshotter; sketch the service dependency graph.
 
@@ -69,3 +69,7 @@ underlying components.
 - [Julia Evans' zines on containers](https://wizardzines.com/) — friendly intro.
 - *Container Security* (Mohclon) for the isolation model.
 - [Kubernetes The Hard Way](https://github.com/kelseyhightower/kubernetes-the-hard-way).
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): runc@9e3a9a3, containerd@3ea5bdb.

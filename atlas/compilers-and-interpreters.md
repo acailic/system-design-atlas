@@ -72,3 +72,7 @@ function at successive IR stages; name what each stage decided.
 - *Writing a C Compiler* (Nora Sandler) — the natural next step after chibicc.
 - "SSA-based Compiler Design" (Hack) for theory grounding.
 - [Let's Build a Compiler](https://www.compilers.iecc.com/crenshaw/) for the ladder below chibicc.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): chibicc@90d1f7f, craftinginterpreters@4a840f7 (qbe, rustc not tree-checked).

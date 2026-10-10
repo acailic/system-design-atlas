@@ -112,3 +112,7 @@ broker's routing spine.
 - [ZooKeeper: Wait-free coordination](https://www.usenix.org/legacy/event/atc10/tech/full_papers/Hunt.pdf)
 - [Kafka paper](https://notes.stephenholiday.com/Kafka.pdf) — log compaction, consumer groups, ISR.
 - [Jepsen analyses](https://jepsen.io/analyses) — how real systems fail under partitions; the best design-judgment training available.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): hashicorp/raft@871f108, etcd-io/raft@638f427, etcd@f061acd, zookeeper@48f7cb0, tikv@5f7037a, nats-server@64dda80.

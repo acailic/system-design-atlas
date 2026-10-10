@@ -60,7 +60,7 @@ write a tiny extension.
 **Why it's here.** A small, universal tool with a sharp interface: stdin →
 fuzzy match → selection. Shows how far careful interface design (compose with pipes, language-agnostic) carries a simple algorithm.
 
-**Exercise.** Read `algo.go` (fuzzy match scoring) and the Go concurrency model for streaming results.
+**Exercise.** Read `src/algo/algo.go` (fuzzy match scoring) and the Go concurrency model for streaming results.
 
 ---
 
@@ -69,6 +69,11 @@ fuzzy match → selection. Shows how far careful interface design (compose with 
 <https://github.com/htop-dev/htop> · ~6k★ · keywords: /proc parsing, ncurses UI, portability layers
 
 **Why it's here.** A classic small systems program: reads /proc, renders
-under ncurses, abstracts platform differences. Approachable in a weekend.
+under ncurses, abstracts platform differences (`linux/Platform.c`, `darwin/Platform.c`).
+Approachable in a weekend.
 
-**Exercise.** Find where the CPU meter's data comes from in `/proc` — the exact files parsed.
+**Exercise.** Find where the CPU meter's data comes from in `/proc` — start at `Process.c` and `linux/Platform.c`, the exact files parsed.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): vscode@a5aeada, ripgrep@3fce3b5, cli/cli@ec5b512, fzf@33a3456, htop@44a59cf.

@@ -82,3 +82,7 @@ kernel boundary crossed to read one line from a file.
 - *Crafting Interpreters* (Nystrom) — before CPython.
 - [Go runtime scheduler slides](https://docs.google.com/document/d/1TTj4T2DS42LyOQxo39o3NMwbaLYJP76Q90y2j2awcufo/edit) — history & design.
 - CPython devguide internals section.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): cpython@0ec3aee, go@dfe2e7b, lua@0b29f40 (musl, rustc not tree-checked).

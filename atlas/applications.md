@@ -18,7 +18,7 @@ and async jobs — inside a 30-year-old architecture.
 **Reading path.**
 1. `src/nvim/main.c` — the loop starts; input from `os/input.c`.
 2. `src/nvim/state.c` — editor state machine (Normal/Insert/…).
-3. `src/nvim/screen.c` — the UI grid model; how redraws are computed as diffs.
+3. `src/nvim/drawscreen.c` — the UI grid model; how redraws are computed as diffs.
 4. `src/nvim/msgpack_rpc/` — the RPC protocol between editor and UI.
 
 **Exercise.** Write a small Lua plugin that uses `vim.api.nvim_buf_set_lines`, then find that API call's C handler in `src/nvim/api/` to see the boundary from both sides.
@@ -67,3 +67,7 @@ state machine inside — small enough to read whole, interesting enough
 - *The Craft of Text Editing* (Finseth) — TUI architecture classic.
 - "My Ideal Text Editor" (destroyallsoftware screencasts).
 - Pro Git book, chapter 10 (Internals).
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): neovim@7e1ae51, git@6de20f6, tmux@95c1c3d.

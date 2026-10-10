@@ -20,9 +20,9 @@ once vs. effectively-once via idempotent producers and transactions).
 **Reading path.**
 1. The [Kafka paper](https://notes.stephenholiday.com/Kafka.pdf) first — the design section still reads as current.
 2. `core/.../server/KafkaApis.scala` — how a produce/fetch request is handled.
-3. `core/.../log/LogSegment.scala` + `Log.scala` — append, index, retention, compaction.
+3. `storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegment.java` — append, index, retention, compaction (the log moved from Scala to Java; `Log.java` sits alongside).
 4. Consumer group protocol: the group coordinator's rebalance path.
-5. Controller failover in `controller/`.
+5. KRaft controller: `metadata/src/main/java/org/apache/kafka/controller/QuorumController.java`.
 
 **Exercise.** Run a local broker; produce with `acks=all` and
 `enable.idempotence=true`; kill the consumer mid-batch and observe offset
@@ -80,9 +80,9 @@ executor, and pluggable executors. Readable Python; a good bridge from
 application code into systems code.
 
 **Reading path.**
-1. `airflow/jobs/` — the scheduler loop and trigger rules.
-2. `airflow/models/dag.py` + `dagrun` — scheduling intervals vs. data intervals.
-3. `airflow/executors/` — local vs. Celery vs. Kubernetes executors.
+1. `airflow-core/src/airflow/jobs/scheduler_job_runner.py` — the scheduler loop and trigger rules.
+2. `airflow-core/src/airflow/models/dag.py` — scheduling intervals vs. data intervals.
+3. `airflow-core/src/airflow/executors/` — local vs. Celery vs. Kubernetes executors.
 
 **Exercise.** Write a DAG with a failed branch and a trigger rule
 (`all_done` vs `all_success`); then find the code path that decided whether
@@ -97,7 +97,8 @@ the downstream task ran.
 **Why it's here.** A different pipeline idea: instead of moving data, compile
 and push computation into the database. Models form a DAG rendered from
 Jinja templates into SQL — a small, legible compiler whose "target language"
-is SQL.
+is SQL. (The repo is mid-rewrite from Python to Rust — read the Python `v1.x`
+tags for the classic architecture, the `crates/` on main for the new one.)
 
 **Exercise.** `dbt compile` on a 3-model DAG; read the generated SQL and
 identify where templating ended and SQL began.
@@ -109,8 +110,14 @@ identify where templating ended and SQL began.
 - Write a 200-line log broker: append-only partition files, a consumer that tracks offsets, and replay after restart.
 - Implement a toy watermark: out-of-order events, a windowed count, and late-event policy.
 
-## Companion papers
+## Verified paths
+
+Upstream commits verified on 2026-10-10: kafka@3de09ca, flink@60846c0, spark@215a146, airflow@df7b8a7, dbt@a0fc53e.
 
 - [Kafka paper](https://notes.stephenholiday.com/Kafka.pdf) · [Flink](https://www.vldb.org/pvldb/vol8/p1804-carbone.pdf) · [RDD](https://www.usenix.org/system/files/conference/nsdi12/nsdi12-final138.pdf)
 - [The Log](https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying)
 - Kappa architecture / Lambda architecture write-ups.
+
+## Companion papers
+
+- [Kafka paper](https://notes.stephenholiday.com/Kafka.pdf) · [Flink dataflow](https://www.vldb.org/pvldb/vol8/p1804-carbone.pdf) · [Spark RDD](https://www.usenix.org/system/files/conference/nsdi12/nsdi12-final138.pdf)

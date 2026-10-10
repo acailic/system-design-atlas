@@ -91,9 +91,10 @@ Not every famous project is here, and that is deliberate. Inclusion criteria:
 3. **A path exists for a learner** — real entry points, companion books or
    papers, exercises you can actually do.
 
-Line counts are ballparks for orientation; repos evolve. Verify against
-upstream. Line counts are approximate, repos change — treat sizes as
-orientation, not fact.
+Line counts and star counts are ballparks for orientation; repos evolve —
+verify against upstream. Reading paths in the atlas files are checked
+against real upstream trees (see the "Verified paths" footers; spot-checked
+2026-10-10 via shallow clones).
 
 ## Contributing
 

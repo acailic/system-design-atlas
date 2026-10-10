@@ -103,3 +103,7 @@ index structure + ranking rules. (Full entry in
 - [Elasticsearch: The Definitive Guide](https://www.elastic.co/guide/en/elasticsearch/guide/current/index.html)
 - ClickHouse MergeTree docs and "LSM vs columnar" comparisons.
 - Cassandra SIGMOD paper, Dynamo (AP side).
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): elasticsearch@36a8b81, clickhouse@727bdd7, cassandra@0e2f6d3, mongodb@2f3d83b.

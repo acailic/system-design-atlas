@@ -77,3 +77,7 @@ map fields to `kernel/sched/stats.c`.
 - OSTEP (free online) — the theory matched to xv6.
 - *The Design of the UNIX Operating System* (Bach) — the classic System V design.
 - Arpaci-Dusseau's [OS book](https://pages.cs.wisc.edu/~remzi/OSTEP/).
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): xv6-riscv@06aad25 (Linux entry is docs-guided; tree too large to enumerate).

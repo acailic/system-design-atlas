@@ -34,8 +34,8 @@ WAL, out-of-order handling) is a serious storage engine that happens to be reada
 systems) — indexing pipeline, query planner, ranking rules — in Rust with
 clear module boundaries. The `milli` engine crate is the heart.
 
-**Reading path.** Start at `meilisearch/src/search` for the query path;
-then `milli/src/index/` for indexing; read the
+**Reading path.** Start at `crates/meilisearch/src/routes/` for the query path;
+then `crates/milli/src/index/` for indexing; read the
 [design docs](https://github.com/meilisearch/product/).
 
 **Exercise.** Index a small document set, issue a query with a deliberate
@@ -52,3 +52,7 @@ typo, and find the fuzzy-matching code path it exercised.
 
 - [Prometheus docs on storage](https://prometheus.io/docs/prometheus/latest/storage/).
 - *Introduction to Information Retrieval* (Manning et al., free online) — theory behind search.
+
+## Verified paths
+
+Upstream trees checked 2026-10-10 (shallow clones): prometheus@2213e3c, meilisearch@9d3365c.
