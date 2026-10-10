@@ -1,0 +1,592 @@
+# system-design-atlas — catalog
+#
+# Source of truth for every tracked project. One entry per project.
+# Schema:
+#   id:          short slug, also the deep-dive filename
+#   name:        display name
+#   repo:        canonical public repo
+#   language:    primary implementation language(s)
+#   license:     SPDX id of upstream license
+#   domains:     tags from CURATION.md's domain list
+#   difficulty:  gentle | moderate | demanding (of the READER)
+#   status:      cataloged (entry only) | deep-dived (deep-dives/<id>.md exists)
+#   scores:      design_influence / clarity / teachability / domain_fit (1–5)
+#   why:         one paragraph — what design lesson this codebase teaches
+#                unusually well. Written for a reader choosing what to read.
+#
+# Adding entries: see CONTRIBUTING.md. Re-scoring in review is expected.
+
+version: 1
+projects:
+
+  # ── kernel ───────────────────────────────────────────────────────────
+
+  - id: linux
+    name: Linux kernel
+    repo: https://github.com/torvalds/linux
+    language: C
+    license: GPL-2.0
+    domains: [os-kernel]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The most-used piece of software in existence, and the clearest proof
+      that architecture beats features: “everything is a file” (VFS over
+      wildly different filesystems), a driver model that lets thousands of
+      vendors add code without touching the core, and per-subsystem
+      schedulers/locks tuned by workload. It won ubiquity because its
+      abstractions made porting cheap — the same design lesson as SQLite,
+      at planetary scale. Read targeted (mm/, kernel/sched/, fs/) with a
+      companion book; never cover to cover.
+
+  # ── cache / in-memory ────────────────────────────────────────────────
+
+  - id: redis
+    name: Redis
+    repo: https://github.com/redis/redis
+    language: C
+    license: RSALv2 OR SSPL-1.0 OR AGPL-3.0
+    domains: [cache, database, networking]
+    difficulty: moderate
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 5, domain_fit: 5 }
+    why: >
+      The canonical answer to "what does an I/O-bound server look like when
+      you optimize for simplicity under load": a single-threaded event loop
+      plus purpose-built data structures (SDS strings, incremental-rehash
+      hash tables, listpacks, skip lists with back-pointers for range
+      queries). Redis teaches that data-structure choice IS server
+      architecture — and that serializing execution removes entire classes
+      of concurrency bugs that dominate other servers. It won the cache
+      slot everywhere because that bet made it fast on one core and
+      predictable under load, when competitors were still losing to
+      lock contention.
+
+  # ── database ──────────────────────────────────────────────────────────
+
+  - id: sqlite
+    name: SQLite
+    repo: https://github.com/sqlite/sqlite
+    language: C
+    license: blessing (public domain)
+    domains: [database, storage-engine]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 3, teachability: 4, domain_fit: 5 }
+    why: >
+      The most deployed database on earth — in every phone, browser, and
+      airliner — because of one architectural choice: strict layering with
+      every environment assumption isolated behind one interface. Tokenizer
+      → parser → code generator → virtual machine (VDBE) → B-tree → pager →
+      OS interface (VFS): each layer has a narrow, testable contract, and
+      the whole query pipeline is a compiler emitting bytecode for a tiny
+      VM. Teaches how portability and reliability are architectural, not
+      incidental.
+
+  - id: postgresql
+    name: PostgreSQL
+    repo: https://github.com/postgres/postgres
+    language: C
+    license: PostgreSQL
+    domains: [database, storage-engine]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
+    why: >
+      The reference relational server that outlived every proprietary
+      rival: process-per-connection (not threads), MVCC via tuple
+      versioning, write-ahead logging, and a planner/executor split that
+      has shaped every database since. Its design decisions won on
+      operational soundness — correctness features (transactions, MVCC,
+      extensions via stable C ABI) that competitors bolted on later or
+      never matched. Reading Postgres teaches how a large system stays
+      coherent for decades: rigorous comments, per-subsystem README
+      files, and conservative extension points (WAL is the seam logical
+      replication hooks into).
+
+  # ── storage engines ───────────────────────────────────────────────────
+
+  - id: leveldb
+    name: LevelDB
+    repo: https://github.com/google/leveldb
+    language: C++
+    license: BSD-3-Clause
+    domains: [storage-engine]
+    difficulty: moderate
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 5, teachability: 5, domain_fit: 5 }
+    why: >
+      The cleanest published LSM-tree (log-structured merge tree) engine,
+      small enough to read in a week: a memtable backed by a skip list, an
+      append-only WAL, leveled compaction of immutable SSTables, and a
+      manifest that is itself a log. Teaches the fundamental write-optimized
+      trade — sequential writes + amortized compaction vs read
+      amplification — with almost no incidental complexity around it.
+
+  - id: rocksdb
+    name: RocksDB
+    repo: https://github.com/facebook/rocksdb
+    language: C++
+    license: GPL-2.0 OR Apache-2.0
+    domains: [storage-engine]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      LevelDB's design pushed to production extremes: column families, tiered
+      compaction, rate limiting, Bloom filters per level, transactions via a
+      write batch pipeline. Read after LevelDB to see what the elegant
+      textbook design costs when paged into Flash-at-scale reality — an
+      education in how constraints, not taste, evolve an architecture.
+
+  # ── web servers / proxies ─────────────────────────────────────────────
+
+  - id: nginx
+    name: nginx
+    repo: https://github.com/nginx/nginx
+    language: C
+    license: BSD-2-Clause
+    domains: [web-server, proxy-lb]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      The web server that broke Apache's thread-per-connection model and
+      owns the top of the web-tier market share because of it: a
+      master/worker process model where a supervisor holds the listening
+      sockets, workers accept-by-lock and never share memory, a state
+      machine per connection instead of a thread, and pool-based memory
+      that makes "free everything" O(1) per request. Teaches the C10K
+      answer in the large: shared-nothing processes + non-blocking state
+      machines + ownership by lifetime.
+
+  - id: caddy
+    name: Caddy
+    repo: https://github.com/caddyserver/caddy
+    language: Go
+    license: Apache-2.0
+    domains: [web-server, proxy-lb]
+    difficulty: gentle
+    status: cataloged
+    scores: { design_influence: 3, clarity: 5, teachability: 5, domain_fit: 4 }
+    why: >
+      A modern web server where the idioms do the hard work: Go's
+      goroutines where nginx hand-rolls state machines, an HTTP middleware
+      chain, and automatic-HTTPS as a first-class subsystem rather than a
+      bolt-on. Read alongside nginx to see which problems disappear when the
+      runtime provides concurrency, and which (config reload, graceful
+      upgrade) remain architectural no matter the language.
+
+  - id: haproxy
+    name: HAProxy
+    repo: https://github.com/haproxy/haproxy
+    language: C
+    license: GPL-2.0
+    domains: [proxy-lb]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 3 }
+    why: >
+      The load balancer that refuses to drop traffic: run queues and tasks
+      instead of threads, zero-downtime reload via socket handoff, and
+      obsessive per-connection memory accounting (pools + ebtree). Teaches
+      how to design for "must not fail" — every hot path is written against
+      a budget, and the budget is visible in the code.
+
+  - id: envoy
+    name: Envoy
+    repo: https://github.com/envoyproxy/envoy
+    language: C++
+    license: Apache-2.0
+    domains: [proxy-lb, distributed]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      The modern data-plane architecture: an event loop per worker thread,
+      filter chains as the extension model (network filters, HTTP filters),
+      xDS as the control-plane API, and stats/tracing built into the
+      skeleton. Teaches that the hardest part of a proxy is not forwarding
+      — it is observability and configuration-at-runtime, and both need to
+      be architectural, not added later.
+
+  # ── version control ───────────────────────────────────────────────────
+
+  - id: git
+    name: git
+    repo: https://github.com/git/git
+    language: C, shell, Perl
+    license: GPL-2.0
+    domains: [vcs, storage-engine]
+    difficulty: moderate
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      A distributed VCS that displaced every centralized incumbent because
+      of one structural bet, not features: a persistent, content-addressed
+      object database (blobs/trees/commits/tags under a DAG of refs) with
+      porcelain on top. The model made branching, merging, dedup,
+      verification, and offline work derived, local operations — so
+      workflows that were painful merges became free. Teaches the deepest
+      lesson in the atlas: choose your core data model so that almost
+      everything else follows. Also the best real study of DAG algorithms
+      and of a hash-addressed storage format.
+
+  # ── queues / logs ─────────────────────────────────────────────────────
+
+  - id: kafka
+    name: Apache Kafka
+    repo: https://github.com/apache/kafka
+    language: Scala, Java
+    license: Apache-2.0
+    domains: [queue-log, distributed, storage-engine]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
+    why: >
+      The nervous system of every large data platform, and it won that slot
+      with a design inversion: not a smart message router but a dumb,
+      append-only, partitioned log that exploits the one thing disks and
+      networks do at full speed — sequential append. Consumer groups
+      rebalance ownership; retention-by-time turns a queue into a
+      replayable database. Teaches the throughput lesson (batching +
+      sequential I/O + sendfile beat clever data structures) and the
+      "dumb broker, smart clients" split.
+
+  - id: nats
+    name: NATS
+    repo: https://github.com/nats-io/nats-server
+    language: Go
+    license: Apache-2.0
+    domains: [queue-log, networking]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 3, clarity: 5, teachability: 4, domain_fit: 3 }
+    why: >
+      A messaging server whose entire protocol is a handful of text lines
+      (INFO/CONNECT/PUB/SUB), with subject-based addressing (foo.*.bar) and
+      per-subscription goroutine delivery. Teaches protocol minimalism and
+      the "at-most-once firehose with JetStream opt-in for durability"
+      layering — decide your delivery semantics per feature, not globally.
+
+  # ── runtimes / languages ──────────────────────────────────────────────
+
+  - id: nodejs
+    name: Node.js
+    repo: https://github.com/nodejs/node
+    language: C++, JavaScript
+    license: MIT
+    domains: [runtime]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
+    why: >
+      V8 + libuv + a module system, glued so that JavaScript became a
+      server language. Teaches the embedding lesson: how you wrap an engine
+      (handles/scopes/contexts in V8) and an event loop (libuv) into a
+      coherent platform, and how the language boundary (C++ core, JS
+      stdlib) is itself a design decision that shaped npm and the entire
+      ecosystem.
+
+  - id: libuv
+    name: libuv
+    repo: https://github.com/libuv/libuv
+    language: C
+    license: MIT
+    domains: [runtime, networking]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
+    why: >
+      The portable event loop, distilled: poll/epoll/kqueue/IOCP behind one
+      API, plus the async-cross-thread escape hatch (uv_async_t) and thread
+      pool for blocking work (fs, dns). Small enough to read completely in a
+      weekend. Teaches how to abstract OS differences without leaking them,
+      and why the "event loop demultiplexer" pattern needs queues and
+      handles/requests as its vocabulary.
+
+  - id: lua
+    name: Lua
+    repo: https://github.com/lua/lua
+    language: C
+    license: MIT
+    domains: [language, runtime]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
+    why: >
+      A whole language — lexer, parser, register-based VM, incremental GC,
+      and the friendliest C embedding API ever designed — in ~30k lines
+      with almost no dependencies. Teaches that a runtime's power comes
+      from a few orthogonal primitives: one value type (tagged union),
+      metatables instead of classes, a registry instead of global state.
+      The canonical "small core, embed everywhere" codebase (games, Redis,
+      nginx all embed it).
+
+  - id: v8
+    name: V8
+    repo: https://github.com/v8/v8
+    language: C++
+    license: BSD-3-Clause
+    domains: [runtime, language]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 3 }
+    why: >
+      The fastest widely-deployed JS engine: Ignition interpreter, TurboFan
+      optimizing compiler, concurrent+incremental marking, generational
+      heap, hidden classes. Included for influence and as a reference, not
+      a first read — the lesson is how speculative optimization shapes
+      architecture (feedback vectors, deopt points) when raw speed is the
+      product.
+
+  # ── search engines ───────────────────────────────────────────────────
+
+  - id: elasticsearch
+    name: Elasticsearch
+    repo: https://github.com/elastic/elasticsearch
+    language: Java
+    license: SSPL-1.0 OR Elastic-License-2.0
+    domains: [search-engine, distributed, database]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 4 }
+    why: >
+      Search made universally accessible — and it won by API design as
+      much as by engineering: Lucene's inverted index wrapped in a JSON
+      over HTTP interface with schema-on-the-fly, sharding and replication
+      declaratively configured per index. Teaches how hiding a fierce
+      engine (Lucene segments, merges, scoring) behind a friendly
+      distributed façade created a decade of default infrastructure, and
+      what that hiding costs (JVM memory pressure, shard rebalancing
+      complexity) at scale.
+
+  # ── containers / orchestration ────────────────────────────────────────
+
+  - id: kubernetes
+    name: Kubernetes
+    repo: https://github.com/kubernetes/kubernetes
+    language: Go
+    license: Apache-2.0
+    domains: [orchestration, container, distributed]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The operating system of the datacenter, and the biggest
+      architectural bet in modern infrastructure: declarative desired
+      state + level-triggered reconcile loops (controllers) instead of
+      imperative actions. Users describe the world they want; controllers
+      continuously converge reality toward it, with etcd as the single
+      source of truth behind a REST API that is itself the extension
+      point (CRDs turned k8s into a platform for platforms). Teaches
+      control-plane design, eventual consistency as a user-facing model,
+      and how API surface — not features — made it beat every rival.
+
+  - id: runc
+    name: runc
+    repo: https://github.com/opencontainers/runc
+    language: Go
+    license: Apache-2.0
+    domains: [container]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
+    why: >
+      What "a container" actually is, in ~30k lines: parse an OCI bundle
+      (config.json), clone(2) with namespaces, set up cgroups, pivot_root,
+      exec. Teaches the Linux container primitives one syscall at a time —
+      the rare influential system small enough to read cover to cover —
+      and shows how a spec (OCI) can turn an implementation detail into an
+      ecosystem interface.
+
+  - id: moby
+    name: Moby (Docker)
+    repo: https://github.com/moby/moby
+    language: Go
+    license: Apache-2.0
+    domains: [container]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      The tool that made containers mainstream, and it won on a packaging
+      design decision: images as immutable, content-addressed, layered
+      tarballs with copy-on-write union mounts, plus one command
+      (dockerfile → docker run) from source to running container. Read
+      with runc to see the split: Moby wraps runtimes, images, layers,
+      volumes, and networks in a daemon with a REST API and plugin seams
+      (network/volume/log drivers). Teaches product-shaped systems design
+      where developer experience is the architectural driver.
+
+  # ── ML frameworks ─────────────────────────────────────────────────────
+
+  - id: pytorch
+    name: PyTorch
+    repo: https://github.com/pytorch/pytorch
+    language: C++, Python
+    license: BSD-3-Clause
+    domains: [ml-framework]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
+    why: >
+      A tensor library that became the dominant training framework via one
+      architectural bet: define-by-run autodiff, where the forward pass
+      records a dynamic graph and backward walks it. Teaches how to layer
+      an eager Python frontend over a C++ dispatcher/ATen kernel backend,
+      and how extension design (custom ops, torch.compile seams) decides a
+      framework's fate.
+
+  - id: llama-cpp
+    name: llama.cpp
+    repo: https://github.com/ggml-org/llama.cpp
+    language: C/C++
+    license: MIT
+    domains: [ml-framework]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 4 }
+    why: >
+      LLM inference with no framework: ggml tensors, memory-mapped weight
+      files, quantization as first-class, graph-built-per-model eval loops.
+      Teaches performance engineering as architecture — how batching, KV
+      cache layout, and precision choices become structural decisions, and
+      how far pure C plus discipline goes when the problem is
+      well-understood.
+
+  # ── browser engines ───────────────────────────────────────────────────
+
+  - id: servo
+    name: Servo
+    repo: https://github.com/servo/servo
+    language: Rust
+    license: MPL-2.0
+    domains: [browser-engine]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 3, domain_fit: 3 }
+    why: >
+      A browser engine built as independent crates (html5ever parser,
+      stylo style system, WR/WebRender compositor) with task-based
+      parallelism instead of one monolithic main thread. Teaches how to
+      decompose a gigantic legacy-shaped problem (the web platform) into
+      communicating components with hard boundaries — and what Rust's
+      ownership model buys in a codebase where data races were the
+      historical bug class.
+
+  - id: chromium
+    name: Chromium
+    repo: https://github.com/chromium/chromium
+    language: C++
+    license: BSD-3-Clause AND others
+    domains: [browser-engine]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 2 }
+    why: >
+      The most dominant browser engine ever and the codebase behind
+      Chrome/Edge/Opera: multiprocess sandboxing (browser vs renderer vs
+      utility processes), Mojo IPC, the V8/Blink split. Its process
+      architecture — splitting rendering into sandboxed, killable
+      processes — is what let Chrome win on security and stability while
+      rivals stayed monolithic. Cataloged for completeness and targeted
+      reading only; the atlas-level lesson is how a security model forced
+      the architecture, at the cost of enormous IPC complexity.
+
+  # ── distributed systems ───────────────────────────────────────────────
+
+  - id: etcd
+    name: etcd
+    repo: https://github.com/etcd-io/etcd
+    language: Go
+    license: Apache-2.0
+    domains: [distributed, database]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      Raft consensus in production clothes: a WAL-backed state machine,
+      leader election, log replication, and snapshot/compaction — plus the
+      watch API that turned it into Kubernetes' brain. Teaches the gap
+      between a consensus paper and a deployable service: lease semantics,
+      revision-stamped MVCC keyspace, and why every read needs an
+      explicit consistency decision.
+
+  # ── editors ───────────────────────────────────────────────────────────
+
+  - id: vscode
+    name: VS Code
+    repo: https://github.com/microsoft/vscode
+    language: TypeScript
+    license: MIT
+    domains: [editor]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 4 }
+    why: >
+      The most-used code editor of the era, built on an unfashionable bet
+      that won: Electron (Chromium + Node) for the UI, with all editor
+      intelligence pushed out of the renderer into a separate
+      extension-host process that speaks Language Server Protocol and
+      Debug Adapter Protocol. That process + protocol seam is why a
+      plugin ecosystem could explode safely in any language — VS Code
+      turned editor extension into a server-client protocol problem
+      instead of an in-process C API problem. Teaches extension
+      architecture as the product.
+
+  - id: neovim
+    name: Neovim
+    repo: https://github.com/neovim/neovim
+    language: C, Lua
+    license: Apache-2.0
+    domains: [editor]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 3, clarity: 4, teachability: 4, domain_fit: 3 }
+    why: >
+      A 40-year-old editor architecture modernized without forking its
+      soul: core/editor split, msgpack-RPC as the extension seam (clients,
+      LSP, plugins all speak it), and Lua as embedded language replacing
+      ad-hoc scripting. Read alongside VS Code to compare two answers to
+      the same question (how do plugins extend an editor safely?): RPC
+      peers vs protocol servers. Teaches incremental re-architecture of a
+      working system — introducing boundaries while keeping the installed
+      base compatible.
+
+  # ── networking / media (client-side classics) ──────────────────────────
+
+  - id: curl
+    name: curl
+    repo: https://github.com/curl/curl
+    language: C
+    license: curl
+    domains: [networking]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 3 }
+    why: >
+      Every protocol, every platform, zero dependencies, one API — for
+      decades. Teaches portability as an architectural commitment
+      (curl_multi for event-loop integration, a build system that spans
+      embedded to supercomputers) and API stability as a discipline: the
+      easy-vs-multi handle split is a masterclass in designing a C API
+      that composes with foreign event loops.
+
+  - id: ffmpeg
+    name: FFmpeg
+    repo: https://github.com/FFmpeg/FFmpeg
+    language: C
+    license: LGPL-2.1 OR GPL-2.0 (per binary)
+    domains: [media, networking]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      The universal media toolbox: demuxers, decoders, filters, encoders,
+      muxers as registered components behind lavf/lavc/avfilter APIs, with
+      a directed-graph filter engine and SIMD-per-architecture
+      optimizations. Teaches plugin-style architecture at extreme scale —
+      how hundreds of codecs share one memory/refcounting and error model
+      — and why "boring uniform interfaces" beat clever special cases.
