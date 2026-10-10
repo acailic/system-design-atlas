@@ -64,7 +64,9 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
 6. Fill difficulty/prerequisites honestly, including an hour budget.
 7. Update the catalog entry: `status: deep-dived`.
 8. Add the deep-dive to the coverage list in `README.md`.
-9. PR title: `deep-dive: <id>`.
+9. Cross-link `PATTERNS.md`: if the deep-dive instantiates (or adds) a
+   recurring pattern, add/extend its "Seen in" pointer list.
+10. PR title: `deep-dive: <id>`.
 
 ### Quality bar (reviewers check this)
 

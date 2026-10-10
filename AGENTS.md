@@ -18,3 +18,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Analyzed repos are shallow-cloned into `clones/` (gitignored); never vendor upstream code. Keep snippet policy from `LICENSES.md`.
 - When adding a deep-dive: update `status: deep-dived` in catalog.yaml and the coverage list in README.md in the same change.
 - Catalog selection weighs both popularity/ubiquity and design depth; heavyweight tools' `why:` paragraphs must tie popularity to the design decision that made them win (captain's standing emphasis).
+
+## Deep-dive process addenda (learned during the 13-dive expansion)
+
+- When adding a deep-dive, also update: `status:` in catalog.yaml, the coverage list in README.md, and (if the codebase instantiates a recurring lesson) the "Seen in" lists in PATTERNS.md — see CONTRIBUTING.md checklist.
+- Upstream refactors happen: redis/sqlite/git/kafka/etcd have all recently moved core code (git's odb/ layer, kafka's log engine to storage module Java, etcd's raft extracted to etcd-io/raft, VS Code ext-host paths). Always grep for the function, never trust memory of layout.
