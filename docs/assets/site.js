@@ -190,6 +190,7 @@ function initReadAloud() {
   let activeEl = null;
   let activeUtter = null;
   let wantPaused = false;
+  let advanceTimer = 0;
 
   blocks.forEach((el, i) => {
     el.classList.add('ra-host');
@@ -268,7 +269,7 @@ function initReadAloud() {
       activeUtter = null;
       if (advance && wasEl) {
         const nextIdx = idx + 1;
-        if (nextIdx < blocks.length) setTimeout(() => speak(blocks[nextIdx], nextIdx), 260);
+        if (nextIdx < blocks.length) advanceTimer = setTimeout(() => speak(blocks[nextIdx], nextIdx), 260);
       }
     };
     u.onerror = () => {
@@ -287,6 +288,7 @@ function initReadAloud() {
   }
 
   function stopAll() {
+    clearTimeout(advanceTimer);
     wantPaused = false;
     synth.cancel();
     clearMark();
