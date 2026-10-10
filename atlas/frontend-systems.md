@@ -49,6 +49,8 @@ system design lesson in miniature).
 
 **Why it's here.** The compiler-first design: instead of shipping a runtime, analyze at build time, emit minimal DOM updates. Reading `packages/svelte/src/compiler` shows optimization as *analysis* — what a runtime wastes, a compiler can delete.
 
+**Reading path.** `packages/svelte/src/compiler/` — parse → analyze (the reactivity graph) → generate; then diff with the runtime-reactive designs above.
+
 **Exercise.** Read the compiler output of a small component with reactivity; note how much runtime work became generated code.
 
 ---

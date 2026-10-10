@@ -46,6 +46,8 @@ prefix and explain from the scheduler logs what got reused.
 runners: a Go server managing model blobs, layer caching, and runner
 processes. A good architectural read for "wrapping a complex library into a product."
 
+**Reading path.** `server/routes/` (REST) → `server/model.go` + layer/blob store → `server/runner.go` (managing inference processes).
+
 **Exercise.** Trace a `POST /api/generate` from server to runner process and back; sketch the concurrency and streaming model.
 
 ## Verified paths

@@ -54,6 +54,8 @@ lifecycle of services and networks driven by a single YAML file. Shows how
 Compose maps a declarative file to the Docker API calls, in a codebase small
 enough to read in a week.
 
+**Reading path.** `cmd/compose/` command wiring → `pkg/compose/` (project model: services, networks, dependencies) → the adapter layer that issues Docker API calls.
+
 **Exercise.** Run `docker compose up` on a two-service config with
 `--verbose`; match each lifecycle step to the code that initiated it.
 

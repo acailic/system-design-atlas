@@ -44,7 +44,9 @@ runtime — a blueprint for designing a long-running platform daemon.
 
 **Why it's here.** The largest declarative state machine in production:
 API server (etcd-backed), controllers reconciling desired vs actual state,
-schedulers, kubelet. Reading all of it is unrealistic — instead:
+schedulers, kubelet. Reading all of it is unrealistic.
+
+**Reading path.** Instead:
 1. [client-go's workqueue informer pattern](https://github.com/kubernetes/client-go) — THE canonical controller architecture.
 2. [sample-controller](https://github.com/kubernetes/sample-controller) — a complete loop: watch → queue → reconcile.
 3. `staging/src/k8s.io/api` — API machinery: how resources/types/versioning work.

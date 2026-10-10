@@ -67,6 +67,8 @@ and small.
 Every syscall wrapper is visible; `src/stdio/printf` is a famous piece of
 engineering. Read when you want to see what sits *below* the runtime.
 
+**Reading path.** `src/stdio/printf.c` (the formatting engine), `src/malloc/` (mallocng), `src/internal/` (syscall shims).
+
 **Exercise.** Follow `fopen` → `malloc` → syscall wrappers; list every
 kernel boundary crossed to read one line from a file.
 

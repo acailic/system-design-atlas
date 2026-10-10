@@ -30,6 +30,8 @@ parser rule, extend it, and rebuild chibicc, then chibicc-compiles-git.
 jlox, then bytecode clox) from scratch. Working the book makes reading
 CPython/Lua dramatically easier.
 
+**Reading path.** The book itself, front to back — it *is* the path.
+
 **Exercise.** Do the book's chapters; after each, diff your design choices
 against Lua's.
 
@@ -56,6 +58,8 @@ function through `parse` → SSA (ssa.c) → `rega.c` register allocation → em
 **Why it's here.** For advanced study: rustc's guides ([rustc-dev-guide](https://rustc-dev-guide.rust-lang.org/)) explain a modern type-checking,
 borrow-checking, LLVM-lowering pipeline; LLVM is the industry compiler
 backend. Read the guides and seams, not the whole tree.
+
+**Reading path.** The rustc-dev-guide chapters in order; then `compiler/` crates the guide names for each phase.
 
 **Exercise.** Use `-Z unpretty=hir` / `--emit=llvm-ir` to see the same
 function at successive IR stages; name what each stage decided.

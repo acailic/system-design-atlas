@@ -52,6 +52,8 @@ every git weirdness you've ever hit.
 state machine inside — small enough to read whole, interesting enough
 (scrollback, modes, panes) to be worth it.
 
+**Reading path.** `tmux.c` (client/server split) → `server.c` loop → `input-keys.c` (parser) → `screen-write.c` (the terminal emulator core) → `tty.c`.
+
 **Exercise.** Trace one keystroke from the client process to the pane's
 `tty.c` write.
 

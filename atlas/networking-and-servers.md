@@ -66,7 +66,7 @@ extension points that make a mesh sidecar possible.
 
 <https://github.com/caddyserver/caddy> · 78k★ (2026-10) · keywords: plugin architecture, TLS automation, ACME
 
-**Why it's Go-plugin design in production: modules register themselves, a config turns into an app. Also the definitive real-world ACME/TLS-automation story.
+**Why it's here.** Go-plugin design in production: modules register themselves, a config turns into an app. Also the definitive real-world ACME/TLS-automation story.
 
 **Reading path.** `cmd/caddy` — entry; `modules/caddyhttp/` — the HTTP server as a module tree; `modules/caddytls/` — certificate automation.
 
@@ -81,6 +81,8 @@ extension points that make a mesh sidecar possible.
 **Why it's here.** Decades of disciplined API evolution and protocol
 implementation on every platform. The multi-protocol state machines
 (`lib/http.c`, `lib/vtls/`, `lib/url.c`) are quietly excellent.
+
+**Reading path.** `lib/easy.c` (public API) → `lib/url.c` (connection engine) → `lib/http.c` (protocol state machine) → `lib/vtls/` (TLS backends, one per library).
 
 **Exercise.** Enable `CURLOPT_VERBOSE` for an HTTPS request and map each
 verbose line to the state transition in `lib/http.c`.

@@ -100,6 +100,8 @@ Jinja templates into SQL — a small, legible compiler whose "target language"
 is SQL. (The repo is mid-rewrite from Python to Rust — read the Python `v1.x`
 tags for the classic architecture, the `crates/` on main for the new one.)
 
+**Reading path.** Python `v1.x` tags: `core/dbt/` (parse → compile → run); new main: `crates/`.
+
 **Exercise.** `dbt compile` on a 3-model DAG; read the generated SQL and
 identify where templating ended and SQL began.
 

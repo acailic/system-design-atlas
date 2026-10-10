@@ -50,6 +50,10 @@ pointing at the code in `src/object/cnode.c`.
 and "everything is a URL scheme" — see Unix ideas rebuilt with modern
 tooling.
 
+**Reading path.** The [redox-os/redox](https://github.com/redox-os/redox) monorepo README first; then the kernel's scheme/context handling; then one userspace scheme server end to end.
+
+**Exercise.** Trace how `open("disk:/file")` resolves to a userspace driver; draw the message path from VFS to scheme server.
+
 ---
 
 ### Linux (C, ~40M lines) — difficulty ★★★★ (targeted reads only)
@@ -57,7 +61,9 @@ tooling.
 <https://github.com/torvalds/linux> · 251k★ (2026-10) · keywords: scheduler, memory management, block layer
 
 **Why it's here.** Not for reading whole — for targeted subsystem reads with
-a guide. Good starting points:
+a guide.
+
+**Reading path.** Start narrow:
 - Follow one syscall (e.g. `write`) from `fs/read_write.c` → VFS → a filesystem.
 - `kernel/sched/` (CFS/EEVDF core), `mm/` (page allocator).
 - Robert Love's *Linux Kernel Development*; [kernelnewbies.org](https://kernelnewbies.org/) FAQs.

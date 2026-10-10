@@ -29,11 +29,11 @@ Protocol — a protocol design so clean it now spans every editor.
 
 <https://github.com/BurntSushi/ripgrep> · 69k★ (2026-10) · keywords: parallel traversal, memory-mapped search, SIMD, ignore rules
 
-**Why it's A hierarchy of performance engineering: a directory walk with
+**Why it's here.** A hierarchy of performance engineering: a directory walk with
 ignore rules (the `ignore` crate), parallelism per worker thread, and
 adapters that switch between mmap and streaming I/O. The fastest grep in the world — every line justifies itself.
 
-**Reading path.** Read the [`DEVELOPMENT.md`](https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md) guide; then the `ignore` crate's parallel walker and the `grep-searcher` strategy switching. Pair with the author's blog posts.
+**Reading path.** Read the [`GUIDE.md`](https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md) user guide; then the `ignore` crate's parallel walker and the `grep-searcher` strategy switching. Pair with the author's blog posts.
 
 **Exercise.** Benchmark vs `grep -r`; profile where time goes; explain the
 three biggest design wins in a paragraph.
@@ -48,6 +48,8 @@ three biggest design wins in a paragraph.
 layer over GraphQL/REST, extension mechanism. The codebase you'd hand to
 anyone building a polished CLI tool in Go.
 
+**Reading path.** `pkg/cmd/` command tree → `pkg/cmdutil/` factory wiring → `internal/api/` + GraphQL client layer.
+
 **Exercise.** Trace `gh pr view` from command dispatch to GraphQL query. Then
 write a tiny extension.
 
@@ -60,6 +62,8 @@ write a tiny extension.
 **Why it's here.** A small, universal tool with a sharp interface: stdin →
 fuzzy match → selection. Shows how far careful interface design (compose with pipes, language-agnostic) carries a simple algorithm.
 
+**Reading path.** `src/core.go` (event loop) → `src/algo/algo.go` (matching) → `src/terminal.go` (UI) → `src/server.go` (client/server mode).
+
 **Exercise.** Read `src/algo/algo.go` (fuzzy match scoring) and the Go concurrency model for streaming results.
 
 ---
@@ -71,6 +75,8 @@ fuzzy match → selection. Shows how far careful interface design (compose with 
 **Why it's here.** A classic small systems program: reads /proc, renders
 under ncurses, abstracts platform differences (`linux/Platform.c`, `darwin/Platform.c`).
 Approachable in a weekend.
+
+**Reading path.** `main.c` → `ProcessList.c` (the /proc walk) → `linux/Platform.c` → `ScreenManager.c` / `InfoScreen.c` (rendering).
 
 **Exercise.** Find where the CPU meter's data comes from in `/proc` — start at `Process.c` and `linux/Platform.c`, the exact files parsed.
 
