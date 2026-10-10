@@ -75,4 +75,4 @@ function at successive IR stages; name what each stage decided.
 
 ## Verified paths
 
-Upstream trees checked 2026-10-10 (shallow clones): chibicc@90d1f7f, craftinginterpreters@4a840f7 (qbe, rustc not tree-checked).
+Upstream trees checked 2026-10-10 (shallow clones): chibicc@90d1f7f, craftinginterpreters@4a840f7, qbe@d2f7b69 (rustc not tree-checked).

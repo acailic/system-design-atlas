@@ -85,4 +85,4 @@ kernel boundary crossed to read one line from a file.
 
 ## Verified paths
 
-Upstream trees checked 2026-10-10 (shallow clones): cpython@0ec3aee, go@dfe2e7b, lua@0b29f40 (musl, rustc not tree-checked).
+Upstream trees checked 2026-10-10 (shallow clones): cpython@0ec3aee, go@dfe2e7b, lua@0b29f40, musl@b1efda5 (rustc not tree-checked).
