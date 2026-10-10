@@ -64,6 +64,7 @@ Deep-dives (the exemplars — more added over time):
 - [git](deep-dives/git.md) — content-addressed object model
 - [LevelDB](deep-dives/leveldb.md) — LSM-tree storage engine
 - [nginx](deep-dives/nginx.md) — master/worker process model
+- [PostgreSQL](deep-dives/postgresql.md) — process-per-connection, MVCC, WAL durability
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,

@@ -111,7 +111,7 @@ projects:
     license: PostgreSQL
     domains: [database, storage-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
     why: >
       The reference relational server that outlived every proprietary
