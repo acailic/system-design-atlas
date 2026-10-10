@@ -52,6 +52,7 @@ Time budget: a deep-dive plus its reading path is a focused 3–8 hours
 | [`CURATION.md`](CURATION.md) | How projects are selected (influence, clarity, teachability, domain diversity) |
 | [`deep-dives/`](deep-dives/) | Complete deep-dives, one markdown file per project |
 | [`DEEP-DIVE-TEMPLATE.md`](DEEP-DIVE-TEMPLATE.md) | The repeatable template every deep-dive follows |
+| [`PATTERNS.md`](PATTERNS.md) | Cross-cutting design index: lessons that recur across deep-dives |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to add catalog entries and write new deep-dives |
 | [`LICENSES.md`](LICENSES.md) | Licensing: MIT for tooling, CC-BY-4.0 for prose, snippet policy |
 
