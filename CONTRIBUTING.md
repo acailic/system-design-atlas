@@ -58,3 +58,16 @@ Follow the template in any `atlas/*.md` file:
 
 By contributing you agree to license your contribution under the repo MIT
 license.
+
+## Verifying reading paths
+
+Reading paths must name files that exist upstream. Before committing:
+
+```bash
+git clone --depth 1 --filter=blob:none <repo> /tmp/v/<name>
+git -C /tmp/v/<name> ls-tree -r --name-only HEAD | grep <path>
+```
+
+If a path moved, fix the entry and update the file's "Verified paths"
+footer with repo@<short-sha>. Star counts come from
+`gh api repos/<owner>/<repo> --jq .stargazers_count` — stamp the month.

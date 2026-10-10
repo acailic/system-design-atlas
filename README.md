@@ -78,7 +78,7 @@ code. One traced request teaches more than a month of passive browsing.
 - [`atlas/dev-tools-and-editors.md`](atlas/dev-tools-and-editors.md) — VS Code, ripgrep, gh CLI, fzf, htop
 - [`atlas/ai-infra.md`](atlas/ai-infra.md) — vLLM, llama.cpp, Ollama
 - [`atlas/frontend-systems.md`](atlas/frontend-systems.md) — React, Vue, Svelte
-- [`atlas/design-patterns.md`](atlas/design-patterns.md) — cross-cutting lessons from all of the above
+- [`atlas/design-patterns.md`](atlas/design-patterns.md) — 26 cross-cutting lessons drawn from all domains
 
 ## Curation principle
 
