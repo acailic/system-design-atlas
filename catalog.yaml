@@ -432,7 +432,7 @@ projects:
     license: Apache-2.0
     domains: [orchestration, container, distributed]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
     why: >
       The operating system of the datacenter, and the biggest

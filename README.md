@@ -66,6 +66,7 @@ Deep-dives (the exemplars — more added over time):
 - [nginx](deep-dives/nginx.md) — master/worker process model
 - [PostgreSQL](deep-dives/postgresql.md) — process-per-connection, MVCC, WAL durability
 - [Kafka](deep-dives/kafka.md) — append-only log, zero-copy, ISR replication, KRaft metadata
+- [Kubernetes](deep-dives/kubernetes.md) — declarative state, informers, reconcile loops
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
