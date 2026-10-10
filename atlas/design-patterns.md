@@ -151,3 +151,56 @@ users express intent is part of the architecture, not an afterthought.
 Every project here is opinionated about what it *doesn't* do (SQLite has
 no users/permissions by design; NATS doesn't persist by default).
 Constraints are what make these systems excellent at their job.
+
+## 21. Design for scans, not lookups (columnar thinking)
+
+Row stores optimize point reads; analytics engines (ClickHouse, DuckDB) invert the layout — store by column, compress, vectorize, and read
+only the blocks a min/max index says you need. Choose layout by access
+pattern, then let everything else fall out.
+
+**Look at:** ClickHouse `src/Storages/MergeTree/` (parts, merges, sparse index).
+
+## 22. The log as the transport
+
+Kafka's whole design: an append-only, partitioned, replicated log that
+consumers read at their own offset. Producer/consumer, replay, and
+retention all become log positions. Flink adds event time on top
+(watermarks) and exactly-once via barrier snapshots — still the same log.
+
+**Look at:** Kafka `storage/.../log/LogSegment.java`; Flink checkpoint barriers.
+
+## 23. Plan before apply
+
+Terraform's core UX is a design pattern: compute and show the diff of
+intended vs. current state, *then* mutate. Any system that changes real
+infrastructure (or sends money, or deletes data) benefits from a dry-run
+phase as a first-class artifact.
+
+**Look at:** Terraform `internal/plans/`; Ansible `--check --diff`.
+
+## 24. Agentless: push beats daemons
+
+Ansible ships the program to the machine over SSH and removes it after —
+no agent to install, upgrade, or exploit. The trade: weaker long-running
+guarantees, and idempotency becomes mandatory. A reminder that operational
+surface area is a design cost.
+
+**Look at:** `lib/ansible/plugins/action/` module shipping.
+
+## 25. Virtual memory is a portable idea
+
+vLLM's PagedAttention applies OS paging to the KV cache: fixed-size blocks,
+on-demand allocation, sharing between requests. The same trick as pages,
+slabs (Redis), and extents — carve a big resource into uniform blocks and
+schedule them. Great designs port ideas across layers.
+
+**Look at:** vLLM `vllm/v1/core/sched/`; Redis jemalloc slabs.
+
+## 26. Isolate what you don't trust
+
+VS Code runs extensions in a separate process: a crashing or leaky plugin
+can't take the editor down, and the IPC boundary forces a real API.
+Whenever third-party code enters your system, the process boundary is the
+cheapest sandbox you'll ever build.
+
+**Look at:** VS Code extension host (`src/vs/workbench/services/extensions/`).

@@ -63,10 +63,32 @@ answer, read the code that implements it.
 | "Make it idempotent" | Prometheus TSDB replay, WAL redo |
 | "Rate limit / backpressure" | Envoy overload manager |
 | "Eventual consistency" | Redis replication `replication.c` |
+| "Stream it, exactly-once" | Flink checkpoint barriers, Kafka idempotent producer |
+| "Search endpoint" | Elasticsearch shards, Meilisearch milli index |
+| "Analytics/OLAP store" | ClickHouse MergeTree parts and merges |
+| "Serve LLMs cheaply" | vLLM PagedAttention, continuous batching |
 
 Pair the table above with
 [`design-patterns.md`](design-patterns.md), which extracts the cross-cutting
 lessons.
+
+## If you build AI products
+
+**Goal:** understand the inference stack you depend on — enough to reason
+about latency, memory, and cost instead of guessing.
+
+**Path:** llama.cpp → vLLM → Ollama
+
+1. **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the engine with
+   no dependencies; quantization and kernels in the open.
+2. **[vLLM](https://github.com/vllm-project/vllm)** — KV cache as pages,
+   continuous batching: the systems view of serving.
+3. **[Ollama](https://github.com/ollama/ollama)** — how a product wraps a
+   runtime: blobs, runners, REST.
+
+Path in [`ai-infra.md`](ai-infra.md). **Finish line:** you can explain why
+prompt processing is compute-bound while generation is memory-bound, and
+what batching does to both.
 
 ## The 30-minute daily loop
 
@@ -83,5 +105,7 @@ you were reading comments, not code.
 - Can't find where work actually starts? Grep for the dispatch table, main loop, or event-loop registration.
 - Overwhelmed by scale? Switch from "understand the system" to "understand one function completely." Rebuild confidence, then zoom out.
 
-Proceed to any domain file. Recommended order for a full curriculum:
-storage → networking → distributed systems → languages → OS → the rest.
+Proceed to any domain file, or start from [`top-25.md`](top-25.md) if you
+want the most popular systems first. Recommended order for a full
+curriculum: storage → networking → distributed systems → languages → OS →
+data pipelines → the rest.
