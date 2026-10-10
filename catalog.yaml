@@ -411,7 +411,7 @@ projects:
     license: SSPL-1.0 OR Elastic-License-2.0
     domains: [search-engine, distributed, database]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 4 }
     why: >
       Search made universally accessible — and it won by API design as

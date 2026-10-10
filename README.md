@@ -72,12 +72,14 @@ Deep-dives (the exemplars — more added over time):
 - [Moby/Docker](deep-dives/moby.md) — content-addressed layers, graphdrivers, delegation to containerd/runc
 - [VS Code](deep-dives/vscode.md) — extension host isolation, RPC object graph, LSP/DAP seams
 - [etcd](deep-dives/etcd.md) — Raft as deterministic FSM, MVCC revisions, ReadIndex reads
+- [Elasticsearch](deep-dives/elasticsearch.md) — NRT write path, cluster state diffs, scatter-gather search
 
-The catalog tracks 29 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
-Kafka, Elasticsearch, VS Code, Moby/Docker, CPython, and more — across
-databases, queues, runtimes, containers, ML, browser engines, load
-balancers, and editors.
+The catalog tracks 21 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — Linux kernel, Memcached, Apache
+httpd, ZooKeeper, RocksDB, Prometheus-class classics and more —
+across databases, queues, runtimes, containers, ML, browser engines,
+load balancers, and editors. Linux and Chromium are cataloged for
+targeted reading rather than deep-dives by design (see their entries).
 
 ## Status
 

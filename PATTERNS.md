@@ -41,7 +41,9 @@ selectable modes behind the pager; [PostgreSQL](deep-dives/postgresql.md)
 — XLogInsert/redo as *the* durability mechanism for every subsystem;
 [LevelDB](deep-dives/leveldb.md) — WAL as the boundary between
 "durable" and "cache"; [Kafka](deep-dives/kafka.md) — where the log
-stops being a technique and becomes the product.
+stops being a technique and becomes the product; [etcd](deep-dives/etcd.md)
+— raft entries and snapshots framed in a WAL the server replays on
+restart.
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -171,7 +173,9 @@ snapshots from the procarray; [Redis](deep-dives/redis.md) — internal
 keys carry (key, sequence) pairs, snapshots pin sequence numbers;
 [Kubernetes](deep-dives/kubernetes.md) — resourceVersion optimistic
 concurrency over every object; [LevelDB](deep-dives/leveldb.md) —
-compaction drops versions below the oldest live snapshot.
+compaction drops versions below the oldest live snapshot; [etcd](deep-dives/etcd.md)
+— the whole keyspace is revision-stamped history, watch replays it,
+compaction truncates it.
 
 **Why it recurs:** locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.
@@ -192,7 +196,8 @@ VFS, virtual tables, loadable extensions; [Kubernetes](deep-dives/kubernetes.md)
 — CRDs turn the API server into a platform; [CPython](deep-dives/cpython.md)
 — the C API whose safety shaped (and constrained) everything,
 including the GIL; [Moby](deep-dives/moby.md) — plugin protocols and
-OCI-standardized boundaries.
+OCI-standardized boundaries; [VS Code](deep-dives/vscode.md) — the
+stable/proposed two-tier API plus LSP/DAP as protocol-level seams.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
