@@ -71,6 +71,7 @@ Deep-dives (the exemplars — more added over time):
 - [CPython](deep-dives/cpython.md) — object model, refcounting, adaptive interpreter, GIL
 - [Moby/Docker](deep-dives/moby.md) — content-addressed layers, graphdrivers, delegation to containerd/runc
 - [VS Code](deep-dives/vscode.md) — extension host isolation, RPC object graph, LSP/DAP seams
+- [etcd](deep-dives/etcd.md) — Raft as deterministic FSM, MVCC revisions, ReadIndex reads
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,

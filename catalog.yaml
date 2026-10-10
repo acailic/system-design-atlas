@@ -565,7 +565,7 @@ projects:
     license: Apache-2.0
     domains: [distributed, database]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 5 }
     why: >
       Raft consensus in production clothes: a WAL-backed state machine,
