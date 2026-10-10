@@ -7,6 +7,7 @@ by artifact type:
 |---|---|
 | Prose: `README.md`, `CURATION.md`, `DEEP-DIVE-TEMPLATE.md`, `CONTRIBUTING.md`, `LICENSES.md`, everything in `deep-dives/`, `catalog.yaml` | **CC-BY-4.0** (full text: [`LICENSE-CC-BY-4.0.txt`](LICENSE-CC-BY-4.0.txt)) |
 | Tooling: any scripts, code, or configuration added to this repo now or later | **MIT** (full text: [`LICENSE`](LICENSE)) |
+| Generated site: `docs/` — output of `site/` (regenerate with `npm run build`; never hand-edit) | **CC-BY-4.0** — inherits the prose it renders |
 
 Rationale: CC-BY-4.0 lets anyone reuse and remix the educational prose with
 attribution; MIT keeps any tooling maximally compatible with normal
