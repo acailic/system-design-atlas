@@ -53,7 +53,7 @@ extension points that make a mesh sidecar possible.
 
 **Reading path.**
 1. [Life of a request](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/arch_overview) — start from the architecture overview.
-2. `source/common/network/` — connection, listener, and the filter-manager pattern.
+2. `source/common/network/connection_impl.cc` — the connection every filter chain wraps; then the listener + filter-manager pattern around it.
 3. Pick one L7 filter (router) — `source/common/router/router.cc`.
 4. `source/common/config/` — how xDS subscriptions update the system at runtime.
 

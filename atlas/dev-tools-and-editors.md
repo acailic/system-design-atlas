@@ -17,7 +17,7 @@ Protocol — a protocol design so clean it now spans every editor.
 
 **Reading path.**
 1. Read the [process model](https://code.visualstudio.com/api/advanced-topics/extension-host) docs first.
-2. `src/vs/workbench/services/extensions/` — how extensions run out-of-process.
+2. `src/vs/workbench/services/extensions/common/extensionHostManager.ts` + `extensionHostProtocol.ts` — how extensions run out-of-process and talk over IPC.
 3. `extensions/` — built-in language features as extensions.
 4. `src/vs/editor/` — the Monaco editor core (separate product lineage).
 
