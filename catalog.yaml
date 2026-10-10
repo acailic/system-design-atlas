@@ -469,7 +469,7 @@ projects:
     license: Apache-2.0
     domains: [container]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       The tool that made containers mainstream, and it won on a packaging

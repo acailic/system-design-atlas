@@ -68,6 +68,7 @@ Deep-dives (the exemplars — more added over time):
 - [Kafka](deep-dives/kafka.md) — append-only log, zero-copy, ISR replication, KRaft metadata
 - [Kubernetes](deep-dives/kubernetes.md) — declarative state, informers, reconcile loops
 - [CPython](deep-dives/cpython.md) — object model, refcounting, adaptive interpreter, GIL
+- [Moby/Docker](deep-dives/moby.md) — content-addressed layers, graphdrivers, delegation to containerd/runc
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
