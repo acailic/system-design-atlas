@@ -107,7 +107,7 @@ Slow consumers and bounded queues must signal producers (NATS
 slow-consumer drops, Envoy overload manager). Unbounded buffers don't
 degrade gracefully; they just fail later and worse.
 
-**Look at:** NATS `subs.go` slow-consumer logic.
+**Look at:** NATS `server/client.go` slow-consumer logic.
 
 ## 15. Idempotency and exactly-once is a lie
 

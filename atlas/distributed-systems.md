@@ -91,7 +91,7 @@ starting point for "how does a broker work" before Kafka-scale complexity.
 **Reading path.**
 1. `server.go` — `Server`, client connection lifecycle.
 2. `sublist.go` — the subject-matching trie (`*` / `>` wildcards).
-3. `subs.go` — subscription types and slow-consumer backpressure.
+3. `server/client.go` — subscription handling and slow-consumer backpressure (plus `server/sublist.go` for the subject tree).
 4. `client.go` — parse loop and msg routing.
 
 **Exercise.** Add a new special subject prefix (e.g. `$FOO.`) that logs to
