@@ -63,6 +63,26 @@ projects:
       predictable under load, when competitors were still losing to
       lock contention.
 
+  - id: memcached
+    name: Memcached
+    repo: https://github.com/memcached/memcached
+    language: C
+    license: BSD-3-Clause
+    domains: [cache]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 4 }
+    why: >
+      The original "scale the database with a cache layer" tool that won
+      the mid-2000s web by being aggressively boring: a text protocol you
+      can speak with netcat, a slab-class allocator that fights
+      fragmentation by never freeing, approximate LRU, and — the decisive
+      call — pushing consistent hashing and routing entirely into client
+      libraries so the server stays a dumb hash-map daemon. Read alongside
+      Redis to see two opposite answers to the same problem: Memcached
+      keeps the server minimal and pays in features, Redis builds the
+      data structures in and pays in complexity.
+
   # ── database ──────────────────────────────────────────────────────────
 
   - id: sqlite
@@ -160,6 +180,25 @@ projects:
       that makes "free everything" O(1) per request. Teaches the C10K
       answer in the large: shared-nothing processes + non-blocking state
       machines + ownership by lifetime.
+
+  - id: httpd
+    name: Apache httpd
+    repo: https://github.com/apache/httpd
+    language: C
+    license: Apache-2.0
+    domains: [web-server]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      The server that dominated the early web and stayed dominant for
+      decades because of one architectural bet: extensibility as the
+      product. The module API (handlers, filters, per-directory config
+      like .htaccess) and pluggable Multi-Processing Modules (prefork /
+      worker / event behind one server API) meant the same binary served
+      CGI farms, PHP hosts, and proxies. Read with the nginx deep-dive to
+      see the fork/thread vs event-loop trade-off as a swappable MPM —
+      and what each model costs under the same extension contract.
 
   - id: caddy
     name: Caddy
@@ -287,6 +326,28 @@ projects:
       (handles/scopes/contexts in V8) and an event loop (libuv) into a
       coherent platform, and how the language boundary (C++ core, JS
       stdlib) is itself a design decision that shaped npm and the entire
+      ecosystem.
+
+  - id: cpython
+    name: CPython
+    repo: https://github.com/python/cpython
+    language: C, Python
+    license: Python-2.0
+    domains: [runtime, language]
+    difficulty: moderate
+    status: cataloged
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 4 }
+    why: >
+      The most widely run language implementation on earth, and it won
+      that position through design decisions that predate its hype: a
+      stable C API + reference-counted PyObject model that made native
+      extensions approachable (which is why NumPy and the scientific
+      stack chose it), batteries-included stdlib, and the GIL — the
+      trade-off that bought C-extension simplicity and single-threaded
+      correctness at the price of parallelism, now being unbundled
+      (PEP 703 free-threading) decades later. Teaches a complete
+      interpreter in readable C: the ceval bytecode loop, the object
+      protocol, and how a runtime's extension contract decides its
       ecosystem.
 
   - id: libuv
@@ -513,6 +574,27 @@ projects:
       between a consensus paper and a deployable service: lease semantics,
       revision-stamped MVCC keyspace, and why every read needs an
       explicit consistency decision.
+
+
+  - id: zookeeper
+    name: Apache ZooKeeper
+    repo: https://github.com/apache/zookeeper
+    language: Java
+    license: Apache-2.0
+    domains: [distributed, database]
+    difficulty: demanding
+    status: cataloged
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
+    why: >
+      The coordination kernel beneath the entire Hadoop-era stack: it won
+      because it turned consensus into a usable product — a tiny ordered
+      namespace of znodes backed by an atomic-broadcast (ZAB) log, with
+      ephemeral nodes + watches turning "who is the leader / is this node
+      alive" into client-side conventions. Teaches the gap between
+      exposing a consensus protocol (which etcd later did more cleanly
+      with Raft + HTTP) and designing the primitive everyone standardizes
+      on: sessions, watches, and the read/write split that makes a
+      coordination service scalable at all.
 
   # ── editors ───────────────────────────────────────────────────────────
 

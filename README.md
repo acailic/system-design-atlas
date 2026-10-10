@@ -65,11 +65,11 @@ Deep-dives (the exemplars — more added over time):
 - [LevelDB](deep-dives/leveldb.md) — LSM-tree storage engine
 - [nginx](deep-dives/nginx.md) — master/worker process model
 
-The catalog tracks 25 further heavyweight and high-teaching-value
+The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
-Kafka, Elasticsearch, VS Code, Moby/Docker, and more — across databases,
-queues, runtimes, containers, ML, browser engines, load balancers, and
-editors.
+Kafka, Elasticsearch, VS Code, Moby/Docker, CPython, and more — across
+databases, queues, runtimes, containers, ML, browser engines, load
+balancers, and editors.
 
 ## Status
 
