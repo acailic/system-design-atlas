@@ -67,6 +67,7 @@ Deep-dives (the exemplars — more added over time):
 - [PostgreSQL](deep-dives/postgresql.md) — process-per-connection, MVCC, WAL durability
 - [Kafka](deep-dives/kafka.md) — append-only log, zero-copy, ISR replication, KRaft metadata
 - [Kubernetes](deep-dives/kubernetes.md) — declarative state, informers, reconcile loops
+- [CPython](deep-dives/cpython.md) — object model, refcounting, adaptive interpreter, GIL
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
