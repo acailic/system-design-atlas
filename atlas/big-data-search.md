@@ -9,7 +9,7 @@ the lesson.
 
 ### Elasticsearch (Java, ~1M lines) — difficulty ★★★★★
 
-<https://github.com/elastic/elasticsearch> · ~72k★ · keywords: inverted index, segments, shards, distributed queries
+<https://github.com/elastic/elasticsearch> · 78k★ (2026-10) · keywords: inverted index, segments, shards, distributed queries
 
 **Why it's here.** Search at production scale: Lucene segments merged in
 the background, indices sharded and replicated, and a query coordinated
@@ -28,7 +28,7 @@ response which shards answered; then find the coordinator code that fanned out.
 
 ### ClickHouse (C++, ~1M lines) — difficulty ★★★★
 
-<https://github.com/ClickHouse/ClickHouse> · ~38k★ · keywords: columnar, MergeTree, vectorization, sparse index
+<https://github.com/ClickHouse/ClickHouse> · 50k★ (2026-10) · keywords: columnar, MergeTree, vectorization, sparse index
 
 **Why it's here.** The fastest open-source OLAP engine. Its MergeTree table
 engine (immutable parts merged in the background, sparse primary index,
@@ -48,7 +48,7 @@ explain what merged from the code you read.
 
 ### Apache Cassandra (Java, ~400k lines) — difficulty ★★★★
 
-<https://github.com/apache/cassandra> · ~9k★ · keywords: LSM storage, consistent hashing, gossip, tunable consistency
+<https://github.com/apache/cassandra> · 10k★ (2026-10) · keywords: LSM storage, consistent hashing, gossip, tunable consistency
 
 **Why it's here.** The opposite design point from PostgreSQL: availability
 first, no single coordinator, every node equal. Consistent hashing with
@@ -68,7 +68,7 @@ code that decides how many replicas must acknowledge each.
 
 ### MongoDB (C++, ~500k lines) — difficulty ★★★
 
-<https://github.com/mongodb/mongo> · ~27k★ · keywords: document model, oplog, replica sets, sharding
+<https://github.com/mongodb/mongo> · 29k★ (2026-10) · keywords: document model, oplog, replica sets, sharding
 
 **Why it's here.** The document store everyone has met; reading it explains
 what's under the API — a binary (BSON) storage engine, replica sets built
@@ -84,7 +84,7 @@ then map an entry to the code that wrote it.
 
 ### Meilisearch (Rust, ~150k lines) — difficulty ★★
 
-<https://github.com/meilisearch/meilisearch> · ~48k★ · keywords: inverted index, typo tolerance
+<https://github.com/meilisearch/meilisearch> · 60k★ (2026-10) · keywords: inverted index, typo tolerance
 
 **Why it's here.** The small counterpoint to Elasticsearch — read it *after*
 understanding Lucene segments, and you'll see how much of "search" is

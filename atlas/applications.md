@@ -9,7 +9,7 @@ latency.
 
 ### Neovim (C, ~350k lines) — difficulty ★★★
 
-<https://github.com/neovim/neovim> · keywords: event loop, TUI grid, msgpack-RPC, embedded Lua
+<https://github.com/neovim/neovim> · 103k★ (2026-10) · keywords: event loop, TUI grid, msgpack-RPC, embedded Lua
 
 **Why it's here.** The most comprehensively modernized classic: an event
 loop, a separated UI protocol (TUI is just another client), Lua runtime,
@@ -27,7 +27,7 @@ and async jobs — inside a 30-year-old architecture.
 
 ### Git (C, big, modular) — difficulty ★★★
 
-<https://github.com/git/git> · keywords: content-addressable store, refs, packed objects
+<https://github.com/git/git> · 64k★ (2026-10) · keywords: content-addressable store, refs, packed objects
 
 **Why it's here.** The design is a gem: immutable, content-addressed object
 store + tiny mutable pointer layer (refs). Understanding that split explains
@@ -46,7 +46,7 @@ every git weirdness you've ever hit.
 
 ### tmux (C, ~70k lines) — difficulty ★★★
 
-<https://github.com/tmux/tmux> · keywords: event loop, terminal emulator state, panes
+<https://github.com/tmux/tmux> · 50k★ (2026-10) · keywords: event loop, terminal emulator state, panes
 
 **Why it's here.** A clean libevent-based daemon with a terminal emulator
 state machine inside — small enough to read whole, interesting enough

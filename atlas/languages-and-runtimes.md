@@ -8,7 +8,7 @@ performance thinking like nothing else.
 
 ### CPython (C, ~1M lines) — difficulty ★★★
 
-<https://github.com/python/cpython> · keywords: VM, object model, GIL, refcounting
+<https://github.com/python/cpython> · 78k★ (2026-10) · keywords: VM, object model, GIL, refcounting
 
 **Why it's here.** You already know Python; now learn what `x = x + 1`
 actually does. CPython is the most approachable mainstream interpreter.
@@ -26,7 +26,7 @@ actually does. CPython is the most approachable mainstream interpreter.
 
 ### Go (runtime in Go/asm, `src/runtime`) — difficulty ★★★★
 
-<https://github.com/golang/go> · keywords: M:N scheduler, channels, GC, memory model
+<https://github.com/golang/go> · 139k★ (2026-10) · keywords: M:N scheduler, channels, GC, memory model
 
 **Why it's here.** The most readable industrial runtime: `src/runtime` is a
 complete scheduler + allocator + GC in ~100k lines of Go (plus some asm).
@@ -45,7 +45,7 @@ and match each trace line to the fields in `schedt` from `runtime2.go`.
 
 ### Lua (C, ~30k lines) — difficulty ★★
 
-<https://github.com/lua/lua> · keywords: compact VM, register machine, incremental GC
+<https://github.com/lua/lua> · 10k★ (2026-10) · keywords: compact VM, register machine, incremental GC
 
 **Why it's here.** The whole language fits in a book. The interpreter is a
 register VM with an incremental generational GC — every subsystem is present

@@ -8,7 +8,7 @@ Kubernetes reconciliation, applied to networks, VMs, and cloud resources.
 
 ### Terraform (Go, ~200k lines) — difficulty ★★★
 
-<https://github.com/hashicorp/terraform> · ~45k★ · keywords: resource graph, plan/apply, provider protocol, HCL
+<https://github.com/hashicorp/terraform> · 50k★ (2026-10) · keywords: resource graph, plan/apply, provider protocol, HCL
 
 **Why it's here.** The flagship of infrastructure-as-code: a state file, a
 dependency graph of resources, and a plan/apply split that previews
@@ -27,7 +27,7 @@ destructive changes. The provider protocol is a masterclass in plugin design
 
 ### Ansible (Python, ~350k lines) — difficulty ★★★
 
-<https://github.com/ansible/ansible> · ~63k★ · keywords: agentless, push model, idempotent modules
+<https://github.com/ansible/ansible> · 71k★ (2026-10) · keywords: agentless, push model, idempotent modules
 
 **Why it's here.** The push-over-SSH, agentless design — no daemon on
 targets, modules ship themselves over the wire. Idempotency is not an
@@ -47,7 +47,7 @@ modules compute the *would-be change* before any change is attempted.
 
 ### Docker Compose (Python/Go, ~100k lines) — difficulty ★★
 
-<https://github.com/docker/compose> · ~34k★ · keywords: local orchestration, service graphs, hot reload
+<https://github.com/docker/compose> · 38k★ (2026-10) · keywords: local orchestration, service graphs, hot reload
 
 **Why it's here.** The simplest orchestration system in the atlas — the
 lifecycle of services and networks driven by a single YAML file. Shows how

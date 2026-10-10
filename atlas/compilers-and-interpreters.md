@@ -8,7 +8,7 @@ Start with a teaching compiler, not gcc.
 
 ### chibicc (C, ~10k lines) — difficulty ★★
 
-<https://github.com/rui314/chibicc> · keywords: teaching C compiler, one commit per stage
+<https://github.com/rui314/chibicc> · 12k★ (2026-10) · keywords: teaching C compiler, one commit per stage
 
 **Why it's here.** A C11 compiler that can compile git, qemu, sqlite…
 built as a teaching ladder: each commit adds one stage. The single best
@@ -24,7 +24,7 @@ parser rule, extend it, and rebuild chibicc, then chibicc-compiles-git.
 
 ### Crafting Interpreters (Java + C, book + repo) — difficulty ★★
 
-<https://github.com/munificent/craftinginterpreters> · keywords: bytecode VM, GC, closures
+<https://github.com/munificent/craftinginterpreters> · 11k★ (2026-10) · keywords: bytecode VM, GC, closures
 
 **Why it's here.** The on-ramp: build two full interpreters (tree-walking
 jlox, then bytecode clox) from scratch. Working the book makes reading

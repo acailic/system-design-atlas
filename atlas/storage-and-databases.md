@@ -8,7 +8,7 @@ suggested below goes small → large.
 
 ### SQLite (C, ~150k lines in one file) — difficulty ★★★
 
-<https://github.com/sqlite/sqlite> · keywords: ACID, B-tree, WAL, pager, VDBE
+<https://github.com/sqlite/sqlite> · 11k★ (2026-10) · keywords: ACID, B-tree, WAL, pager, VDBE
 
 **Why it's here.** The most widely deployed database on Earth is a single
 C file with the best comments in the industry. It is possible to understand
@@ -32,7 +32,7 @@ each opcode to its handler in the VDBE switch.
 
 ### Redis (C, ~140k lines) — difficulty ★★★
 
-<https://github.com/redis/redis> · keywords: event loop, data structures, single-threaded, replication
+<https://github.com/redis/redis> · 77k★ (2026-10) · keywords: event loop, data structures, single-threaded, replication
 
 **Why it's here.** A complete, self-contained networked data store famous
 for speed. The clearest real-world lesson in "data structures first" design
@@ -63,7 +63,7 @@ annotated 3.0 fork); the official `topics/internals` docs.
 
 ### PostgreSQL (C, ~1M lines) — difficulty ★★★★
 
-<https://github.com/postgres/postgres> · keywords: MVCC, WAL, planner, process model
+<https://github.com/postgres/postgres> · 22k★ (2026-10) · keywords: MVCC, WAL, planner, process model
 
 **Why it's here.** The reference point for how serious relational databases
 are engineered: multi-version concurrency, write-ahead logging, a cost-based
@@ -110,7 +110,7 @@ despite having no journal, and what it trades for that (write amplification).
 
 ### RocksDB (C++, ~500k lines) — difficulty ★★★★
 
-<https://github.com/facebook/rocksdb> · keywords: LSM-tree, compaction, memtable, Bloom filters
+<https://github.com/facebook/rocksdb> · 32k★ (2026-10) · keywords: LSM-tree, compaction, memtable, Bloom filters
 
 **Why it's here.** The state of the art for LSM-tree storage engines —
 embeddable, everything tunable, and the foundation under many databases
@@ -133,7 +133,7 @@ LevelDB's original design).
 
 ### DuckDB (C++, ~250k lines) — difficulty ★★★★
 
-<https://github.com/duckdb/duckdb> · keywords: vectorized execution, columnar, OLAP
+<https://github.com/duckdb/duckdb> · 42k★ (2026-10) · keywords: vectorized execution, columnar, OLAP
 
 **Why it's here.** The analytical (columnar) counterpart to SQLite's OLTP —
 shows how a completely different query model (vectorized batches, columnar

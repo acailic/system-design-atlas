@@ -8,7 +8,7 @@ implementation that runs a shocking amount of production infrastructure.
 
 ### hashicorp/raft (Go, ~5k lines core) — difficulty ★★★
 
-<https://github.com/hashicorp/raft> · keywords: Raft, leader election, log replication
+<https://github.com/hashicorp/raft> · 9k★ (2026-10) · keywords: Raft, leader election, log replication
 
 **Why it's here.** The single cleanest production Raft implementation. Small
 enough to read *all of*, complete enough to run real state machines. The
@@ -29,7 +29,7 @@ figure it corresponds to (Fig. 2 terms).
 
 ### etcd (Go, ~200k lines) — difficulty ★★★★
 
-<https://github.com/etcd-io/etcd> · keywords: consensus in production, watch, MVCC store, leases
+<https://github.com/etcd-io/etcd> · 52k★ (2026-10) · keywords: consensus in production, watch, MVCC store, leases
 
 **Why it's here.** Raft from the paper, wrapped in everything a production
 coordination system actually needs: an MVCC watchable store, leases, and a
@@ -49,7 +49,7 @@ value being visible to a `Watch` client, noting which step is the Raft commit.
 
 ### Apache ZooKeeper (Java, ~150k lines) — difficulty ★★★★
 
-<https://github.com/apache/zookeeper> · keywords: ZAB, watches, linearizable coordination, quorum
+<https://github.com/apache/zookeeper> · 13k★ (2026-10) · keywords: ZAB, watches, linearizable coordination, quorum
 
 **Why it's here.** The classic coordination kernel — locks, leader election,
 config distribution. Its ZAB protocol predates Raft and solves the same
@@ -67,7 +67,7 @@ the client's point of view from the code.
 
 ### TiKV (Rust, ~400k lines) — difficulty ★★★★★
 
-<https://github.com/tikv/tikv> · keywords: distributed transactions, Raft groups, region scheduling
+<https://github.com/tikv/tikv> · 17k★ (2026-10) · keywords: distributed transactions, Raft groups, region scheduling
 
 **Why it's here.** The reference distributed KV built on RocksDB + Raft +
 a full transaction layer. Read after etcd: here Raft is per-*region*, and
@@ -83,7 +83,7 @@ every cross-region RPC.
 
 ### NATS Server (Go, ~20k lines) — difficulty ★★
 
-<https://github.com/nats-io/nats-server> · keywords: pub/sub, subject trees, backpressure
+<https://github.com/nats-io/nats-server> · 21k★ (2026-10) · keywords: pub/sub, subject trees, backpressure
 
 **Why it's here.** A fast, small, famously legible message broker. The best
 starting point for "how does a broker work" before Kafka-scale complexity.

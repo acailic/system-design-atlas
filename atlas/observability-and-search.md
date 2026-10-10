@@ -8,7 +8,7 @@ query languages, and index design.
 
 ### Prometheus (Go, ~250k lines) — difficulty ★★★
 
-<https://github.com/prometheus/prometheus> · keywords: pull-based metrics, TSDB, PromQL, service discovery
+<https://github.com/prometheus/prometheus> · 66k★ (2026-10) · keywords: pull-based metrics, TSDB, PromQL, service discovery
 
 **Why it's here.** A complete monitoring system with an exemplary three-part
 architecture: scrape loop → TSDB → query engine. The TSDB (head block,
@@ -28,7 +28,7 @@ WAL, out-of-order handling) is a serious storage engine that happens to be reada
 
 ### Meilisearch (Rust, ~150k lines) — difficulty ★★★
 
-<https://github.com/meilisearch/meilisearch> · keywords: search engine, inverted index, typo tolerance
+<https://github.com/meilisearch/meilisearch> · 60k★ (2026-10) · keywords: search engine, inverted index, typo tolerance
 
 **Why it's here.** A modern, small search engine (compared to Lucene-scale
 systems) — indexing pipeline, query planner, ranking rules — in Rust with

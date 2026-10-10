@@ -9,7 +9,7 @@ whole, with a real performance wall motivating every choice.
 
 ### vLLM (Python/C++, ~150k lines) — difficulty ★★★
 
-<https://github.com/vllm-project/vllm> · ~36k★ · keywords: KV cache, continuous batching, PagedAttention, speculative decoding
+<https://github.com/vllm-project/vllm> · 93k★ (2026-10) · keywords: KV cache, continuous batching, PagedAttention, speculative decoding
 
 **Why it's here.** The reference LLM serving engine. Its core design — KV
 cache pages managed like OS pages, and *continuous batching* — turned LLM
@@ -28,7 +28,7 @@ prefix and explain from the scheduler logs what got reused.
 
 ### llama.cpp (C/C++, ~250k lines) — difficulty ★★★
 
-<https://github.com/ggml-org/llama.cpp> · ~80k★ · keywords: GGUF, quantization, ggml tensor lib, zero-dependency inference
+<https://github.com/ggml-org/llama.cpp> · 131k★ (2026-10) · keywords: GGUF, quantization, ggml tensor lib, zero-dependency inference
 
 **Why it's here.** One C++ file at heart — inference with no Python, no CUDA required. The `ggml` tensor library underneath and its quantized matrix kernels (Q4/Q5/Q8) teach performance engineering and portability (it runs on a phone). Design philosophy: dependencies zero, clarity first.
 
@@ -40,7 +40,7 @@ prefix and explain from the scheduler logs what got reused.
 
 ### Ollama (Go, ~150k lines) — difficulty ★★
 
-<https://github.com/ollama/ollama> · ~110k★ · keywords: model runner, REST server, blob store, runners
+<https://github.com/ollama/ollama> · 183k★ (2026-10) · keywords: model runner, REST server, blob store, runners
 
 **Why it's here.** The friendliest production surface over llama.cpp-style
 runners: a Go server managing model blobs, layer caching, and runner

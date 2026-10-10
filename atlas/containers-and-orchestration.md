@@ -8,7 +8,7 @@ scaling up to the largest distributed control loop in the industry.
 
 ### runc (Go, ~30k lines) — difficulty ★★
 
-<https://github.com/opencontainers/runc> · keywords: namespaces, cgroups, OCI runtime
+<https://github.com/opencontainers/runc> · 13k★ (2026-10) · keywords: namespaces, cgroups, OCI runtime
 
 **Why it's here.** The actual program that "runs a container" on nearly
 every Linux host. Reading it permanently demystifies containers.
@@ -26,7 +26,7 @@ ordered namespace/cgroup operations; then find each in the code.
 
 ### containerd (Go, ~250k lines) — difficulty ★★★
 
-<https://github.com/containerd/containerd> · keywords: gRPC services, image distribution, runtime v2 shim
+<https://github.com/containerd/containerd> · 21k★ (2026-10) · keywords: gRPC services, image distribution, runtime v2 shim
 
 **Why it's here.** The daemon between Docker/K8s and runc. Clean gRPC
 service decomposition — metadata store, image pull, snapshotter, task

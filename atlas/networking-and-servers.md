@@ -8,7 +8,7 @@ TLS, and speak protocols. These codebases embody the answers to every
 
 ### nginx (C, ~250k lines) — difficulty ★★★★
 
-<https://github.com/nginx/nginx> · keywords: event-driven, master/worker, phase engine, reverse proxy
+<https://github.com/nginx/nginx> · 32k★ (2026-10) · keywords: event-driven, master/worker, phase engine, reverse proxy
 
 **Why it's here.** The canonical event-driven server architecture:
 asymmetric multi-process master/workers, non-blocking I/O, and a module
@@ -28,7 +28,7 @@ debug log for one proxied request; list, in order, the handler that ran at each 
 
 ### HAProxy (C, ~300k lines) — difficulty ★★★★
 
-<https://github.com/haproxy/haproxy> · keywords: connection scheduling, health checks, SE/Linux-like config
+<https://github.com/haproxy/haproxy> · 7k★ (2026-10) · keywords: connection scheduling, health checks, SE/Linux-like config
 
 **Why it's here.** The purest "TCP/HTTP multiplexer" codebase — every
 concern is connection lifecycle, backend selection, and failover. The
@@ -44,7 +44,7 @@ second backend) behind the existing config keyword system.
 
 ### Envoy (C++, ~1M lines) — difficulty ★★★★★
 
-<https://github.com/envoyproxy/envoy> · keywords: filter chain, xDS, sidecar, hot restart
+<https://github.com/envoyproxy/envoy> · 29k★ (2026-10) · keywords: filter chain, xDS, sidecar, hot restart
 
 **Why it's here.** The modern service-mesh data plane. Reading all of it is
 unrealistic; reading its *seams* is a masterclass in how a huge system stays
@@ -64,7 +64,7 @@ extension points that make a mesh sidecar possible.
 
 ### Caddy (Go, ~100k lines) — difficulty ★★★
 
-<https://github.com/caddyserver/caddy> · keywords: plugin architecture, TLS automation, ACME
+<https://github.com/caddyserver/caddy> · 78k★ (2026-10) · keywords: plugin architecture, TLS automation, ACME
 
 **Why it's Go-plugin design in production: modules register themselves, a config turns into an app. Also the definitive real-world ACME/TLS-automation story.
 
@@ -76,7 +76,7 @@ extension points that make a mesh sidecar possible.
 
 ### curl (C, ~180k lines) — difficulty ★★★
 
-<https://github.com/curl/curl> · keywords: protocol state machines, API stability, portability
+<https://github.com/curl/curl> · 43k★ (2026-10) · keywords: protocol state machines, API stability, portability
 
 **Why it's here.** Decades of disciplined API evolution and protocol
 implementation on every platform. The multi-protocol state machines

@@ -7,7 +7,7 @@ scheduling, virtual memory, and concurrency shows up first in an OS kernel.
 
 ### xv6-riscv (C, ~10k lines) — difficulty ★★
 
-<https://github.com/mit-pdos/xv6-riscv> · keywords: teaching Unix, syscalls, page tables, file system
+<https://github.com/mit-pdos/xv6-riscv> · 11k★ (2026-10) · keywords: teaching Unix, syscalls, page tables, file system
 
 **Why it's here.** A complete Unix reimplementation for teaching, with a
 free companion book that walks every file. If you read one OS in your life,
@@ -54,7 +54,7 @@ tooling.
 
 ### Linux (C, ~40M lines) — difficulty ★★★★ (targeted reads only)
 
-<https://github.com/torvalds/linux> · keywords: scheduler, memory management, block layer
+<https://github.com/torvalds/linux> · 251k★ (2026-10) · keywords: scheduler, memory management, block layer
 
 **Why it's here.** Not for reading whole — for targeted subsystem reads with
 a guide. Good starting points:

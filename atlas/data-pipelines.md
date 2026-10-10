@@ -9,7 +9,7 @@ Airflow.
 
 ### Apache Kafka (Scala/Java, ~400k lines) — difficulty ★★★★
 
-<https://github.com/apache/kafka> · ~29k★ · keywords: partitioned log, consumer groups, ISR, zero-copy
+<https://github.com/apache/kafka> · 34k★ (2026-10) · keywords: partitioned log, consumer groups, ISR, zero-copy
 
 **Why it's here.** The canonical distributed log and the backbone of event
 streaming. Everything interesting about event-driven architecture is visible:
@@ -32,7 +32,7 @@ re-delivery. Then match each behavior to the code you read.
 
 ### Apache Flink (Java, ~1M lines) — difficulty ★★★★
 
-<https://github.com/apache/flink> · ~24k★ · keywords: watermarks, checkpoint barriers, exactly-once, state backends
+<https://github.com/apache/flink> · 26k★ (2026-10) · keywords: watermarks, checkpoint barriers, exactly-once, state backends
 
 **Why it's here.** The reference implementation of *stateful* stream
 processing: event-time watermarks, asynchronous distributed snapshots via
@@ -52,7 +52,7 @@ down exactly when each state snapshot is taken.
 
 ### Apache Spark (Scala, ~1M lines) — difficulty ★★★★
 
-<https://github.com/apache/spark> · ~40k★ · keywords: RDD lineage, DAG scheduler, lazy evaluation, shuffle
+<https://github.com/apache/spark> · 44k★ (2026-10) · keywords: RDD lineage, DAG scheduler, lazy evaluation, shuffle
 
 **Why it's here.** The definitive batch analytics engine; its core idea —
 resilient datasets carrying *lineage* so failures replay transforms rather
@@ -72,7 +72,7 @@ inherited from the Spark UI and map each stage boundary to the DAGScheduler spli
 ### Apache Airflow (Python, ~300k lines) — difficulty ★★★
 
 
-<https://github.com/apache/airflow> · ~39k★ · keywords: DAG scheduler, backfills, executor model
+<https://github.com/apache/airflow> · 47k★ (2026-10) · keywords: DAG scheduler, backfills, executor model
 
 **Why it's here.** Workflow orchestration with a design you'll recognize
 from Kubernetes: declared DAGs, a scheduler loop reconciling queue →
@@ -92,7 +92,7 @@ the downstream task ran.
 
 ### dbt (Python, ~150k lines) — difficulty ★★
 
-<https://github.com/dbt-labs/dbt-core> · ~10k★ · keywords: compile-to-SQL, Jinja templating, DAG
+<https://github.com/dbt-labs/dbt-core> · 14k★ (2026-10) · keywords: compile-to-SQL, Jinja templating, DAG
 
 **Why it's here.** A different pipeline idea: instead of moving data, compile
 and push computation into the database. Models form a DAG rendered from

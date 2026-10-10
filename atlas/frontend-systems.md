@@ -8,7 +8,7 @@ Systems thinking transfers directly between these and the rest of the atlas.
 
 ### React (JavaScript, ~300k lines) — difficulty ★★★★
 
-<https://github.com/facebook/react> · ~230k★ · keywords: reconciliation, fibers, scheduling, hooks
+<https://github.com/facebook/react> · 251k★ (2026-10) · keywords: reconciliation, fibers, scheduling, hooks
 
 **Why it's here.** The most-used UI runtime in the world, whose design is a systems curriculum: a work loop with cooperative scheduling, incremental reconciliation over a fiber tree, priority lanes, and a hook model based on linked lists. It's an OS scheduler for UI.
 
@@ -26,7 +26,7 @@ Systems thinking transfers directly between these and the rest of the atlas.
 
 ### Vue 3 (TypeScript, ~150k lines) — difficulty ★★★
 
-<https://github.com/vuejs/core> · ~49k★ · keywords: reactivity graph, proxies, effect scheduling
+<https://github.com/vuejs/core> · 55k★ (2026-10) · keywords: reactivity graph, proxies, effect scheduling
 
 **Why it's here.** The cleanest implementation of reactivity as a systems
 graph — ES `Proxy` intercepts → effect tracking → computed scheduler.
@@ -45,7 +45,7 @@ system design lesson in miniature).
 
 ### Svelte (TypeScript/JS, ~100k lines) — difficulty ★★★
 
-<https://github.com/sveltejs/svelte> · ~81k★ · keywords: compiler, no virtual DOM, static analysis
+<https://github.com/sveltejs/svelte> · 88k★ (2026-10) · keywords: compiler, no virtual DOM, static analysis
 
 **Why it's here.** The compiler-first design: instead of shipping a runtime, analyze at build time, emit minimal DOM updates. Reading `packages/svelte/src/compiler` shows optimization as *analysis* — what a runtime wastes, a compiler can delete.
 
