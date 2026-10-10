@@ -1,0 +1,5 @@
+# shallow clones of analyzed projects — never commit upstream code
+clones/
+
+# agent tool state
+.omc/

@@ -1,73 +1,89 @@
-# Contributing to System Design Atlas
+# Contributing to the atlas
 
-Good contributions are welcome. This is a curated curriculum — entries earn
-their place by teaching, not by being famous.
+The atlas grows two ways: **catalog entries** (cheap, curated) and
+**deep-dives** (expensive, evidence-based). Both go through a PR. The
+quality bars differ; follow the checklist for what you're adding.
 
-## What makes a good entry
+## Ground rules
 
-An entry must have all four:
+- Markdown-first. No build step, no UI.
+- Never vendor, mirror, or commit upstream code into this repository.
+  Clones live in `clones/` and are gitignored.
+- Every factual claim in a deep-dive must be verifiable in a clone of the
+  project at the pinned commit. Cite what you opened.
+- English content. Upstream spellings (colour/color) follow the project
+  being discussed.
 
-1. **A real reading path** — named files in reading order, not "explore
-   the repo." Verify paths against a current clone before submitting.
-2. **A concrete exercise** — something a learner can actually do in an
-   afternoon that proves comprehension.
-3. **At least one companion resource** — book chapter, paper, or official
-   internals doc.
-4. **A "why it teaches system design" claim** that names the transferable
-   concepts, not just the project's virtues.
+## Adding a catalog entry
 
-## Rules
+1. Read [`CURATION.md`](CURATION.md). Score the candidate on the four axes
+   (1–5 each) against the inclusion bar defined there — including its
+   reference-reading carve-out. Below the bar, it does not belong in the
+   catalog — propose it in an issue instead, with what you'd fix.
+2. Check domain balance: if the domain already has 3+ representatives, your
+   entry must either beat an incumbent (say which, and why) or wait.
+3. Append the entry to `catalog.yaml` following the documented schema.
+   The `why:` paragraph is the product: one paragraph naming the design
+   lesson(s) this codebase teaches unusually well. For heavyweight/popular
+   tools, tie the popularity to the specific design decision that made
+   them win.
+4. Set `status: cataloged`. (Only existing deep-dives say `deep-dived`.)
+5. PR title: `catalog: add <id>`.
 
-- **Verify against upstream.** File paths, line counts (ballpark is fine),
-  and companion links must be accurate at time of submission. Note the
-  approximate date or commit you verified against.
-- **No paywalled or abandoned projects.** Public source, active maintenance.
-- **Respect difficulty ceilings.** Only giant repos rated ★★★★★; even
-  then the entry must describe seams/docs, not demand a full read.
-- **Neutral voice.** Opinions about design trade-offs, not endorsements
-  for adoption decisions.
-- **Markdown lints clean.** Wrap tables and links consistently.
+## Writing a deep-dive
 
-## Suggested additions (open)
+Deep-dives are written *from the code*, not from memory or blog posts
+(though blogs help you orient — cite them under "Further reading").
 
-- Networking: WireGuard implementation, QUIC libraries (quiche/quinn).
-- Storage: ScyllaDB/Cassandra, ClickHouse (specific subsystem entry points).
-- Distributed: Tempo? (probably skip — prefer classic systems over new tools).
-- Editors: helix.
-
-## Format
-
-Follow the template in any `atlas/*.md` file:
-
-```markdown
-### Name (language, ~Nk lines) — difficulty ★N
-
-<link> · <concept keywords>
-
-**Why it's here.** <transferable lessons>
-
-**Reading path.**
-1. `path/to/file.c` — <what it shows>
-
-**Exercise.** <doable task>
-
-**Companions.** <books/papers/docs>
-```
-
-## Licensing
-
-By contributing you agree to license your contribution under the repo MIT
-license.
-
-## Verifying reading paths
-
-Reading paths must name files that exist upstream. Before committing:
+### Setup: shallow clone
 
 ```bash
-git clone --depth 1 --filter=blob:none <repo> /tmp/v/<name>
-git -C /tmp/v/<name> ls-tree -r --name-only HEAD | grep <path>
+mkdir -p clones
+git clone --depth 1 https://github.com/<org>/<repo> clones/<id>
+cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
 ```
 
-If a path moved, fix the entry and update the file's "Verified paths"
-footer with repo@<short-sha>. Star counts come from
-`gh api repos/<owner>/<repo> --jq .stargazers_count` — stamp the month.
+`clones/` is gitignored — never commit upstream code. If you need history
+(`git log -S`, blame), deepen selectively: `git fetch --deepen=500`.
+
+### Checklist
+
+1. Copy [`DEEP-DIVE-TEMPLATE.md`](DEEP-DIVE-TEMPLATE.md) to
+   `deep-dives/<id>.md` (same `<id>` as the catalog entry).
+2. Pin the commit: full SHA + date in the header block.
+3. Walk the spine yourself before writing: find the main loop / request
+   path / commit path, open every file it passes through. The reading path
+   in section 6 must be a path *you walked*, in an order that builds
+   understanding.
+4. For each of the 2–3 trade-offs, capture `file:function` evidence. If
+   you cannot point at where the code pays for the choice, it is not one
+   of the defining trade-offs — pick another.
+5. Snippets: ≤ 10 lines, few, attributed, upstream license named inline.
+   Prefer paraphrase when prose carries the point (see
+   [`LICENSES.md`](LICENSES.md)).
+6. Fill difficulty/prerequisites honestly, including an hour budget.
+7. Update the catalog entry: `status: deep-dived`.
+8. Add the deep-dive to the coverage list in `README.md`.
+9. Cross-link `PATTERNS.md`: if the deep-dive instantiates (or adds) a
+   recurring pattern, add/extend its "Seen in" pointer list.
+10. PR title: `deep-dive: <id>`.
+
+### Quality bar (reviewers check this)
+
+- [ ] Every landmark citation (`file:function`) exists at the pinned
+      commit — reviewers spot-check with their own shallow clone.
+- [ ] The reading path is ordered to build understanding and ends having
+      traced one complete story end-to-end.
+- [ ] Trade-offs have evidence and a "when would this be wrong for you"
+      verdict.
+- [ ] "What to steal" is transferable, not a summary of features.
+- [ ] Snippets within policy; no vendored upstream files.
+- [ ] Catalog entry and README updated.
+
+## Re-reviewing entries
+
+Codebases drift. When a deep-dive is more than ~2 years old or the
+upstream had an architecture change (e.g. Redis multiplexed I/O threads),
+re-verify landmarks against a fresh clone, update the pinned commit, and
+note the re-verification date in the header. Old insights stay; broken
+pointers get fixed.
