@@ -281,7 +281,7 @@ projects:
     license: Apache-2.0
     domains: [queue-log, distributed, storage-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
     why: >
       The nervous system of every large data platform, and it won that slot

@@ -65,6 +65,7 @@ Deep-dives (the exemplars — more added over time):
 - [LevelDB](deep-dives/leveldb.md) — LSM-tree storage engine
 - [nginx](deep-dives/nginx.md) — master/worker process model
 - [PostgreSQL](deep-dives/postgresql.md) — process-per-connection, MVCC, WAL durability
+- [Kafka](deep-dives/kafka.md) — append-only log, zero-copy, ISR replication, KRaft metadata
 
 The catalog tracks 29 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — Linux kernel, PostgreSQL, Kubernetes,
