@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redis: an event loop plus data structures built like they're the product — System Design Atlas</title>
+<meta name="description" content="Redis is an in-memory data structure server, and its design thesis is radical simplicity of execution: one thread runs all commands , so every command is atomic and almost no locks exist; ar">
+<meta property="og:title" content="Redis: an event loop plus data structures built like they're the product — System Design Atlas">
+<meta property="og:description" content="Redis is an in-memory data structure server, and its design thesis is radical simplicity of execution: one thread runs all commands , so every command is atomic and almost no locks exist; ar">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-set-socket-to-keyspace">Walkthrough: one SET, socket to keyspace</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Redis: an event loop plus data structures built like they're the product</h1>
+    <div class="meta-chips"><span class="chip domain">cache</span><span class="chip domain">database</span><span class="chip domain">networking</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/redis/redis" rel="noopener">RSALv2 OR SSPLv1 OR AGPLv3</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>3c7e951c3dc13fdeb905092e4a921ca7823e6faa</code> · 2026-10-10, trunk · <a href="https://github.com/redis/redis" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Redis is an in-memory data structure server, and its design thesis is
+radical simplicity of execution: <strong>one thread runs all commands</strong>, so every
+command is atomic and almost no locks exist; around that serial core the
+code invests everything in (a) a small, portable event loop and (b)
+purpose-built data structures whose encodings are chosen per-key-size.
+This deep-dive teaches how far that bet scales — and where the code now
+pays to extend it with I/O threads without giving up the serial core.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A restaurant with exactly one chef.</strong> Redis is a kitchen with one chef
+(one thread runs all commands) and a doorbell — the event loop — that
+rings whenever a table needs something or a timer goes off (<code>serverCron</code>).
+The chef finishes one order completely before starting the next, so a dish
+never comes out as half of one table&#39;s order mixed into another&#39;s (every
+command is atomic, and there are almost no locks because nobody else is in
+the kitchen). Most orders are tiny — pass the salt, read a note — so one
+chef serves tens of thousands of tables. Slow chores get helpers: a huge
+pile of leftovers is carried out by a dishwasher (a background thread
+freeing a big value), and a snapshot of the whole pantry is taken by an
+instant camera that freezes the room for a moment (a <code>fork</code> child writing
+an RDB file over copy-on-write memory). The menu itself is printed from a
+recipe book (<code>src/commands/*.json</code> → a generated command table), so adding
+a new dish never rewires the kitchen.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> one cook means nothing is ever
+half-made and nothing needs locking — the simplest design that keeps every
+answer instant, with the slow jobs pushed off the chef&#39;s clock.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CL[&quot;clients — RESP protocol over TCP / unix socket&quot;]
+
+    subgraph server[&quot;redis-server (src/server.c main → aeMain)&quot;]
+        AE[&quot;ae event loop — src/ae.c&lt;br/&gt;backend per platform: epoll / kqueue / select / evport&quot;]
+        FE[&quot;file events&lt;br/&gt;fd → handler&quot;]
+        TE[&quot;time events&lt;br/&gt;serverCron, hz times per second&quot;]
+        BS[&quot;beforeSleep / afterSleep hooks&lt;br/&gt;flush AOF, write pending replies&quot;]
+        PIPE[&quot;command pipeline&lt;br/&gt;readQueryFromClient → processInputBuffer&lt;br/&gt;→ processCommand → call → per-type impl&quot;]
+        KS[&quot;keyspace: db dicts → value objects robj&lt;br/&gt;encodings by key size: sds, dict,&lt;br/&gt;listpack, quicklist, zskiplist&quot;]
+    end
+
+    subgraph persist[&quot;persistence&quot;]
+        RDB[&quot;RDB — fork + snapshot&lt;br/&gt;rdbSaveBackground (rdb.c:2226)&quot;]
+        AOF[&quot;AOF — append-only command log&lt;br/&gt;flushed in beforeSleep&quot;]
+    end
+
+    REPL[&quot;replicas — command stream&quot;]
+
+    CL --&gt;|&quot;socket readable / writable&quot;| AE
+    AE --&gt; FE
+    AE --&gt; TE
+    FE --&gt; PIPE
+    PIPE --&gt; KS
+    PIPE --&gt; BS
+    KS --&gt; RDB
+    PIPE --&gt; AOF
+    AOF --&gt; REPL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> of a command: event fires → <code>src/networking.c:readQueryFromClient</code>
+→ <code>processInputBuffer</code> → <code>src/server.c:processCommand</code> → <code>src/server.c:call</code>
+→ type implementation (e.g. <code>src/t_string.c:setCommand</code>) touching the keyspace
+via <code>src/db.c:lookupKey</code>.</li>
+<li><strong>Event loop</strong> (<code>src/ae.c</code>): a ~500-line library written originally for a Tcl
+interpreter (the file header says so). File events map fd → callback; time
+events run <code>src/server.c:serverCron</code> (hz times per second) for expiry,
+resizing, stats. Platform backends are one file each: <code>ae_epoll.c</code>,
+<code>ae_kqueue.c</code>, <code>ae_select.c</code>, <code>ae_evport.c</code>.</li>
+<li><strong>Command metadata is data</strong>: <code>src/commands/*.json</code> (one file per command,
+e.g. <code>src/commands/set.json</code>) is compiled by <code>generate-command-code.py</code> into
+<code>src/commands.def</code> — the generated <code>redisCommandTable</code> drives dispatch,
+ACL checks, key-spec extraction, and docs. Commands are declared, not
+hand-registered.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-set-socket-to-keyspace">Walkthrough: one SET, socket to keyspace</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom. The sequence diagram shows the same
+trip at a glance.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant AE as ae loop (ae.c)
+    participant PC as processCommand (server.c 4660)
+    participant KS as keyspace db dict
+    participant DR as AOF + replicas
+    C-&gt;&gt;AE: SET name &quot;ada&quot; (RESP bytes on TCP)
+    AE-&gt;&gt;AE: readQueryFromClient → processInputBuffer
+    AE-&gt;&gt;PC: dispatch via generated command table
+    PC-&gt;&gt;PC: auth → ACL → cluster → OOM checks
+    PC-&gt;&gt;KS: call → setCommand, lookupKey / create robj
+    KS--&gt;&gt;PC: value stored, encoding chosen by size
+    PC-&gt;&gt;DR: propagate (dirty++, AOF + replica stream)
+    PC--&gt;&gt;C: +OK queued, flushed in beforeSleep
+    Note over PC,DR: appendfsync policy bounds the durability window
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-doorbell-rings">The doorbell rings</h3>
+<p>The client&#39;s <code>SET name &quot;ada&quot;</code> arrives
+as RESP bytes on a TCP socket. epoll reports the socket readable and the
+ae loop (<code>aeProcessEvents</code>, <code>src/ae.c:365</code>) calls the file event&#39;s
+handler: <code>readQueryFromClient</code> (<code>src/networking.c:3990</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="read-and-parse">Read and parse</h3>
+<p><code>readQueryFromClient</code> pulls bytes into that
+client&#39;s query buffer and hands them to <code>processInputBuffer</code>
+(<code>src/networking.c:3787</code>), which parses the RESP multibulk protocol into
+an argv array: <code>SET</code>, <code>name</code>, <code>ada</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-policy-gauntlet">The policy gauntlet</h3>
+<p><code>processCommand</code> (<code>src/server.c:4660</code>)
+runs every gate a command must pass — auth, ACL rights, cluster
+redirect, OOM limits, transaction queueing — and only then dispatches,
+via a table generated from <code>src/commands/*.json</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="execute-on-the-serial-core">Execute on the serial core</h3>
+<p><code>call</code> (<code>src/server.c:4151</code>)
+invokes <code>setCommand</code> (<code>src/t_string.c:430</code>): lookup or create the key in
+the db dict (<code>src/db.c:lookupKey</code>), set the value object, and pick its
+encoding by size (int, embstr, or raw). No other command can interleave:
+there is exactly one chef.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="bookkeeping-and-propagation">Bookkeeping and propagation</h3>
+<p>The command marks the database
+dirty, propagates itself to the AOF and to replicas, and notifies
+<code>WATCH</code>ers. <code>addReply</code> queues <code>+OK</code> in the client&#39;s output buffer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="reply-at-the-loop-s-edge">Reply at the loop&#39;s edge</h3>
+<p>Between two poll waits, in
+<code>beforeSleep</code> (<code>src/server.c:1960</code>) — or on an I/O thread — the reply is
+written to the socket. Durability is whatever <code>appendfsync</code> policy the
+operator chose (everysec by default).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-client-sees-ok">The client sees OK</h3>
+<p>One command has traveled socket →
+loop → parser → checks → keyspace → replication queue, all on a single
+thread, so it could never interleave with another command&#39;s half-finished
+work. After a restart, the AOF replays this very SET and the key is back.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="sds-binary-safe-strings-with-o-1-length-src-sds-h">SDS — binary-safe strings with O(1) length (<code>src/sds.h</code>)</h3>
+<p>Five packed header variants (<code>sdshdr5</code>, <code>sdshdr8/16/32/64</code>) sized to the
+string, all ending in <code>char buf[]</code>, plus a null terminator for free C-string
+compatibility. Because the header sits <em>before</em> the pointer handed to
+callers (<code>SDS_HDR</code> macro at <code>src/sds.h:64-65</code>), <code>sdslen</code> is O(1), appends
+can check capacity inline, and the string may contain arbitrary bytes.
+C strings were rejected for the same reason every network server rejects
+them: length is metadata you already know, so don&#39;t rescan for it.</p>
+<h3 id="dict-hash-table-with-incremental-rehash-src-dict-c">dict — hash table with incremental rehash (<code>src/dict.c</code>)</h3>
+<p>The keyspace and hash/set values use a chaining hash table that rehashes
+<strong>incrementally</strong>: during a resize, two tables live side by side
+(<code>ht_size_exp[2]</code>), and every operation moves a few buckets
+(<code>src/dict.c:_dictRehashStep</code>, called at lines 950, 1237...; bulk work in
+<code>dictRehash</code> at line 406, capped by <code>empty_visits = n*10</code>, and
+<code>dictRehashMicroseconds</code> at line 449 bounds it by time in <code>serverCron</code>).
+Why: a full-table rehash of a multi-GB keyspace would be a multi-second
+latency spike — unacceptable for a server whose promise is sub-millisecond
+p95. Incremental rehash trades a small memory window (two tables) and a
+slightly costlier lookup during migration for bounded per-operation work.</p>
+<h3 id="listpack-compact-serialized-containers-src-listpack-c">listpack — compact serialized containers (<code>src/listpack.c</code>)</h3>
+<p>Small hashes, lists, sorted sets, and streams store as a listpack: one
+allocation, elements back-to-back with varint lengths, no pointers.
+Combined with <code>src/object.c</code>&#39;s encoding switch (<code>OBJ_ENCODING_LISTPACK</code>,
+growing into <code>OBJ_ENCODING_LISTPACK_EX</code> with per-entry TTL at
+<code>src/server.h:3214</code>), small collections cost a few bytes per entry instead
+of a pointer-graph. The old ziplist had cascade-update problems (an insert
+could force rewriting all subsequent entry headers); listpack&#39;s lengths are
+backwards-only, killing that pathology. Larger collections convert to
+dict/quicklist/skiplist at <code>hash-max-listpack-entries</code>-style thresholds.</p>
+<h3 id="zskiplist-sorted-sets-with-rank-queries-src-server-h-1830">zskiplist — sorted sets with rank queries (<code>src/server.h:1830</code>)</h3>
+<p>A skip list node carries <code>score</code>, a <code>backward</code> pointer, and per-level
+<code>{forward, span}</code> (<code>src/server.h:1830-1840</code>); insertion is
+<code>src/t_zset.c:zslInsert</code> (line 326). Spans make <code>Z Rank</code>/<code>ZRange</code> O(log n)
+by summing spans along the descent — something a balanced BST gives you
+only with subtree sizes. Why a skip list and not a red-black tree: simpler
+code (~200 lines vs ~1000), no rebalancing cases to get wrong, and
+lock-free-friendly in other engines. This is the classic &quot;pick the
+structure your operations actually need&quot; decision.</p>
+<h3 id="quicklist-src-quicklist-c">quicklist (<code>src/quicklist.c</code>)</h3>
+<p>Large lists become a doubly-linked list of listpack nodes — a hybrid that
+keeps per-element overhead tiny while making pushes/pops at both ends
+O(1) without moving the whole collection.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Serial command execution.</strong> <code>processCommand</code> (<code>src/server.c:4660</code>) and
+<code>call</code> (line 4151) run on the main thread. At this pinned commit Redis
+is evolving its threading (<code>src/iothread.c</code>, new in the 8.x era): I/O
+threads now own their own event loops and parse/write client traffic,
+but command <em>execution</em> is handed back — see <code>processClientsFromIOThread</code>
+(<code>src/iothread.c:599</code>) setting <code>c-&gt;running_tid = IOTHREAD_MAIN_THREAD_ID</code>.
+The design lesson: parallelize the I/O around the serial core, never the
+core itself; atomicity of commands is the product.</li>
+<li><strong>Slow work is deferred, not threaded</strong>, through the background-I/O job
+queue (<code>src/bio.c</code>) — e.g. <code>lazyfree.c</code> routes big-value frees to a bio
+thread when <code>lazyfreeGetFreeEffort</code> (<code>src/lazyfree.c:140</code>) exceeds a
+threshold (<code>UNLINK</code> vs <code>DEL</code> is the user-visible seam,
+<code>src/db.c:dbAsyncDelete</code> line 943).</li>
+<li><strong>Expiry is two-phase</strong>: lazy on access (<code>src/db.c</code> lookup path) plus an
+active cycle that samples keys with a time budget
+(<code>src/expire.c:activeExpireCycle</code>, line 295; <code>activeExpireCycleTryExpire</code>
+line 40). Expired-key cleanup is treated like rehashing: amortized with
+hard per-iteration bounds so the loop never stalls.</li>
+<li><strong>Persistence without stopping the world</strong>: RDB snapshotting forks the
+process (<code>src/rdb.c:rdbSaveBackground</code>, line 2226) — the child writes a
+consistent point-in-time view over copy-on-write memory while the parent
+serves. The AOF is an append-only log of commands flushed in
+<code>beforeSleep</code> (<code>src/server.c:1960</code>) with configurable <code>appendfsync</code>
+durability. Crash recovery = load RDB and/or replay AOF; the failure
+story is &quot;lose at most the last fsync window,&quot; chosen by config, not
+code.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    SOCK[&quot;client sockets&quot;]
+
+    subgraph main[&quot;main thread — the serial core&quot;]
+        LOOP[&quot;aeProcessEvents loop&lt;br/&gt;(ae.c:365)&quot;]
+        CMD[&quot;command execution&lt;br/&gt;processCommand → call&lt;br/&gt;no locks: keyspace access is single-threaded&quot;]
+        CRON[&quot;serverCron time events&lt;br/&gt;expiry sampling, rehash budget, stats&quot;]
+        SLEEP[&quot;beforeSleep&lt;br/&gt;AOF flush, pending replies&quot;]
+    end
+
+    subgraph io[&quot;I/O threads (src/iothread.c)&quot;]
+        IOP[&quot;own event loops:&lt;br/&gt;read / parse / write sockets&quot;]
+    end
+
+    subgraph bg[&quot;background jobs (src/bio.c)&quot;]
+        BIOP[&quot;lazyfree of big values,&lt;br/&gt;AOF fsync, close files&quot;]
+    end
+
+    subgraph fork[&quot;fork child (rdbSaveBackground)&quot;]
+        SNAP[&quot;snapshots copy-on-write memory&lt;br/&gt;while the parent keeps serving&quot;]
+    end
+
+    SOCK --&gt; IOP
+    IOP --&gt;|&quot;parsed clients handed back before execution&quot;| CMD
+    LOOP --&gt; CMD
+    LOOP --&gt; CRON
+    LOOP --&gt; SLEEP
+    CMD --&gt;|&quot;free effort over threshold&quot;| BIOP
+    CMD --&gt;|&quot;BGSAVE&quot;| SNAP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The client API is the <strong>RESP protocol</strong>: a handful of verbs whose
+semantics map 1:1 onto data-structure operations. Because the protocol
+is typed arrays of bulk strings, adding a command never breaks the
+protocol — the table entry (<code>src/commands.def</code>, generated) declares
+arity, flags, key positions, and ACL category (see the <code>MAKE_CMD(&quot;set&quot;,...)</code>
+entry around line 13223).</li>
+<li><strong>Modules</strong> (<code>src/module.c</code>) expose a large C API (<code>RedisModule_*</code>) so
+extensions add commands and data types without touching the core —
+with an explicit thread-safety contract (modules may block; the core
+unblocks clients).</li>
+<li>The honest wart: the single-process, single-port model made clustering
+an overlay (<code>src/cluster.c</code>) with slot migration as protocol state
+machine rather than a native distributed design — powerful, but the
+most criticized surface in the system.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-single-threaded-execution-over-lock-based-parallelism">Trade-off 1: single-threaded execution over lock-based parallelism</h3>
+<ul>
+<li><strong>Tension:</strong> serve tens of thousands of connections on many cores.</li>
+<li><strong>Choice:</strong> one thread runs commands; concurrency lives in the event
+loop (and now I/O threads for socket work only).</li>
+<li><strong>Evidence:</strong> <code>src/server.c:call</code> has no locks around keyspace access;
+<code>src/iothread.c:processClientsFromIOThread</code> marshals clients back to the
+main thread before execution.</li>
+<li><strong>Given up:</strong> CPU-bound commands (e.g. big <code>SORT</code>, Lua) block everyone;
+one core does all command work.</li>
+<li><strong>Verdict:</strong> right when per-command cost is microscopic and the workload
+is I/O-bound. Wrong when commands are compute-heavy — which is exactly
+why the module API allows moving work into threads under an explicit
+blocking contract.</li>
+</ul>
+<h3 id="trade-off-2-per-key-adaptive-encodings-over-uniform-structures">Trade-off 2: per-key adaptive encodings over uniform structures</h3>
+<ul>
+<li><strong>Tension:</strong> memory vs code complexity in an in-memory server.</li>
+<li><strong>Choice:</strong> every value type has 2+ encodings switched by size/threshold
+(listpack → dict/quicklist/skiplist; <code>OBJ_ENCODING_*</code> in
+<code>src/server.h</code>).</li>
+<li><strong>Evidence:</strong> <code>src/object.c</code>&#39;s encoding getters (lines ~1317+);
+<code>setGenericCommand</code> (<code>src/t_string.c:87</code>) picks int/embstr/raw per value.</li>
+<li><strong>Given up:</strong> predictable worst-case latency on conversion boundaries
+and a much larger test matrix; encodings leak to observability
+(<code>OBJECT ENCODING</code>).</li>
+<li><strong>Verdict:</strong> right because cache economics are memory economics — the
+small-key regime dominates real workloads. The same choice would be
+over-engineering in a system where values are uniformly large.</li>
+</ul>
+<h3 id="trade-off-3-fork-based-snapshots-over-in-place-checkpointing">Trade-off 3: fork-based snapshots over in-place checkpointing</h3>
+<ul>
+<li><strong>Tension:</strong> durability without latency spikes.</li>
+<li><strong>Choice:</strong> <code>rdbSaveBackground</code> forks; the child walks a frozen view
+while the parent keeps mutating copy-on-write pages.</li>
+<li><strong>Evidence:</strong> <code>src/rdb.c:2226</code>; child status reaped in <code>serverCron</code>.</li>
+<li><strong>Given up:</strong> fork cost scales with page-table size; heavy write load
+during a snapshot can double memory (CoW copies).</li>
+<li><strong>Verdict:</strong> brilliant on Linux with modest datasets — a whole
+consistent snapshot with zero locking in the parent. It degrades on
+huge datasets with high write churn; that&#39;s the gap AOF-everysec and
+hybrid RDB+AOF headers fill.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/server.c:main</code> (line ~8246) — startup order: config →
+<code>initServerConfig</code> → module loading → <code>initServer</code> (creates the event
+loop, registers listeners) → <code>aeMain</code>.</li>
+<li><code>src/ae.c:aeProcessEvents</code> (line 365) — the loop&#39;s heart: poll, dispatch
+file events, run due time events; notice <code>beforeSleep</code>/<code>afterSleep</code>
+hooks (<code>src/server.c:1960</code>, <code>2175</code>) — all &quot;between epoll waits&quot; work
+(flush AOF, write pending replies, handle just-unblocked clients)
+happens there.</li>
+<li><code>src/networking.c:readQueryFromClient</code> (line 3990) — read into the
+client&#39;s query buffer, hand to <code>processInputBuffer</code> (line 3787);
+notice the inline-vs-multibulk RESP parsing split.</li>
+<li><code>src/server.c:processCommand</code> (line 4660) — the policy gauntlet every
+command passes: auth → ACL → cluster redirect → OOM → blocked-client
+→ transaction queue. Dispatch is a table lookup; the table came from
+<code>src/commands/*.json</code>.</li>
+<li><code>src/server.c:call</code> (line 4151) → <code>src/t_string.c:setCommand</code> (line<ol start="430">
+<li>— trace one <code>SET</code> end to end: parse args, <code>lookupKeyWrite</code> on
+<code>src/db.c:lookupKey</code> (line 296) or create, <code>setKey</code>, propagate to
+AOF/replicas, dirty counters, notify watchers (<code>WATCH</code>).</li>
+</ol>
+</li>
+<li><code>src/sds.h</code> (whole file, ~350 lines) — read the five packed headers and
+<code>sdsnewlen</code>/<code>sdsMakeRoomFor</code> in <code>src/sds.c</code>; this is the smallest
+complete lesson in the repo.</li>
+<li><code>src/dict.c:dictRehash</code> (line 406) + <code>_dictRehashStep</code> (471) — see how
+&quot;two tables + move a little every op&quot; bounds latency; then find where
+<code>serverCron</code> calls the time-bounded variant.</li>
+<li><code>src/server.h:1824-1845</code> + <code>src/t_zset.c:zslInsert</code> (line 326) — walk
+the level-by-level descent; the <code>span</code> fields answer &quot;what rank is
+this element&quot; without subtree sizes.</li>
+<li><code>src/expire.c:activeExpireCycle</code> (line 295) — expiry as a sampling
+loop with a millisecond budget; compare with lazy expiry on the
+lookup path.</li>
+<li><code>src/rdb.c:rdbSaveBackground</code> (line 2226) — fork, serialize the frozen
+view, atomically rename; then <code>src/aof.c:flushAppendOnlyFile</code> for the
+complementary log-based story.</li>
+<li><code>src/iothread.c</code> (top + <code>processClientsFromIOThread</code>, line 599) — the
+modern layer: per-thread event loops, pending-client queues with
+mutexes, and the invariant that execution stays on the main thread.</li>
+</ol>
+<p>You have now traced one <code>SET</code> from socket to keyspace to disk, and seen
+every mechanism (loop, dict, encoding, expiry, persistence, threading)
+that a Redis command&#39;s latency budget pays for.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Amortize every unbounded operation</strong> (rehash, expiry, freeing) into
+the main loop with explicit time/step budgets — the pattern that keeps
+p99 flat as data grows.</li>
+<li><strong>Generate your API surface from data</strong> (commands.json → table): one
+source drives dispatch, docs, ACLs, and client tooling.</li>
+<li><strong>Adaptive encodings per key size</strong> buy memory where the workload
+actually lives; put the conversion threshold in config, not code.</li>
+<li><strong>Fork is a persistence primitive</strong>: copy-on-write gives consistent
+snapshots of mutable state with zero locks — if you&#39;re on Unix.</li>
+<li><strong>Parallelize I/O, serialize semantics</strong>: the newer iothread layer
+shows how to add threads to a serial design without breaking its
+atomicity promise.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong>. C reading fluency required; no kernel
+knowledge needed.</li>
+<li>Budget: ~4–6 hours for the reading path; a weekend to also read
+<code>dict.c</code> and <code>t_zset.c</code> completely.</li>
+<li>Prerequisites: hash tables and skip lists at a data-structures level;
+what <code>fork(2)</code> + copy-on-write means (any OS textbook chapter);
+event-driven I/O basics (select/epoll).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Redis documentation: <a href="https://redis.io/docs/">https://redis.io/docs/</a> — especially the topics
+pages on persistence, replication, and cluster.</li>
+<li>The <code>src/ae.c</code> header comment credits antirez&#39;s blog-era writing; the
+canonical history is Salvatore Sanfilippo&#39;s blog archives on Redis
+internals (e.g. the incremental rehash posts).</li>
+<li>P. E. O&#39;Neil, &quot;The Log-Structured Merge-Tree&quot; — not Redis, but the
+appendix-log mindset that AOF shares.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <span></span>
+  <a href="../sqlite/" style="text-align:right"><span class="dir">Next dive →</span>SQLite: a database as a layered library — and a query as compiled bytecode</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 1 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

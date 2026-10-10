@@ -16,27 +16,54 @@ in readable C: the bytecode loop, the object protocol, memory
 management, and how a runtime's extension contract decides its
 ecosystem.
 
+## Explain like I'm 10
+
+**A puppet theater where every puppet wears a name tag.** Every puppet
+(every value) wears a tag that counts how many hands are holding it
+(the reference count). The moment the count reaches zero, that puppet is
+put away INSTANTLY — no waiting for cleanup day. Puppets holding hands
+with each other in a circle (reference cycles) never reach zero, so a
+periodic inspector (the garbage collector) walks the theater and finds
+those circles. And there's one house rule: only one storyteller (the
+GIL) may move puppets at a time — outside helpers who build new puppets
+(in C extensions) would otherwise yank the same puppet in two
+directions at once. Best of all: when the storyteller performs the same
+line about eight times, they memorize a shortcut for exactly that line
+(adaptive specialization) without changing the story.
+
+**Why the grown-ups did it this way:** the name-tag rule made it safe
+for anyone to build new puppets in C — which grew the biggest puppet
+collection in the world (NumPy, PyTorch...), a prize worth more than
+the parallelism the one-storyteller rule postponed.
+
 ## 1. Architecture overview
 
-```
- .py source
-    │ tokenize + parse (Parser/, PEG parser) → AST
-    ▼ compile: Python/compile.c + codegen.c
- bytecode (code object: co_code, consts, names)
-    │
-    ▼ eval: Python/ceval.c:_PyEval_EvalFrameDefault (1231)
- one giant switch over opcodes (Python/generated_cases.c.h,
- source of truth: Python/bytecodes.c; adaptive: Python/specialize.c;
- tier-2 uops: Python/executor_cases.c.h)
-    │ operands = PyObject* on a value stack, in a frame
-    ▼
- object model: Include/object.h — struct _object
- refcounting (Py_INCREF/DECREF) + cycle GC (Python/gc.c)
- pymalloc arenas (Objects/obmalloc.c) over malloc
-    │
- builtins & stdlib: Objects/*object.c (unicode, dict, list...)
- extension modules: Modules/*.c (PyModuleDef pattern)
- threading: GIL (Python/ceval_gil.c) or free-threaded build
+```mermaid
+flowchart TD
+    SRC[".py source"]
+    PEG["tokenize + parse (Parser/, PEG) → AST"]
+    COMPILE["compile — Python/compile.c + codegen.c"]
+    BC["bytecode code object<br/>co_code, consts, names"]
+    subgraph eval["eval — Python/ceval.c _PyEval_EvalFrameDefault 1231"]
+        SWITCH["giant switch over opcodes<br/>generated_cases.c.h (from bytecodes.c DSL)"]
+        SPEC["adaptive: specialize.c —<br/>hot opcodes rewrite into specialized forms"]
+        T2["tier-2 uops — executor_cases.c.h"]
+    end
+    subgraph obj["object model — Include/object.h"]
+        PYO["PyObject: refcount + type pointer<br/>Py_INCREF / Py_DECREF"]
+        GCD["cycle GC — Python/gc.c (containers only)"]
+        ALLOC["pymalloc arenas — Objects/obmalloc.c"]
+    end
+    STDLIB["builtins & stdlib — Objects/*object.c, Modules/*.c<br/>extension modules via PyModuleDef"]
+    GIL["threading: GIL — Python/ceval_gil.c<br/>or free-threaded build (Py_GIL_DISABLED)"]
+
+    SRC --> PEG --> COMPILE --> BC --> SWITCH
+    SWITCH --> SPEC --> T2
+    SWITCH -->|"PyObject* on a value stack"| PYO
+    PYO --> GCD
+    PYO --> ALLOC
+    PYO --> STDLIB
+    GIL -.-> SWITCH
 ```
 
 - The **spine** — one `x + y` — is: the compiler emits
@@ -45,6 +72,62 @@ ecosystem.
   slot in `ob_type`; after ~8 executions the instruction specializes
   to `BINARY_OP_ADD_FLOAT` (`generated_cases.c.h:99`) which inlines
   the float fast-path.
+
+## Walkthrough: x + y, source to destruction
+
+The spine as a story — step through it on the site or read straight
+down. One tiny expression exercises the compiler, the eval loop,
+specialization, the object protocol, and the allocator.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Source (x + y)
+    participant C as compiler (compile.c)
+    participant E as eval loop (ceval.c 1231)
+    participant O as object protocol (ob_type slots)
+    participant M as memory (pymalloc + GC)
+    S->>C: compile → stack program, one opcode: BINARY_OP
+    C->>E: execute generated_cases.c.h TARGET(BINARY_OP) 21
+    E->>E: pop two PyObject* from the value stack
+    E->>O: dispatch via ob_type slot (nb_add)
+    O-->>E: result PyObject* pushed
+    Note over E: after ~8 runs: specialize.c rewrites to BINARY_OP_ADD_FLOAT 99<br/>with a guard that deopts back if types change
+    E->>M: later: last DECREF → dealloc → pymalloc pool / cycle GC
+```
+
+**Step 1 — Compile to a stack program.** `Python/compile.c` +
+`Python/codegen.c` turn the AST for `x + y` into a tiny bytecode
+program: load `x`, load `y`, `BINARY_OP` (add). Operands will be
+`PyObject*` values on a per-frame stack.
+
+**Step 2 — Enter the loop.** `_PyEval_EvalFrameDefault`
+(`Python/ceval.c:1231`) is one `for(;;)` with a colossal switch —
+but the cases are *generated*: `Python/bytecodes.c` is the DSL that
+produces `generated_cases.c.h` and the tier-2 uop executor.
+
+**Step 3 — Dispatch through the type.** `TARGET(BINARY_OP)`
+(`generated_cases.c.h:21`) pops two `PyObject*` and calls the slot in
+`ob_type` — behavior lives in the type object, never in the instance
+(`Include/object.h:127`). A `float` plus a `float` takes the float
+path; a custom class takes its `__add__`.
+
+**Step 4 — The shortcut forms.** After ~8 executions, `specialize.c`
+rewrites the instruction in place to `BINARY_OP_ADD_FLOAT` (99): a
+guarded fast path that inlines the float add. If a string ever shows
+up, the guard fails and the instruction deoptimizes to the generic
+case — same semantics, faster common case, portable C everywhere.
+
+**Step 5 — Death by name tag.** When the result's refcount drops to
+zero, `Py_DECREF` runs the type's dealloc immediately — deterministic
+cleanup. The bytes return to a pymalloc pool (`Objects/obmalloc.c`);
+only objects inside reference cycles wait for the generational GC
+(`Python/gc.c`).
+
+**Outcome — The complete life of a value.** Source text → bytecode →
+generated interpreter → type dispatch → specialized fast path →
+reference-counted destruction: you have traced what "everything is an
+object" costs and pays, opcode by opcode.
 
 ## 2. Core data structures — and why these
 
@@ -119,6 +202,32 @@ synchronization (biased refcounting, deferred RC) takes over.
 - **Startup is bootstrap-by-frozen-module**: `Python/frozen.c`
   compiles importlib *into* the binary so the interpreter can bootstrap
   its module system without a working filesystem story first.
+
+```mermaid
+flowchart LR
+    subgraph rt["the runtime"]
+        LOOP2["eval loop — checks the eval breaker<br/>between bytecodes: signals, GIL handoff"]
+        GIL2["the GIL — ceval_gil.c<br/>take_gil 575 / drop_gil 203,<br/>switch interval for fairness"]
+        FT["free-threaded build — Py_GIL_DISABLED (75/231/313):<br/>biased refcounts, deferred RC, per-object sync"]
+    end
+    subgraph threads["Python threads"]
+        T1["thread 1 — bytecode"]
+        T2["thread 2 — bytecode<br/>(serialized by the GIL)"]
+        T3["thread 3 — in C or I/O<br/>(Py_BEGIN_ALLOW_THREADS: GIL released)"]
+    end
+    subgraph mem["memory"]
+        POOL["pymalloc — size-class pools in mmap'd arenas<br/>small objects never touch malloc"]
+        GCO["cycle GC — generational,<br/>tracks container objects only"]
+    end
+
+    T1 --> GIL2
+    T2 --> GIL2
+    T3 -.->|"explicit release around blocking work"| GIL2
+    LOOP2 --> GIL2
+    GIL2 -.->|"the successor"| FT
+    LOOP2 --> POOL
+    LOOP2 --> GCO
+```
 
 ## 4. API and extension design
 

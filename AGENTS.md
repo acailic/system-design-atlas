@@ -13,11 +13,31 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Project: system-design-atlas
 
-- Markdown-first curated atlas of open-source design deep-dives. No build step, no UI. English content.
+- Markdown-first curated atlas of open-source design deep-dives; English content.
+  The site (GitHub Pages, served from `docs/` on `main`) is *generated* — never
+  hand-edit `docs/`.
 - Source of truth for entries: `catalog.yaml` (schema documented at its top). Deep-dives live in `deep-dives/<id>.md` following `DEEP-DIVE-TEMPLATE.md`; the template's citation rules (pin commit, cite only what you opened) are the quality bar — see `CONTRIBUTING.md` for the checklist.
 - Analyzed repos are shallow-cloned into `clones/` (gitignored); never vendor upstream code. Keep snippet policy from `LICENSES.md`.
 - When adding a deep-dive: update `status: deep-dived` in catalog.yaml and the coverage list in README.md in the same change.
 - Catalog selection weighs both popularity/ubiquity and design depth; heavyweight tools' `why:` paragraphs must tie popularity to the design decision that made them win (captain's standing emphasis).
+
+## Site build (docs/ = generated GitHub Pages output)
+
+- Build: `npm ci && npm run build` regenerates `docs/` from the markdown;
+  `npm run check` fails if committed `docs/` is stale — run it before every
+  push that touches prose. Deps are pinned in package.json (marked, js-yaml;
+  no framework).
+- After editing ANY prose (deep-dives, PATTERNS.md, README, catalog.yaml),
+  rebuild and commit `docs/` in the same change.
+- Deep-dive markdown conventions the builder depends on: unnumbered
+  `## Explain like I'm 10` section (with a `**Why the grown-ups did it this
+  way:**` paragraph), unnumbered `## Walkthrough: …` section whose steps are
+  exactly `**Step N — Title.**` / `**Outcome — Title.**` bold-lead paragraphs
+  (no code ticks in titles), and ```mermaid fenced diagrams. Numbered
+  sections 1–9 keep their order; the two new sections are unnumbered so
+  citations like "the reading path in section 6" stay stable.
+- Read-aloud + steppers are progressive enhancement in `site/assets/site.js`;
+  keep them working without JS (raw readable pages, mermaid source visible).
 
 ## Deep-dive process addenda (learned during the 13-dive expansion)
 

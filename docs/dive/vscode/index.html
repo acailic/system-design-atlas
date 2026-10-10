@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VS Code: extension architecture as the product — process isolation and protocol seams — System Design Atlas</title>
+<meta name="description" content="VS Code became the most-used code editor of its era on an unfashionable stack (Electron: Chromium + Node) because its real product is not the editor — it is the extension architecture : ever">
+<meta property="og:title" content="VS Code: extension architecture as the product — process isolation and protocol seams — System Design Atlas">
+<meta property="og:description" content="VS Code became the most-used code editor of its era on an unfashionable stack (Electron: Chromium + Node) because its real product is not the editor — it is the extension architecture : ever">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-open-a-json-file-type-a-dot-get-completions">Walkthrough: open a .json file, type a dot, get completions</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>VS Code: extension architecture as the product — process isolation and protocol seams</h1>
+    <div class="meta-chips"><span class="chip domain">editor</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/microsoft/vscode" rel="noopener">MIT</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>a5aeadabe1ee5b1c2bf70e9e61706f4e7b684282</code> · 2026-10-09, master · <a href="https://github.com/microsoft/vscode" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">VS Code became the most-used code editor of its era on an unfashionable
+stack (Electron: Chromium + Node) because its real product is not the
+editor — it is the <strong>extension architecture</strong>: every language
+intelligence, every debugger, every theme arrives through a designed
+seam. The two load-bearing decisions: <strong>extensions run in a separate
+process</strong> and speak the product only through a versioned API over RPC;
+and <strong>heavy tool integrations (LSP, DAP) are data protocols at the
+edge</strong>, so ecosystems can be polyglot. This deep-dive teaches how to
+design extensibility so a plugin explosion cannot kill the host.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A school where guest teachers get their own room — never the office.</strong>
+VS Code is a school. The front office (the workbench — the UI you see)
+never lets guest teachers (extensions) teach from inside the office:
+each guest gets their own room next door (the extension host process),
+and talks to the office only through a mail slot with strict rules (a
+versioned API marshalled over RPC). A guest who breaks things can only
+wreck their own room — the school stays open, and the principal just
+reopens the room. The fanciest helpers — the ones who understand Python
+or C++ — don&#39;t even get a room in the building: they live in a separate
+building (their own process) and communicate by postcards written in a
+standard format (LSP) that ANY school can read — which is why the same
+helper works in other editors too.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> with thousands of guest teachers
+of every skill level, isolation IS the feature — one bad guest must
+never be able to freeze or crash the editor everyone is typing in.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph desktop[&quot;Electron app&quot;]
+        EM[&quot;electron main — src/vs/code/electron-main&lt;br/&gt;windows, lifecycle, IPC plumbing&quot;]
+        WB[&quot;renderer / workbench — src/vs/workbench&lt;br/&gt;UI, services, editor (src/vs/editor)&quot;]
+        SH[&quot;shared process — file watchers etc.&quot;]
+        UT[&quot;utility process&quot;]
+    end
+    EH[&quot;EXTENSION HOST — src/vs/workbench/api/node/extensionHostProcess.ts&lt;br/&gt;runs ALL extension code (Node.js)&lt;br/&gt;API = vscode.d.ts, implemented by extHost*.ts&lt;br/&gt;proxies marshalled over RPCProtocol (rpcProtocol.ts 115)&quot;]
+    subgraph edges[&quot;at the edge: data protocols&quot;]
+        LSP[&quot;LSP language servers — own processes,&lt;br/&gt;any language (JSON, TS, CSS...)&quot;]
+        DAP[&quot;DAP debug adapters&quot;]
+    end
+
+    WB --&gt;|&quot;dedicated child process, socket + PersistentProtocol&quot;| EH
+    WB --&gt; SH
+    WB --&gt; UT
+    EH --&gt; LSP
+    EH --&gt; DAP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — &quot;open a .json file, get completions&quot; — is: the
+workbench sees the file type → <code>json-language-features</code> extension&#39;s
+<em>activation event</em> fires (<code>extensions/json-language-features/ package.json:16</code>) → ext host activates it
+(<code>src/vs/workbench/api/common/extHostExtensionService.ts: _activateByEvent:298</code> → <code>_activateExtension:421</code> → <code>_callActivate:494</code>)
+→ the extension spawns/attaches a language server over LSP →
+completions flow back as data, rendered by built-in UI widgets.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-open-a-json-file-type-a-dot-get-completions">Walkthrough: open a .json file, type a dot, get completions</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. Watch how many process boundaries the keystroke crosses without
+the UI ever risking a crash.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant U as User (types in editor)
+    participant W as Workbench (renderer)
+    participant EH as Extension host (own process)
+    participant LS as Language server (LSP, another process)
+    U-&gt;&gt;W: open config.json, type &quot;na&quot;
+    W-&gt;&gt;EH: onLanguage:json activation event fires
+    EH-&gt;&gt;EH: activate json-language-features (_activateByEvent 298)
+    EH-&gt;&gt;LS: spawn / attach, capabilities handshake
+    W-&gt;&gt;EH: completion request — marshalled over RPCProtocol (115)
+    EH-&gt;&gt;LS: textDocument/completion (LSP, JSON over stdio)
+    LS--&gt;&gt;EH: completion items as data
+    EH--&gt;&gt;W: items return through the RPC object graph
+    W--&gt;&gt;U: built-in widget renders the list
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-file-opens">The file opens</h3>
+<p>The workbench resolves the file&#39;s language
+from the <code>json</code> extension&#39;s declarative contribution. Nothing has run
+yet: contributions in <code>package.json</code> are data, merged at startup and
+rendered without executing extension code.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-activation-event">The activation event</h3>
+<p>Opening a JSON file fires the
+<code>onLanguage:json</code> activation event declared in
+<code>extensions/json-language-features/package.json:16</code>. The host side
+asks the extension host to activate that extension:
+<code>_activateByEvent</code> (298) → <code>_activateExtension</code> (421) →
+<code>_callActivate</code> (494), with per-extension error capture.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-mail-slot">The mail slot</h3>
+<p>The extension&#39;s code runs in the extension
+host process and calls the <code>vscode</code> API — but every call is a proxy
+marshalled by <code>RPCProtocol</code> (<code>rpcProtocol.ts:115</code>): contexts hold
+named object references; arguments (URIs, buffers, positions) are
+serialized with revivers. The rich typed API is one uniform
+marshalling problem.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-postcard">The postcard</h3>
+<p>The extension starts (or attaches) a JSON
+language server in yet another process and speaks LSP: capabilities
+handshake, then <code>textDocument/completion</code> as JSON over stdio. The
+helper could be written in any language — the protocol is the contract,
+not the runtime.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="data-comes-home">Data comes home</h3>
+<p>Completion items arrive as plain data,
+cross back through the RPC boundary, and are rendered by built-in UI
+widgets. The extension never touched a DOM node; the editor never ran
+extension code on its thread.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="intelligence-without-risk">Intelligence without risk</h3>
+<p>A third-party language expert
+added deep editor behavior while isolated two process boundaries away.
+If it hangs, its requests time out; if it crashes, its process restarts
+— your unsaved buffer never noticed.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-rpc-object-graph-src-vs-workbench-services-extensions-common-rpcprotocol-ts-115">The RPC object graph (<code>src/vs/workbench/services/extensions/common/rpcProtocol.ts:115</code>)</h3>
+<p><code>RPCProtocol</code> marshals calls between host and extension process:
+contexts hold named object references; calls address
+<code>extHost</code>/<code>mainThread</code> identifiers; arguments are serialized with
+revivers (URIs, buffers, positions). The API surface the extension
+sees (<code>vscode.d.ts</code>) is implemented by dozens of <code>extHost*.ts</code>
+classes whose <em>proxies</em> live on the other side lazily. Why an object
+graph over raw IPC: a rich, typed API (80+ namespaces) stays a
+uniform marshalling problem, and references (event emitters,
+disposables) cross the boundary with identity.</p>
+<h3 id="contribution-points-activation-events-extension-manifests">Contribution points + activation events (extension manifests)</h3>
+<p>Every extension declares, as <em>data</em>: what it contributes (languages,
+commands, menus, themes — <code>contributes</code> in <code>package.json</code>) and when to
+load (<code>activationEvents</code>). The host merges manifests at startup
+(<code>extensionPoints.json</code>, <code>extensionDescriptionRegistry.ts</code>) and
+activates lazily. Why: a thousand extensions must not cost a thousand
+processes or a slow startup — declarations render UI <em>before</em> code
+runs, and code runs only on trigger.</p>
+<h3 id="the-piece-tree-text-buffer">The piece-tree text buffer</h3>
+<p>(<code>src/vs/editor/common/model/pieceTreeTextBuffer/pieceTreeBase.ts:268</code>)</p>
+<p>The editor&#39;s text model is a balanced tree of <em>pieces</em> (references
+into chunked storage) with prefix-sum line indexes
+(<code>prefixSumComputer.ts</code>). Why: line-start lookup must be O(log n) on
+gigabyte files, and edits must not shift a whole ArrayBuffer; a
+piece tree gives cheap inserts plus cheap line indexing where a flat
+buffer gives one or the other. (Same family as the rope; the
+neighbor <code>intervalTree.ts</code> serves decorations.)</p>
+<h3 id="remote-extension-kinds-extensionrunninglocationtracker-ts">Remote extension kinds (<code>extensionRunningLocationTracker.ts</code>)</h3>
+<p>Extensions are classified local/remote/web-worker by their API usage
+— the <em>same</em> extension model spans desktop, remote (SSH/container), and
+the browser, because &quot;where does this code run&quot; became data, not
+build config.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Process isolation is the safety model</strong>: an extension crash kills
+the extension host, not your unsaved editor state; the host is
+restarted and extensions reactivated. A hanging extension degrades
+one subsystem (its protocol requests time out) rather than the UI
+— the workbench stays responsive because <em>its</em> thread never runs
+extension code.</li>
+<li><strong>The host never trusts the extension</strong>: capability-checked API
+surface (no <code>require</code> of arbitrary host modules in the API, no DOM
+access from ext host beyond provided views), telemetry/marketside
+gating of proposed APIs.</li>
+<li><strong>LSP/DAP push failure further out</strong>: language servers are yet
+another process, often third-party binaries — a crashing server
+restarts without touching the extension host. Compare Neovim (this
+catalog): same conclusion (RPC peers) reached from a different
+history.</li>
+<li><strong>Latency is managed, not denied</strong>: RPC calls are batched; the
+protocol aggressively avoids round trips (bulk registration,
+buffered writes in <code>PersistentProtocol</code> from
+<code>base/parts/ipc/common/ipc.net.js</code>).</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph procmap[&quot;the process map — isolation is the safety model&quot;]
+        MAIN[&quot;electron main&lt;br/&gt;windows, lifecycle&quot;]
+        REN[&quot;renderer / workbench&lt;br/&gt;the UI — NEVER runs extension code&quot;]
+        EHP[&quot;extension host (child process)&lt;br/&gt;all extension code; RPCProtocol 115&lt;br/&gt;capability-checked API, no DOM&quot;]
+        LS2[&quot;LSP / DAP servers&lt;br/&gt;own processes, often third-party binaries&quot;]
+    end
+    HANG[&quot;hanging extension → its requests time out,&lt;br/&gt;one subsystem degrades, UI stays responsive&quot;]
+    CRASH[&quot;crashing extension host → restarted,&lt;br/&gt;extensions reactivated, editor state intact&quot;]
+    CRASH2[&quot;crashing language server → restarted,&lt;br/&gt;extension host untouched&quot;]
+
+    MAIN --&gt; REN
+    REN --&gt;|&quot;socket + PersistentProtocol&quot;| EHP
+    EHP --&gt; LS2
+    EHP -.-&gt; HANG
+    EHP -.-&gt; CRASH
+    LS2 -.-&gt; CRASH2
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>Two-tier API</strong>: <code>src/vscode-dts/vscode.d.ts</code> is the stable,
+semver&#39;d contract every extension compiles against; new capability
+incubates as <code>vscode.proposed.*.d.ts</code> behind explicit opt-in, then
+graduates. This is the mechanism that let an enormous ecosystem
+ride years of host evolution without breakage.</li>
+<li><strong>Activation as data</strong> (manifests) plus <strong>commands as uniform
+verbs</strong> (<code>ExtHostCommands</code>,
+<code>src/vs/workbench/api/common/extHostCommands.ts:46</code>): anything can
+invoke anything&#39;s commands — keybindings, menus, other extensions —
+without link-time knowledge.</li>
+<li><strong>The escape hatch is protocol</strong>: LSP (language) and DAP (debug)
+moved the highest-churn integrations out of the process API into
+versioned data protocols — which is why language tooling became
+polyglot and editor-agnostic, arguably VS Code&#39;s deepest ecosystem
+effect.</li>
+<li>Honest wart: the Electron substrate&#39;s memory footprint, and an API
+surface so successful it ossifies: retiring or fixing misdesigned
+stable APIs takes years (hence the proposed-API treadmill).</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-extension-host-out-of-process-over-in-process-plugins">Trade-off 1: extension host out-of-process over in-process plugins</h3>
+<ul>
+<li><strong>Tension:</strong> rich, fast extension APIs vs host stability.</li>
+<li><strong>Choice:</strong> all extension code in a child process; API access only
+through marshalled object graphs.</li>
+<li><strong>Evidence:</strong> <code>extensionHostProcess.ts</code> (ext host bootstrap,
+<code>_createExtHostProtocol:180</code>); <code>rpcProtocol.ts:115</code>; host-side
+management in <code>extensionHostManager.ts:58</code> /
+<code>extensionService.ts:46</code>.</li>
+<li><strong>Given up:</strong> call latency (every API touch is IPC), API shapes
+constrained to serializable graphs, and a hard debugging boundary.</li>
+<li><strong>Verdict:</strong> for a platform whose plugins are written by thousands
+of third parties at every skill level, isolation <em>is</em> the feature.
+In-process wins only when you control all plugin authors (compare
+CPython&#39;s opposite bet in this atlas).</li>
+</ul>
+<h3 id="trade-off-2-stable-surface-gated-proposals-over-fast-moving-api">Trade-off 2: stable surface + gated proposals over fast-moving API</h3>
+<ul>
+<li><strong>Tension:</strong> ecosystem stability vs host velocity.</li>
+<li><strong>Choice:</strong> one versioned <code>vscode.d.ts</code>; everything risky starts
+proposed and opt-in.</li>
+<li><strong>Evidence:</strong> <code>src/vscode-dts/</code> — <code>vscode.d.ts</code> beside dozens of
+<code>vscode.proposed.*.d.ts</code> files.</li>
+<li><strong>Given up:</strong> rapid API iteration (design pressure to get stable
+APIs right), dual API maintenance.</li>
+<li><strong>Verdict:</strong> the reason a 2015-era extension still installs today.
+Any platform with third-party developers needs this discipline —
+most skip it and break their ecosystems.</li>
+</ul>
+<h3 id="trade-off-3-protocols-lsp-dap-at-the-edge-over-richer-in-process-apis">Trade-off 3: protocols (LSP/DAP) at the edge over richer in-process APIs</h3>
+<ul>
+<li><strong>Tension:</strong> deep host integration vs ecosystem reach.</li>
+<li><strong>Choice:</strong> language/debug intelligence normalized into data
+protocols owned by their own communities; the host provides client
+plumbing and UI.</li>
+<li><strong>Evidence:</strong> <code>extensions/json-language-features</code> (manifest
+activation events at line 16; <code>vscode-languageclient</code> dependency;
+servers under <code>server/</code>); same pattern for TS, CSS, HTML, debuggers.</li>
+<li><strong>Given up:</strong> peak integration (an in-process extension can do
+more), one more process per language.</li>
+<li><strong>Verdict:</strong> the call that made tooling editor-agnostic and turned
+VS Code into a platform other editors (incl. Neovim) also build
+on. Protocols beat APIs wherever the ecosystem is broader than
+the product.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/vs/code/</code> directory tree — name the processes (electron-main,
+renderer/workbench, shared, utility) before reading any code.</li>
+<li><code>extensions/json-language-features/package.json</code> — a complete
+extension as <em>data</em>: activation events (16), contributions,
+dependencies. Everything else in this path explains how this
+manifest becomes running code.</li>
+<li><code>src/vs/workbench/services/extensions/common/extensionService.ts:46</code>
+and <code>extensionHostManager.ts:58</code> — the host side: scanning,
+enabling, launching extension hosts (local/remote kinds decided by
+<code>extensionRunningLocationTracker.ts</code>).</li>
+<li><code>src/vs/workbench/api/node/extensionHostProcess.ts</code> — the child&#39;s
+<code>main()</code>: handshaking over the socket
+(<code>_createExtHostProtocol:180</code>, <code>PersistentProtocol</code>), initData,
+then hand off to the API implementation.</li>
+<li><code>src/vs/workbench/services/extensions/common/rpcProtocol.ts:115</code> —
+read <code>RPCProtocol</code> end to end (~600 lines): contexts, lazy
+proxies, serialization. This file <em>is</em> the extension boundary.</li>
+<li><code>src/vs/workbench/api/common/extHostExtensionService.ts:81</code> —
+<code>AbstractExtHostExtensionService</code>: <code>_activateByEvent</code> (298),
+<code>_activateExtension</code> (421), <code>_callActivate</code> (494): activation as
+promise-managed lifecycle with error capture per extension.</li>
+<li><code>src/vs/workbench/api/common/extHostCommands.ts:46</code> — the command
+system; register one command yourself from a scratch extension to
+feel the proxy round-trip.</li>
+<li><code>src/vscode-dts/vscode.d.ts</code> (skim namespace list) + one
+<code>vscode.proposed.*.d.ts</code> — the two-tier contract; note how much
+surface is documentation.</li>
+<li><code>extensions/json-language-features/server/</code> + its client wiring —
+LSP in miniature: process spawn, capabilities handshake, requests
+flowing as JSON.</li>
+<li><code>src/vs/editor/common/model/pieceTreeTextBuffer/pieceTreeBase.ts:268</code>
+— the editor&#39;s own data-structure lesson: pieces, prefix sums,
+and why line lookup survives gigabyte buffers.</li>
+<li><code>src/vs/workbench/services/extensions/common/extensionPoints.json</code>
+— every contribution point the host knows: the manifest schema
+as the real extension API&#39;s table of contents.</li>
+</ol>
+<p>You have now traced one completion from keystroke → buffer →
+activation event → extension host → language server and back, through
+every designed boundary of the product.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Run third-party code out-of-process, expose a marshalled object
+graph</strong>: stability and capability control in one decision; batch
+the RPC and the latency is payable.</li>
+<li><strong>Declarative manifests + lazy activation</strong>: a thousand plugins
+must cost less than a thousand loads — contributions as data,
+code only on trigger.</li>
+<li><strong>Version the platform API; incubate additions behind flags</strong>:
+ecosystem longevity is a discipline, not luck.</li>
+<li><strong>Push churn-y integrations into data protocols</strong> (LSP/DAP): when
+the ecosystem is broader than your product, protocols beat APIs.</li>
+<li><strong>Classify &quot;where code runs&quot; as data</strong> (local/remote/web-worker
+kinds): one extension model, many execution targets.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong> — TypeScript throughout, services are
+readable, the challenge is the sheer scale (know your path).</li>
+<li>Budget: ~5–6 hours for the reading path; steps 4–6 are the core.</li>
+<li>Prerequisites: event-driven UI concepts, what a language server
+does at a user level, basic IPC; TypeScript reading fluency.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>LSP (<a href="https://microsoft.github.io/language-server-protocol/">https://microsoft.github.io/language-server-protocol/</a>) and
+DAP (<a href="https://microsoft.github.io/debug-adapter-protocol/">https://microsoft.github.io/debug-adapter-protocol/</a>) specs.</li>
+<li>The extension authoring docs (<a href="https://code.visualstudio.com/api">https://code.visualstudio.com/api</a>)
+— the manifest/activation model from the producer side.</li>
+<li>Compare with Neovim&#39;s remote-plugin architecture (atlas catalog
+entry <code>neovim</code>): two answers to &quot;how do plugins extend an editor
+safely&quot;.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../moby/"><span class="dir">← Previous dive</span>Moby/Docker: images as content-addressed layers, execution as delegation</a>
+  <a href="../etcd/" style="text-align:right"><span class="dir">Next dive →</span>etcd: Raft as a deterministic state machine, keyspace as MVCC history</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 11 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

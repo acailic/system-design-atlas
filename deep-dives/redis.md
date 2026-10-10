@@ -12,31 +12,58 @@ purpose-built data structures whose encodings are chosen per-key-size.
 This deep-dive teaches how far that bet scales — and where the code now
 pays to extend it with I/O threads without giving up the serial core.
 
+## Explain like I'm 10
+
+**A restaurant with exactly one chef.** Redis is a kitchen with one chef
+(one thread runs all commands) and a doorbell — the event loop — that
+rings whenever a table needs something or a timer goes off (`serverCron`).
+The chef finishes one order completely before starting the next, so a dish
+never comes out as half of one table's order mixed into another's (every
+command is atomic, and there are almost no locks because nobody else is in
+the kitchen). Most orders are tiny — pass the salt, read a note — so one
+chef serves tens of thousands of tables. Slow chores get helpers: a huge
+pile of leftovers is carried out by a dishwasher (a background thread
+freeing a big value), and a snapshot of the whole pantry is taken by an
+instant camera that freezes the room for a moment (a `fork` child writing
+an RDB file over copy-on-write memory). The menu itself is printed from a
+recipe book (`src/commands/*.json` → a generated command table), so adding
+a new dish never rewires the kitchen.
+
+**Why the grown-ups did it this way:** one cook means nothing is ever
+half-made and nothing needs locking — the simplest design that keeps every
+answer instant, with the slow jobs pushed off the chef's clock.
+
 ## 1. Architecture overview
 
-```
-            clients (RESP protocol over TCP / unix socket)
-                          │
-   ┌──────────────────────▼─────────────────────────────┐
-   │  ae event loop (src/ae.c)  — epoll/kqueue/select   │
-   │  ┌────────────┐  ┌──────────────┐  ┌────────────┐  │
-   │  │ file events│  │ time events  │  │ before/    │  │
-   │  │ (fd → proc)│  │ (serverCron) │  │ afterSleep │  │
-   │  └─────┬──────┘  └──────────────┘  └────────────┘  │
-   │        │ readQueryFromClient / writeToClient       │
-   │        ▼                                          │
-   │  command pipeline: processInputBuffer →           │
-   │  processCommand → call() → per-type impl          │
-   │        │                                          │
-   │        ▼                                          │
-   │  keyspace: db[] dicts → value objects (robj)      │
-   │  with per-type encodings (sds, dict, listpack,    │
-   │  quicklist, skiplist, ...)                        │
-   └──────────┬───────────────────────┬────────────────┘
-              │                       │
-        persistence               replication
-        RDB (fork + snapshot)    stream to replicas
-        AOF (append-only log)
+```mermaid
+flowchart TD
+    CL["clients — RESP protocol over TCP / unix socket"]
+
+    subgraph server["redis-server (src/server.c main → aeMain)"]
+        AE["ae event loop — src/ae.c<br/>backend per platform: epoll / kqueue / select / evport"]
+        FE["file events<br/>fd → handler"]
+        TE["time events<br/>serverCron, hz times per second"]
+        BS["beforeSleep / afterSleep hooks<br/>flush AOF, write pending replies"]
+        PIPE["command pipeline<br/>readQueryFromClient → processInputBuffer<br/>→ processCommand → call → per-type impl"]
+        KS["keyspace: db dicts → value objects robj<br/>encodings by key size: sds, dict,<br/>listpack, quicklist, zskiplist"]
+    end
+
+    subgraph persist["persistence"]
+        RDB["RDB — fork + snapshot<br/>rdbSaveBackground (rdb.c:2226)"]
+        AOF["AOF — append-only command log<br/>flushed in beforeSleep"]
+    end
+
+    REPL["replicas — command stream"]
+
+    CL -->|"socket readable / writable"| AE
+    AE --> FE
+    AE --> TE
+    FE --> PIPE
+    PIPE --> KS
+    PIPE --> BS
+    KS --> RDB
+    PIPE --> AOF
+    AOF --> REPL
 ```
 
 - The **spine** of a command: event fires → `src/networking.c:readQueryFromClient`
@@ -53,6 +80,66 @@ pays to extend it with I/O threads without giving up the serial core.
   `src/commands.def` — the generated `redisCommandTable` drives dispatch,
   ACL checks, key-spec extraction, and docs. Commands are declared, not
   hand-registered.
+
+## Walkthrough: one SET, socket to keyspace
+
+The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom. The sequence diagram shows the same
+trip at a glance.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant AE as ae loop (ae.c)
+    participant PC as processCommand (server.c 4660)
+    participant KS as keyspace db dict
+    participant DR as AOF + replicas
+    C->>AE: SET name "ada" (RESP bytes on TCP)
+    AE->>AE: readQueryFromClient → processInputBuffer
+    AE->>PC: dispatch via generated command table
+    PC->>PC: auth → ACL → cluster → OOM checks
+    PC->>KS: call → setCommand, lookupKey / create robj
+    KS-->>PC: value stored, encoding chosen by size
+    PC->>DR: propagate (dirty++, AOF + replica stream)
+    PC-->>C: +OK queued, flushed in beforeSleep
+    Note over PC,DR: appendfsync policy bounds the durability window
+```
+
+**Step 1 — The doorbell rings.** The client's `SET name "ada"` arrives
+as RESP bytes on a TCP socket. epoll reports the socket readable and the
+ae loop (`aeProcessEvents`, `src/ae.c:365`) calls the file event's
+handler: `readQueryFromClient` (`src/networking.c:3990`).
+
+**Step 2 — Read and parse.** `readQueryFromClient` pulls bytes into that
+client's query buffer and hands them to `processInputBuffer`
+(`src/networking.c:3787`), which parses the RESP multibulk protocol into
+an argv array: `SET`, `name`, `ada`.
+
+**Step 3 — The policy gauntlet.** `processCommand` (`src/server.c:4660`)
+runs every gate a command must pass — auth, ACL rights, cluster
+redirect, OOM limits, transaction queueing — and only then dispatches,
+via a table generated from `src/commands/*.json`.
+
+**Step 4 — Execute on the serial core.** `call` (`src/server.c:4151`)
+invokes `setCommand` (`src/t_string.c:430`): lookup or create the key in
+the db dict (`src/db.c:lookupKey`), set the value object, and pick its
+encoding by size (int, embstr, or raw). No other command can interleave:
+there is exactly one chef.
+
+**Step 5 — Bookkeeping and propagation.** The command marks the database
+dirty, propagates itself to the AOF and to replicas, and notifies
+`WATCH`ers. `addReply` queues `+OK` in the client's output buffer.
+
+**Step 6 — Reply at the loop's edge.** Between two poll waits, in
+`beforeSleep` (`src/server.c:1960`) — or on an I/O thread — the reply is
+written to the socket. Durability is whatever `appendfsync` policy the
+operator chose (everysec by default).
+
+**Outcome — The client sees OK.** One command has traveled socket →
+loop → parser → checks → keyspace → replication queue, all on a single
+thread, so it could never interleave with another command's half-finished
+work. After a restart, the AOF replays this very SET and the key is back.
 
 ## 2. Core data structures — and why these
 
@@ -136,6 +223,38 @@ O(1) without moving the whole collection.
   durability. Crash recovery = load RDB and/or replay AOF; the failure
   story is "lose at most the last fsync window," chosen by config, not
   code.
+
+```mermaid
+flowchart LR
+    SOCK["client sockets"]
+
+    subgraph main["main thread — the serial core"]
+        LOOP["aeProcessEvents loop<br/>(ae.c:365)"]
+        CMD["command execution<br/>processCommand → call<br/>no locks: keyspace access is single-threaded"]
+        CRON["serverCron time events<br/>expiry sampling, rehash budget, stats"]
+        SLEEP["beforeSleep<br/>AOF flush, pending replies"]
+    end
+
+    subgraph io["I/O threads (src/iothread.c)"]
+        IOP["own event loops:<br/>read / parse / write sockets"]
+    end
+
+    subgraph bg["background jobs (src/bio.c)"]
+        BIOP["lazyfree of big values,<br/>AOF fsync, close files"]
+    end
+
+    subgraph fork["fork child (rdbSaveBackground)"]
+        SNAP["snapshots copy-on-write memory<br/>while the parent keeps serving"]
+    end
+
+    SOCK --> IOP
+    IOP -->|"parsed clients handed back before execution"| CMD
+    LOOP --> CMD
+    LOOP --> CRON
+    LOOP --> SLEEP
+    CMD -->|"free effort over threshold"| BIOP
+    CMD -->|"BGSAVE"| SNAP
+```
 
 ## 4. API and extension design
 

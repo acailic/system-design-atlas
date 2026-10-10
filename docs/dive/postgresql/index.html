@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL: the relational server as a federation of cooperating processes — System Design Atlas</title>
+<meta name="description" content="PostgreSQL is the open-source database that outlived every proprietary rival, and its longevity is architectural: one process per connection coordinated through shared memory, MVCC by tuple ">
+<meta property="og:title" content="PostgreSQL: the relational server as a federation of cooperating processes — System Design Atlas">
+<meta property="og:description" content="PostgreSQL is the open-source database that outlived every proprietary rival, and its longevity is architectural: one process per connection coordinated through shared memory, MVCC by tuple ">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-insert-parse-to-fsync-d-commit">Walkthrough: one INSERT, parse to fsync'd commit</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>PostgreSQL: the relational server as a federation of cooperating processes</h1>
+    <div class="meta-chips"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/postgres/postgres" rel="noopener">PostgreSQL (BSD-like)</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>f5635c2786af2322e1e21006a13a2c19f68fa591</code> · 2026-10-10, master · <a href="https://github.com/postgres/postgres" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">PostgreSQL is the open-source database that outlived every proprietary
+rival, and its longevity is architectural: <strong>one process per connection</strong>
+coordinated through shared memory, <strong>MVCC by tuple versioning</strong> so readers
+never lock writers, and <strong>write-ahead logging</strong> as the single durability
+mechanism that every subsystem funnels through. This deep-dive teaches
+how a large system stays coherent for decades — narrow contracts between
+layers, extensibility as load-bearing design — and what the
+process-per-connection bet costs and buys at scale.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A bank where every customer gets their own clerk — and receipts are
+never erased.</strong> Walk in (connect) and the bank manager (the postmaster)
+assigns you a personal clerk (a backend process) who stays with you the
+whole visit; clerks never share desks — they coordinate through a shared
+vault in the middle of the bank (shared memory: the buffer pool and
+locks). When money moves, the clerk never erases the old receipt: a NEW
+receipt is written, stamped with who and when (<code>xmin</code>/<code>xmax</code>), so a
+reader can ask for &quot;the world as of 10:00am&quot; and never wait for a writer
+mid-scribble; a janitor (VACUUM) bins receipts that nobody can possibly
+still see. And before any change becomes real, the clerk pens it into a
+diary chained to the wall (the WAL, fsync&#39;d at commit) — so even a fire
+only means replaying the diary, never losing a committed penny.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> readers never wait for writers
+and a crash never loses committed work — the two promises that keep a
+bank (or any database) trusted for thirty years, paid for with extra
+receipt paper (dead tuples) and a janitor (vacuum) to collect it.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CONN[&quot;connect() on port 5432&quot;]
+    PM[&quot;POSTMASTER — postmaster/postmaster.c&lt;br/&gt;supervisor: accepts, never touches user data&lt;br/&gt;BackendStartup (3599) forks one backend per connection&quot;]
+    subgraph backends[&quot;backends — one process per connection (tcop/postgres.c PostgresMain)&quot;]
+        B1[&quot;backend 1&lt;br/&gt;parse → plan → execute&quot;]
+        B2[&quot;backend 2&quot;]
+        B3[&quot;backend N&quot;]
+    end
+    subgraph aux[&quot;auxiliary processes — one job each, restartable&quot;]
+        BGW[&quot;bgwriter (89)&quot;]
+        CKPT[&quot;checkpointer (206)&quot;]
+        WALW[&quot;walwriter (90)&quot;]
+        AV[&quot;autovacuum launcher + workers&quot;]
+        ST[&quot;startup — crash recovery&quot;]
+    end
+    subgraph shm[&quot;shared memory — storage/ipc/ipci.c 120&quot;]
+        BUF[&quot;buffer pool (bufmgr.c)&quot;]
+        PA[&quot;procarray: xacts + snapshots&quot;]
+        LT[&quot;lock table, WAL buffers&quot;]
+    end
+    DISK[(&quot;WAL segments + heap/index files&quot;)]
+
+    CONN --&gt; PM
+    PM --&gt;|&quot;fork&quot;| B1
+    PM --&gt;|&quot;fork&quot;| B2
+    PM --&gt;|&quot;fork&quot;| B3
+    PM --&gt; aux
+    B1 --&gt; shm
+    B2 --&gt; shm
+    B3 --&gt; shm
+    aux --&gt; shm
+    shm --&gt; DISK
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — one <code>INSERT</code> — is: backend parses
+(<code>src/backend/tcop/postgres.c:pg_parse_query:617</code>) → analyze/rewrite
+(<code>pg_analyze_and_rewrite_fixedparams:683</code>) → plan
+(<code>pg_plan_queries:988</code>) → execute (<code>ExecutorRun</code>,
+<code>src/backend/executor/execMain.c:308</code>) → <code>heap_insert</code>
+(<code>src/backend/access/heap/heapam.c:2007</code>) registers the change with
+WAL (<code>XLogInsert</code>, <code>src/backend/access/transam/xloginsert.c:481</code>) →
+commit flushes (<code>RecordTransactionCommit</code> in
+<code>src/backend/access/transam/xact.c:1338</code> → <code>XLogFlush</code>).</li>
+<li>Every subsystem is a directory with a README — <code>src/backend/*/README</code>
+files are the contract documentation between layers.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-insert-parse-to-fsync-d-commit">Walkthrough: one INSERT, parse to fsync&#39;d commit</h2>
+<p class="walkthrough-intro">Follow the spine end to end — step through it on the site or read it
+straight down. The moment &quot;committed&quot; becomes true is the WAL fsync,
+not the data-file write.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant B as Backend (exec_simple_query 1030)
+    participant H as heap_insert (heapam.c 2007)
+    participant X as XLogInsert (481)
+    participant D as Disk (WAL)
+    C-&gt;&gt;B: INSERT INTO users VALUES (7, &#39;ada&#39;)
+    B-&gt;&gt;B: pg_parse_query → analyze/rewrite → pg_plan_queries
+    B-&gt;&gt;H: ExecutorRun → ExecInsert
+    H-&gt;&gt;H: new tuple version: xmin = my xid (xmax empty)
+    H-&gt;&gt;X: register change (+ full-page image if first since checkpoint)
+    B-&gt;&gt;X: RecordTransactionCommit (xact.c 1338)
+    X-&gt;&gt;D: XLogFlush — fsync: committed is NOW true
+    B--&gt;&gt;C: CommandComplete
+    Note over H,D: data pages flush lazily; crash recovery replays WAL from the last checkpoint
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="parse-plan-execute">Parse, plan, execute</h3>
+<p>The backend&#39;s <code>exec_simple_query</code>
+(<code>src/backend/tcop/postgres.c:1030</code>) runs the whole pipeline:
+<code>pg_parse_query</code> (617) → <code>pg_analyze_and_rewrite_fixedparams</code> (683) →
+<code>pg_plan_queries</code> (988) → <code>ExecutorRun</code> (<code>src/backend/executor/execMain.c:308</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="write-the-new-version">Write the new version</h3>
+<p><code>heap_insert</code>
+(<code>src/backend/access/heap/heapam.c:2007</code>) does NOT overwrite anything:
+it adds a new tuple whose header carries <code>t_xmin</code> = this transaction&#39;s
+id (<code>src/include/access/htup_details.h:122</code>). Update is insert + mark;
+&quot;current&quot; is a query, not a place.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="describe-the-change-for-the-diary">Describe the change for the diary</h3>
+<p>The insert registers its
+change with <code>XLogInsert</code> (<code>src/backend/access/transam/xloginsert.c:481</code>):
+block references plus payload — and a full-page image of the page if it
+is the first modification since the last checkpoint (torn-page
+insurance).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="commit-means-fsync">Commit means fsync</h3>
+<p><code>RecordTransactionCommit</code>
+(<code>src/backend/access/transam/xact.c:1338</code>) appends the commit record and
+<code>XLogFlush</code> fsyncs the WAL. THIS is the instant the insert is durable —
+the heap page may still be dirty in the shared buffer pool, flushed much
+later by bgwriter/checkpointer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="visibility-for-others">Visibility for others</h3>
+<p>Another backend reading the table
+computes a snapshot from the procarray (<code>GetSnapshotData</code>); it sees our
+row only when our xmin is committed <em>in that snapshot</em> — no locks
+between our writer and their reader, ever.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-crash-subplot">The crash subplot</h3>
+<p>Power loss before the data page flushed?
+The startup process replays WAL from the last checkpoint: <code>heap_redo</code>
+(<code>src/backend/access/heap/heapam_xlog.c:1290</code>) dispatches to
+<code>heap_xlog_insert</code> (400) and mechanically reapplies our change — same
+code for every subsystem, zero special cases.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="a-row-version-is-born">A row version is born</h3>
+<p>Parse → plan → execute → WAL →
+fsync → visible-by-snapshot; later VACUUM collects the versions that
+die. You have traced the durable, the visible, and the
+garbage-collected parts of one INSERT.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="versioned-heap-tuples-src-include-access-htup-details-h">Versioned heap tuples (<code>src/include/access/htup_details.h</code>)</h3>
+<p>Every row version carries <code>t_xmin</code>/<code>t_xmax</code> transaction ids
+(<code>HeapTupleFields</code>, line 122-125) plus <em>hint bits</em> (<code>HEAP_XMIN_COMMITTED</code>
+etc., line 204+) that memoize visibility decisions. A row&#39;s &quot;current
+version&quot; is a predicate over xmin/xmax evaluated per-snapshot
+(<code>src/backend/access/heap/heapam_visibility.c:HeapTupleSatisfiesMVCC</code>,
+around line 917), not a physical property. Why: updating means inserting
+a new version and marking the old one dead — no writer ever blocks a
+reader that holds an older snapshot. The cost (dead tuples) is paid
+later by VACUUM.</p>
+<h3 id="snapshots-from-the-procarray-src-backend-storage-ipc-procarray-c">Snapshots from the procarray (<code>src/backend/storage/ipc/procarray.c</code>)</h3>
+<p>A snapshot is the set of in-flight transaction ids — computed from the
+process array, not from data. <code>GetSnapshotData</code> (procarray.c, see the
+comment around line 125) is on the hottest path in the system, which is
+why it is computed once per transaction and stashed by
+<code>src/backend/utils/time/snapmgr.c</code>.</p>
+<h3 id="the-shared-buffer-pool-with-clock-sweep-eviction">The shared buffer pool with clock-sweep eviction</h3>
+<p>(<code>src/backend/storage/buffer/</code>)</p>
+<p>All backends share one page cache; a victim page is chosen by an
+approximate-LRU <em>clock sweep</em> (<code>freelist.c:ClockSweepTick</code> at 104,
+<code>StrategyGetBuffer</code> at 169) using a per-buffer usage counter — no global
+LRU list to lock. Why: thousands of processes must evict concurrently;
+an approximate, decentralized policy with per-buffer pin counts scales
+where an exact policy would serialize.</p>
+<h3 id="wal-records-as-typed-redo-programs-src-backend-access-transam">WAL records as typed redo programs (<code>src/backend/access/transam/</code>)</h3>
+<p>A WAL record = resource-manager id + block references + payload;
+<code>XLogInsert</code> (xloginsert.c:481) assembles it from <code>XLogRegister*</code> calls,
+attaching full-page images the first time a page changes after a
+checkpoint. Replay is a dispatch: <code>heap_redo</code>
+(<code>src/backend/access/heap/heapam_xlog.c:1290</code>) switches on op code to
+<code>heap_xlog_insert</code> (400) and siblings, applying changes via
+<code>XLogReadBufferForRedo</code> (<code>xlogutils.c:303</code>). Why: redo programs make
+recovery <em>mechanical</em> — the same code proves correctness on every crash,
+for every subsystem, with zero special cases.</p>
+<h3 id="b-tree-indexes-src-backend-access-nbtree">B-tree indexes (<code>src/backend/access/nbtree/</code>)</h3>
+<p>Postgres&#39;s B-tree (Lehman-Yao high-concurrency variant) splits pages so
+readers walk without blocking writers; insertion descends with
+right-link chasing (<code>_bt_doinsert</code>, <code>nbtinsert.c:105</code>; page changes at
+<code>_bt_insertonpg:49</code>). Included to note: index entries point at row
+<em>tids</em> (page, offset) — never at versions — so MVCC and index
+structures stay decoupled.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Process per connection</strong>: <code>BackendStartup</code> (postmaster.c:3599)
+forks a backend; a crashing backend takes down one connection, never
+the cluster. Coordination happens through shared memory
+(<code>CreateSharedMemoryAndSemaphores</code>, <code>storage/ipc/ipci.c:120</code>):
+buffer pool, lock table, procarray, WAL buffers.</li>
+<li><strong>The auxiliary fleet</strong>: bgwriter (<code>postmaster/bgwriter.c:89</code>),
+checkpointer (<code>checkpointer.c:206</code>), walwriter (<code>walwriter.c:90</code>),
+autovacuum launcher + workers — each a separate process with a single
+job, each restartable. Supervision is the postmaster&#39;s only product.</li>
+<li><strong>Durability = WAL before data</strong>: changes hit WAL (fsync&#39;d at commit,
+<code>RecordTransactionCommit</code> → <code>XLogFlush</code>); data pages flush lazily.
+Crash recovery is the <em>startup process</em> replaying WAL from the last
+checkpoint (<code>StartupXLOG</code>, xlog.c:18&#39;s comment block introduces it).
+Full-page images turn torn-page risk into a solved problem at the
+cost of write amplification.</li>
+<li><strong>VACUUM is the garbage collector</strong>: dead versions accumulate until
+<code>lazy_scan_heap</code> (<code>src/backend/access/heap/vacuumlazy.c:426</code>) removes
+them and freezes old xmin values so old WAL/txids can be recycled.
+Autovacuum tunes itself from statistics — a GC pause story, in a
+database.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph fleet[&quot;the auxiliary fleet — one job per process, restartable&quot;]
+        BGW[&quot;bgwriter (89)&lt;br/&gt;evicts clean buffers ahead of need&quot;]
+        CKPT[&quot;checkpointer (206)&lt;br/&gt;bounds replay time: dirty pages → data files&quot;]
+        WALW[&quot;walwriter (90)&lt;br/&gt;flushes WAL between commits&quot;]
+        AV[&quot;autovacuum launcher + workers&lt;br/&gt;lazy_scan_heap (426) — the GC&quot;]
+    end
+    BE[&quot;backends — buffer pins, clock-sweep eviction,&lt;br/&gt;no global lock on the hot path&quot;]
+    POOL[&quot;shared buffer pool — StrategyGetBuffer (169),&lt;br/&gt;approximate LRU by clock sweep + usage counters&quot;]
+    START[&quot;startup process — on crash: replay WAL&lt;br/&gt;from last checkpoint (StartupXLOG)&quot;]
+
+    BE &lt;--&gt;|&quot;pins / evicts concurrently&quot;| POOL
+    BGW --&gt; POOL
+    CKPT --&gt; POOL
+    WALW -.-&gt;|&quot;log buffers&quot;| BE
+    AV -.-&gt;|&quot;collects dead versions&quot;| POOL
+    START -.-&gt;|&quot;single-player mode at boot&quot;| POOL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The client API is one protocol (libpq) over which SQL flows; the real
+&quot;API&quot; story is <strong>extension in depth</strong>: loadable C modules with
+<code>PG_MODULE_MAGIC</code> (<code>src/include/fmgr.h:443</code>), versioned catalogs so
+<code>CREATE EXTENSION</code> (<code>src/backend/commands/extension.c:1836</code>) installs
+SQL + C objects as a unit.</li>
+<li><strong>Hooks are the plugin seams</strong>: <code>planner_hook</code>
+(<code>optimizer/plan/planner.c:74</code>, invoked at 344), <code>set_rel_pathlist_hook</code>
+(<code>optimizer/path/allpaths.c:89</code>), ExecutorRun_hook (<code>execMain.c:71</code>)...
+Extensions like Citus, pg_stat_statements, and TimescaleDB are built
+almost entirely from these hook points — the proof that the seams were
+placed where the design actually flexes.</li>
+<li>Custom types/operators/index access methods (tableam) mean the
+storage engine itself is pluggable <em>per table</em>.</li>
+<li>Honest wart: process-per-connection costs memory per connection and
+makes connection pooling mandatory at scale; Postgres&#39;s answer
+(pgbouncer, poolers as infrastructure) lives outside the server
+process model.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-process-per-connection-over-thread-pool">Trade-off 1: process per connection over thread pool</h3>
+<ul>
+<li><strong>Tension:</strong> serve thousands of concurrent clients without shared-state
+corruption.</li>
+<li><strong>Choice:</strong> fork one backend per connection; share only via the buffer
+pool/locks in carefully partitioned shared memory.</li>
+<li><strong>Evidence:</strong> <code>BackendStartup</code> (postmaster.c:3599); backends never
+share heap pointers; inter-process state is explicit shared memory
+(ipci.c:120).</li>
+<li><strong>Given up:</strong> per-connection memory (each backend duplicates catalogs
+caches), expensive connection churn — pooling becomes mandatory.</li>
+<li><strong>Verdict:</strong> bought 30 years of crash isolation and a simpler
+debugging model (a backend is a normal Unix process you can gdb);
+costs real money only at extreme connection counts — a trade most
+systems should envy.</li>
+</ul>
+<h3 id="trade-off-2-mvcc-by-versioning-vacuum-over-locking">Trade-off 2: MVCC by versioning + vacuum over locking</h3>
+<ul>
+<li><strong>Tension:</strong> readers and writers of the same rows.</li>
+<li><strong>Choice:</strong> writers create versions; readers filter by snapshot; a
+background GC removes dead versions.</li>
+<li><strong>Evidence:</strong> <code>HeapTupleFields</code> xmin/xmax (htup_details.h:122);
+<code>HeapTupleSatisfiesMVCC</code> (heapam_visibility.c:917);
+<code>lazy_scan_heap</code> (vacuumlazy.c:426).</li>
+<li><strong>Given up:</strong> space (bloat between vacuums), write amplification
+(every update writes a full new row), and an entire operational
+discipline around vacuum tuning.</li>
+<li><strong>Verdict:</strong> the read-never-blocks-write guarantee is what made
+long-running analytics on an OLTP database survivable. Systems with
+strict overwrite-in-place (or without a GC story) pay in lock waits
+or corruption risk instead.</li>
+</ul>
+<h3 id="trade-off-3-wal-full-page-images-redo-over-direct-writes">Trade-off 3: WAL + full-page images + redo over direct writes</h3>
+<ul>
+<li><strong>Tension:</strong> crash safety without double-write complexity everywhere.</li>
+<li><strong>Choice:</strong> all durability flows through one log; recovery is
+mechanical replay of typed redo programs; checkpoints bound replay
+time.</li>
+<li><strong>Evidence:</strong> <code>XLogInsert</code> (xloginsert.c:481) from <code>heap_insert</code>
+(heapam.c:2007); commit fsync at <code>RecordTransactionCommit</code> (xact.c:1338);
+replay dispatch <code>heap_redo</code> (heapam_xlog.c:1290) via
+<code>XLogReadBufferForRedo</code> (xlogutils.c:303).</li>
+<li><strong>Given up:</strong> write amplification (log + full-page image after each
+checkpoint), sequential log forces group-committing all backends.</li>
+<li><strong>Verdict:</strong> one durability mechanism, audited for decades, beat
+per-subsystem cleverness — the same bet SQLite, LevelDB, and etcd
+make in this atlas. Steal this shape.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/backend/main/main.c:main</code> (71) → <code>src/backend/postmaster/postmaster.c</code>
+main loop → <code>BackendStartup</code> (3599): accept, fork, exec the backend —
+notice the postmaster touches no user data ever.</li>
+<li><code>src/backend/tcop/postgres.c:exec_simple_query</code> (1030) — the whole
+query pipeline in one function: <code>pg_parse_query</code> (617) →
+<code>pg_analyze_and_rewrite_fixedparams</code> (683) → <code>pg_plan_queries</code> (988)
+→ <code>ExecutorRun</code> (execMain.c:308).</li>
+<li><code>src/backend/utils/time/snapmgr.c</code> — where a snapshot is minted and
+cached per transaction; then <code>src/backend/storage/ipc/procarray.c</code>
+<code>GetSnapshotData</code> — the concurrency &quot;truth table&quot; of live xacts.</li>
+<li><code>src/include/access/htup_details.h</code> (lines 100-260) — tuple headers,
+xmin/xmax, hint bits: read this until version visibility feels
+physical.</li>
+<li><code>src/backend/access/heap/heapam_visibility.c:HeapTupleSatisfiesMVCC</code>
+(~917) — the predicate that <em>is</em> isolation; walk each branch for a
+committed, in-flight, and deleted tuple.</li>
+<li><code>src/backend/storage/buffer/bufmgr.c:ReadBufferExtended</code> (887) →
+<code>BufferAlloc</code> (645) → <code>freelist.c:StrategyGetBuffer</code> (169) — the
+shared cache: pins, clock sweep, no global lock on the hot path.</li>
+<li><code>src/backend/access/heap/heapam.c:heap_insert</code> (2007) — one insert:
+buffer pin, WAL registration, <code>RelationPutHeapTuple</code> (2070); notice
+the update path (<code>heap_update</code>) is insert+mark, not overwrite.</li>
+<li><code>src/backend/access/transam/xloginsert.c:XLogInsert</code> (481) — record
+assembly, full-page-image decision; then <code>xact.c:RecordTransactionCommit</code>
+(1338) → <code>XLogFlush</code> — the moment &quot;committed&quot; becomes true.</li>
+<li><code>src/backend/access/heap/heapam_xlog.c:heap_redo</code> (1290) →
+<code>heap_xlog_insert</code> (400) with <code>xlogutils.c:XLogReadBufferForRedo</code>
+(303) — crash recovery as program replay; pair with
+<code>transam/xlog.c</code>&#39;s StartupXLOG intro comment (line 18).</li>
+<li><code>src/backend/access/nbtree/nbtinsert.c:_bt_doinsert</code> (105) — index
+descent and the right-link chase that keeps readers lock-free.</li>
+<li><code>src/backend/access/heap/vacuumlazy.c:lazy_scan_heap</code> (426) — the
+GC: dead-version removal, freezing; then skim
+<code>postmaster/autovacuum.c</code> for the self-tuning trigger.</li>
+<li><code>src/backend/postmaster/{bgwriter,checkpointer,walwriter}.c</code> mains
+(89/206/90) — the auxiliary fleet, one job per process; finish with
+<code>optimizer/plan/planner.c:74</code> (<code>planner_hook</code>) to see where
+third-party systems graft themselves in.</li>
+</ol>
+<p>You have now traced one INSERT from socket to WAL-flushed commit,
+through crash recovery, index maintenance, and garbage collection —
+the complete life of a row version.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>One durability mechanism, one recovery mechanism</strong> (WAL + redo
+dispatch): subsystems register changes; nobody invents their own
+crash story.</li>
+<li><strong>Isolation via versions + snapshots, not locks</strong> — and budget the
+GC (vacuum) from day one; an MVCC system without a garbage story
+suffocates in its own history.</li>
+<li><strong>Crash containment by process</strong> where threads would share fate:
+a supervisor that owns no user data plus expendable workers is the
+nginx lesson at database scale.</li>
+<li><strong>Place extension hooks where the design genuinely flexes</strong>
+(planner, executor, path generation) — PostGIS, Citus, and pg_stat_
+statements are the proof your seams were well chosen.</li>
+<li><strong>Document layer contracts in-tree</strong> (the <code>src/backend/*/README</code>
+files): twenty years of contributors found the map because it ships
+with the territory.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — a large C codebase; the layering and
+comments carry you, but plan real time.</li>
+<li>Budget: ~8 hours for the reading path; the buffer/MVCC/WAL trio is
+a full day each to internalize.</li>
+<li>Prerequisites: SQL execution model (parse/plan/execute), transactions
+and isolation levels at a textbook level, shared memory vs processes,
+comfort with large C.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The in-tree docs: <code>src/backend/*/README*</code> (the buffer manager, WAL,
+MVCC, and btree READMEs are the canonical internals texts).</li>
+<li>PostgreSQL documentation Part VII &quot;Internals&quot;
+(<a href="https://www.postgresql.org/docs/current/internals.html">https://www.postgresql.org/docs/current/internals.html</a>).</li>
+<li>&quot;The Internals of PostgreSQL&quot; (interdb.jp) — chapter-per-subsystem
+walkthrough that pairs well with this reading path.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../nginx/"><span class="dir">← Previous dive</span>nginx: shared-nothing processes, state machines, and ownership by lifetime</a>
+  <a href="../kafka/" style="text-align:right"><span class="dir">Next dive →</span>Kafka: the append-only log as an operating system for data</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 6 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

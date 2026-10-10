@@ -14,23 +14,50 @@ that makes "the API is the product" true (etcd store, watch cache, field
 management), and why level-triggered beats edge-triggered in systems
 that must survive missed events.
 
+## Explain like I'm 10
+
+**A wish list pinned to the fridge, and a helper robot that keeps
+comparing.** You never tell the house what to do step by step — you pin a
+wish to the fridge: "5 cupcakes on the table" (a spec: desired state).
+A helper robot (a controller) keeps walking to the table and counting:
+only 3 cupcakes? It bakes 2 more. 7? It eats two. It doesn't need to be
+told when something changed — it just looks and compares, over and over
+(level-triggered reconcile) — so even if it naps through the doorbell or
+the doorbell breaks, the table still ends up matching the wish. Every
+room also has a mini robot (the kubelet) doing the same for its own room,
+and all the robots read the same fridge (the API server + etcd), which
+is the only place wishes are kept.
+
+**Why the grown-ups did it this way:** in a huge house, messages get
+lost all the time — a robot that keeps comparing reality to the wish
+survives lost messages that would completely break a "do X exactly when
+Y happens" design.
+
 ## 1. Architecture overview
 
-```
- kubectl apply ─► kube-apiserver ─► etcd (single source of truth)
-                   │  versioned REST, RBAC, admission, field manager
-                   │  watch stream (cacher: in-memory watch cache)
-                   ▼
-        ┌────────── controllers (kube-controller-manager) ─────────┐
-        │  each = informer (reflector→DeltaFIFO→store) + handlers  │
-        │  → rate-limited workqueue → reconcile (e.g. syncReplica-  │
-        │    Set: create/delete pods until count matches Spec)      │
-        └───────────────────────────────────────────────────────────┘
-                   ▼ pods assigned to nodes (scheduler: plugins)
-        ┌────────── kubelet per node ───────────────────────────────┐
-        │  pod workers + PLEG events → container runtime (CRI)      │
-        │  status reported back through the same API                │
-        └───────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    K["kubectl apply / scale"]
+    API["kube-apiserver — versioned REST, RBAC, admission,<br/>field manager; watch stream via cacher"]
+    ETCD[("etcd — single source of truth, raft")]
+    subgraph ctrl["kube-controller-manager — many controllers"]
+        INF["informer: reflector → DeltaFIFO → local store + handlers"]
+        WQ["rate-limited workqueue"]
+        REC["reconcile — e.g. syncReplicaSet (756):<br/>create/delete pods until count matches Spec"]
+    end
+    SCHED["scheduler — filter / score plugins, writes bindings"]
+    subgraph node["per node"]
+        KUBELET["kubelet — syncLoop (2684), pod workers (761)"]
+        CRI["container runtime (CRI)"]
+    end
+    ST["status written back through the same API"]
+
+    K --> API --> ETCD
+    API -->|"watch"| INF --> WQ --> REC
+    REC -->|"create pods"| API
+    API -->|"pending pods"| SCHED -->|"bind pod → node"| API
+    API -->|"bound pods"| KUBELET --> CRI
+    KUBELET --> ST --> API
 ```
 
 - The **spine** — "scale to 5 replicas" — is: `kubectl scale` writes a
@@ -42,6 +69,66 @@ that must survive missed events.
   matches; the scheduler binds new pods; each kubelet's `UpdatePod`
   (`pkg/kubelet/pod_workers.go:761`) starts containers and writes
   `Pod.Status` back.
+
+## Walkthrough: scale to 5 replicas, wish to running containers
+
+The spine as a story — step through it on the site or read straight
+down. Nobody is told what to do; every actor compares and converges.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as kubectl scale
+    participant A as kube-apiserver
+    participant E as etcd
+    participant RS as ReplicaSet controller
+    participant S as scheduler
+    participant KL as kubelet (node)
+    K->>A: ReplicaSet spec.replicas = 5
+    A->>E: validate, admission, write (resourceVersion++)
+    A-->>RS: watch event — a hint, not an instruction
+    RS->>A: syncReplicaSet — re-read the world, diff pods vs spec
+    RS->>A: create 2 pods (manageReplicas)
+    A-->>S: new pending pods
+    S->>A: filter + score plugins → binding write
+    A-->>KL: bound pods on my node
+    KL->>KL: UpdatePod → CRI starts containers
+    KL->>A: Pod.Status = Running (observed, written back)
+```
+
+**Step 1 — Pin the wish.** `kubectl scale` sends a spec update:
+`ReplicaSet.Spec.replicas = 5`. The API server validates against the
+schema, runs admission, and writes it to etcd — the object's
+`resourceVersion` ticks up (`etcd3/store.go:Create:301`).
+
+**Step 2 — The event is a hint.** The ReplicaSet controller's informer
+(`pkg/controller/replicaset/replica_set.go:273` wires the handler)
+receives a watch event and enqueues the key — nothing more. If the event
+were lost, the resync period would re-enqueue everything anyway.
+
+**Step 3 — Compare and converge.** `syncReplicaSet` (756) re-reads the
+world from its local cache and computes the diff; `manageReplicas` (653)
+creates or deletes pods until reality matches the spec — idempotent, so
+running twice creates 2 pods, not 4 (expectations guard against
+create-storms).
+
+**Step 4 — Place the pods.** The scheduler watches for pending pods,
+runs its filter/score plugin phases (`pkg/scheduler/schedule_one.go:85`),
+and writes a binding — through the same API, like everyone else.
+
+**Step 5 — Run them.** The chosen node's kubelet sees the bound pod;
+`UpdatePod` (`pkg/kubelet/pod_workers.go:761`) drives the container
+runtime (CRI) to pull and start containers.
+
+**Step 6 — Report observed state.** The kubelet writes `Pod.Status` back
+through the API — spec and status in one object, written by different
+actors (`PodSpec:4461` / `PodStatus:5694`). Anyone watching converges on
+the new world.
+
+**Outcome — 5 cupcakes, no instructions.** The cluster reached the wish
+through independent loops, each of which could have crashed and
+restarted mid-way without corrupting anything — because every actor
+re-derives the world instead of remembering what it was told.
 
 ## 2. Core data structures — and why these
 
@@ -116,6 +203,27 @@ with built-ins without coordination.
 - **Overload is absorbed by the queue**: backpressure at the workqueue
   and API priority/fairness classes; watches fall back to re-List on
   resourceVersion too old.
+
+```mermaid
+flowchart LR
+    subgraph cp["control plane"]
+        APIS["kube-apiserver (replicated,<br/>consistent through etcd raft)"]
+        SCHED["N schedulers — leader-elected"]
+        CTRL["controllers — leader-elected per manager,<br/>rate-limited workqueues + resync safety net"]
+    end
+    ETCD2[("etcd raft — the only consistency-critical code")]
+    subgraph nodes["per node"]
+        KL2["kubelet — its own control loop<br/>syncLoop fed by PLEG events"]
+    end
+    FAIL["any component dies? drift stays unconverged<br/>until restart — state never corrupts"]
+
+    SCHED --> APIS
+    CTRL --> APIS
+    APIS --> ETCD2
+    KL2 --> APIS
+    FAIL -.-> CTRL
+    FAIL -.-> KL2
+```
 
 ## 4. API and extension design
 

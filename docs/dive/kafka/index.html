@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kafka: the append-only log as an operating system for data — System Design Atlas</title>
+<meta name="description" content="Kafka became the nervous system of every large data platform with a design inversion: instead of a smart message router, it is a dumb, append-only, partitioned commit log that exploits the o">
+<meta property="og:title" content="Kafka: the append-only log as an operating system for data — System Design Atlas">
+<meta property="og:description" content="Kafka became the nervous system of every large data platform with a design inversion: instead of a smart message router, it is a dumb, append-only, partitioned commit log that exploits the o">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-produce-with-acks-all-then-a-consumer-reads-it">Walkthrough: one produce with acks=all, then a consumer reads it</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Kafka: the append-only log as an operating system for data</h1>
+    <div class="meta-chips"><span class="chip domain">queue-log</span><span class="chip domain">distributed</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/apache/kafka" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>3de09ca09784900318b56091d46d3803c4d5adc9</code> · 2026-10-10, trunk · <a href="https://github.com/apache/kafka" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Kafka became the nervous system of every large data platform with a
+design inversion: instead of a smart message router, it is a <strong>dumb,
+append-only, partitioned commit log</strong> that exploits the one thing disks
+and networks do at full speed — sequential transfer — and pushes
+intelligence (what to consume, how fast, where you are) into clients.
+This deep-dive teaches the throughput architecture (batching, zero-copy,
+sparse indexes), the replication machinery (ISR + high watermark), and
+the newest lesson: Kafka&#39;s own metadata became an event-sourced raft log
+(KRaft), the system eating its own dog food.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A conveyor belt of numbered boxes.</strong> Kafka is a very long belt that
+only moves forward (the append-only log). Senders drop sealed boxes onto
+it (batches of records), and each box gets a number as it lands
+(its offset). Every reader (a consumer group) walks the belt at their own
+pace — fast walkers and slow walkers never collide — and each remembers
+their box number in a little notebook (committed offsets... stored on
+ANOTHER belt, because everything in Kafka is a belt). The belt is long
+(retention), so a brand-new reader can go back to box 1 and replay
+everything. Copies of the belt run at friends&#39; houses (replicas), and a
+special marker (the high watermark) shows how far the belt has been
+copied — readers may only read up to the marker, never past it.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> belts (disks and networks) are
+fastest when moving in one direction without stopping — and storing each
+reader&#39;s position as data means nobody has to keep a giant &quot;who received
+what&quot; list.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    P[&quot;producer — batches records, compresses&quot;]
+    subgraph broker[&quot;broker (core/.../server)&quot;]
+        SS[&quot;SocketServer (network/SocketServer.scala 71)&lt;br/&gt;acceptor → N processor threads (NIO selectors)&quot;]
+        RQ[&quot;request queue&quot;]
+        RH[&quot;KafkaRequestHandler pool (91)&quot;]
+        API[&quot;KafkaApis&lt;br/&gt;handleProduceRequest (401) / handleFetchRequest (568)&quot;]
+        RM[&quot;ReplicaManager.appendRecords (638)&quot;]
+        LOG[&quot;UnifiedLog.appendAsLeader (1062)&lt;br/&gt;→ LogSegment.append (250)&lt;br/&gt;.log + sparse .index + .timeIndex&quot;]
+        PURG[&quot;DelayedOperationPurgatory (38)&lt;br/&gt;timer wheel + key-indexed watchers&quot;]
+        KR[&quot;KRaft: metadata raft log + QuorumController (177)&lt;br/&gt;group coordinator: GroupCoordinatorShard&quot;]
+    end
+    CG[&quot;consumer groups — pull, fetch offsets,&lt;br/&gt;commit positions, rebalance&quot;]
+    F[&quot;followers — ReplicaFetcherThread&lt;br/&gt;fetch from the leader log like consumers&quot;]
+
+    P --&gt; SS --&gt; RQ --&gt; RH --&gt; API --&gt; RM --&gt; LOG
+    RM --&gt;|&quot;acks=all waits here&quot;| PURG
+    LOG --&gt; F
+    LOG --&gt;|&quot;read up to the high watermark&quot;| CG
+    KR -.-&gt;|&quot;metadata for both&quot;| RM
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — one produce — is: <code>handleProduceRequest</code>
+(<code>core/src/main/scala/kafka/server/KafkaApis.scala:401</code>) →
+<code>ReplicaManager.appendRecords</code> (638) → partition leader →
+<code>UnifiedLog.appendAsLeader</code>
+(<code>storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java:1062</code>)
+→ <code>LogSegment.append</code> (<code>LogSegment.java:250</code>) writes batches
+sequentially and appends sparse index entries; with <code>acks=all</code> the
+response waits in purgatory until followers replicate.</li>
+<li>A <em>partition</em> is the unit of everything: ordering, leadership,
+retention, parallelism. Topics are just names over partition sets.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-produce-with-acks-all-then-a-consumer-reads-it">Walkthrough: one produce with acks=all, then a consumer reads it</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. Watch where the record becomes durable and where it becomes
+visible: those are two different moments.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant N as broker network (SocketServer)
+    participant H as KafkaApis + ReplicaManager
+    participant L as UnifiedLog.appendAsLeader (1062)
+    participant F as follower replicas
+    participant C as Consumer
+    P-&gt;&gt;N: produce batch (acks=all)
+    N-&gt;&gt;H: request queue → handler pool
+    H-&gt;&gt;L: appendRecords → partition leader, per-partition lock
+    L-&gt;&gt;L: LogSegment.append — sequential write + sparse index entry
+    H--&gt;&gt;P: response parked in purgatory (not yet acked)
+    L-&gt;&gt;F: followers fetch like consumers, replicate
+    F--&gt;&gt;L: caught up → ISR advances
+    L-&gt;&gt;L: maybeIncrementLeaderHW (1012) — high watermark moves
+    L--&gt;&gt;P: purgatory completes → ack sent
+    L-&gt;&gt;C: fetch returns data up to the high watermark (zero-copy)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-batch-leaves">The batch leaves</h3>
+<p>The producer groups records into a
+compressed batch with a base offset and CRC — the batch is the unit of
+send, of append, and of retry, so throughput is paid once, everywhere.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="into-the-broker">Into the broker</h3>
+<p>An acceptor hands the connection to a
+processor thread (NIO selector, <code>network/SocketServer.scala:71</code>); the
+request lands on a queue consumed by a <code>KafkaRequestHandler</code>
+(<code>server/KafkaRequestHandler.scala:91</code>), which calls
+<code>KafkaApis.handleProduceRequest</code> (401).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="append-to-the-leader">Append to the leader</h3>
+<p><code>ReplicaManager.appendRecords</code> (638)
+routes to the partition leader; <code>UnifiedLog.appendAsLeader</code> (1062) takes
+the per-partition lock — one partition&#39;s append is serial, and that
+serialness IS the ordering guarantee — and <code>LogSegment.append</code> (250)
+writes the batch sequentially, adding one sparse index entry per ~4KB.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="wait-in-purgatory">Wait in purgatory</h3>
+<p>With <code>acks=all</code>, the produce response
+parks in <code>DelayedOperationPurgatory</code> (<code>server-common/.../purgatory/</code>, 38)
+— a timer wheel plus per-key watchers — until the ISR replicates the
+record or the request times out.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="followers-copy-the-belt">Followers copy the belt</h3>
+<p><code>ReplicaFetcherThread</code>s (30) fetch
+from the leader exactly like consumers; the leader truncates divergent
+tails using leader epochs (zombie-leader fencing). When the in-sync set
+has the record, <code>maybeIncrementLeaderHW</code> (<code>cluster/Partition.scala:1012</code>)
+moves the high watermark.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="ack-and-only-then-visible">Ack, and only then visible</h3>
+<p>Purgatory completes the parked
+response → the producer&#39;s ack returns. Consumers fetching see data only
+up to the high watermark (<code>handleFetchRequest</code> 568 → <code>LogSegment.read</code>
+435), served from the page cache to the socket by zero-copy
+<code>transferFrom</code> (<code>FileRecords.writeTo:280</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="durable-then-visible">Durable, then visible</h3>
+<p>One batch is now: (a) on the
+leader&#39;s disk, (b) on every in-sync replica, (c) readable by any
+consumer — and replayable forever by any NEW consumer that starts at
+offset 0. The dumb belt did all the work.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-log-segment-trio-log-index-timeindex">The log segment trio: <code>.log</code>, <code>.index</code>, <code>.timeIndex</code></h3>
+<p>(<code>storage/.../log/LogSegment.java:65</code>)</p>
+<p>Data lives in immutable-ish segment files (rolled by size/time);
+appends go only to the active one (<code>LogSegment.append:250</code>). The offset
+index is <strong>sparse</strong> — every ~4KB of data, one (relativeOffset, position)
+pair — mmapped (<code>AbstractIndex.java:72</code>) and searched by binary search
+(<code>AbstractIndex.java:501-513</code>). Why sparse: an entry per byte would
+itself be big data; binary search over a sparse index + one sequential
+scan of ≤4KB bounds any offset lookup. This is the entire &quot;database&quot;
+of the consumer side.</p>
+<h3 id="record-batches-clients-record">Record batches (<code>clients/.../record/</code>)</h3>
+<p>Producers group records into compressed batches with base offsets and
+CRCs; the broker treats a batch as the unit of append, replication, and
+validation. Why batches: throughput everywhere — fewer syscalls, fewer
+network frames, compression amortization. The batch is also the
+transaction and idempotence unit (producer epochs, sequence numbers).</p>
+<h3 id="the-high-watermark-and-leader-epochs">The high watermark and leader epochs</h3>
+<p>(<code>core/.../cluster/Partition.scala:1012/1091</code>)</p>
+<p>Each partition&#39;s leader advances the <em>high watermark</em> (HW) — the offset
+replicated to all in-sync replicas (<code>maybeIncrementLeaderHW:1012</code>) —
+and shrinks the ISR on follower timeouts (<code>maybeShrinkIsr:1091</code>).
+Consumers see only ≤HW data. Why: one number reconciles &quot;durable
+enough&quot; with &quot;readable now&quot; across replicas without distributed
+transactions.</p>
+<h3 id="delayed-operation-purgatory">Delayed-operation purgatory</h3>
+<p>(<code>server-common/.../purgatory/DelayedOperationPurgatory.java:38</code>)</p>
+<p><code>acks=all</code> produces and timed fetches park in purgatory — a timer wheel</p>
+<ul>
+<li>key-indexed watchers structure — until replication satisfies them or
+they time out. Why: waiting is the common case in a replicated log;
+making it O(1)-ish per event (not per poll) is what keeps tail latency
+sane.</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Threading is role-partitioned per broker</strong>: acceptor → processor
+threads (NIO selectors, one per listener group,
+<code>network/SocketServer.scala:71</code>) own sockets; a request queue feeds a
+pool of <code>KafkaRequestHandler</code>s (<code>server/KafkaRequestHandler.scala:91</code>,
+run loop at 108); each partition&#39;s log has its own lock — so appends
+to different partitions on one broker proceed in parallel, and one
+partition&#39;s append is serial (the ordering guarantee <em>is</em> the lock).</li>
+<li><strong>Replication</strong>: followers run <code>ReplicaFetcherThread</code>s
+(<code>server/ReplicaFetcherThread.scala:30</code>) fetching from the leader&#39;s
+log like consumers; the leader truncates followers&#39; divergent tails
+using leader epochs (fencing zombie leaders). Failure → the
+controller (now <code>QuorumController</code> on the KRaft raft log,
+<code>metadata/.../QuorumController.java:177</code>) elects an ISR member.</li>
+<li><strong>Durability is config</strong>: <code>acks</code> + <code>min.insync.replicas</code> define the
+replication barrier; unclean leader election is (by default) refused —
+consistency over availability, the deliberate opposite of AP systems.</li>
+<li><strong>Consumers hold their position</strong>: offsets are committed into the
+<code>__consumer_offsets</code> topic (log all the way down); a group rebalances
+partition ownership on membership changes — the new-generation
+coordinator is itself an event-sourced state machine in
+<code>group-coordinator/.../GroupCoordinatorShard.java</code>.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph net[&quot;network — role-partitioned threads&quot;]
+        ACC[&quot;acceptor — owns the listener socket&quot;]
+        PROC[&quot;N processor threads — NIO selectors,&lt;br/&gt;one per listener group (SocketServer 71)&quot;]
+    end
+    subgraph work[&quot;request handling&quot;]
+        RQ[&quot;request queue&quot;]
+        POOL[&quot;KafkaRequestHandler pool (91)&lt;br/&gt;run loop at 108&quot;]
+    end
+    subgraph logthreads[&quot;log engine — lock per partition&quot;]
+        LOCK[&quot;each partition: its own lock.&lt;br/&gt;Different partitions append in parallel;&lt;br/&gt;one partition&#39;s append is serial = ordering&quot;]
+        PURG[&quot;purgatory timer wheel (38)&lt;br/&gt;waiting is the common case&quot;]
+    end
+    KR[&quot;KRaft — QuorumController (177)&lt;br/&gt;metadata as raft log; brokers + controller&lt;br/&gt;boot from the same metadata log&quot;]
+
+    ACC --&gt; PROC --&gt; RQ --&gt; POOL --&gt; LOCK
+    LOCK --&gt; PURG
+    KR -.-&gt;|&quot;leadership + config&quot;| LOCK
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The wire API is <strong>versioned request/response schemas</strong> (generated
+from JSON): brokers negotiate versions with clients — a rolling-
+upgrade contract that has kept a decade of mixed client/broker
+versions interoperating.</li>
+<li>The consumer/producer are <strong>client libraries</strong>, not protocol minions:
+batching, compression, partitioners, and retry policy live
+client-side (<code>clients/</code> module — the same Java code brokers use).</li>
+<li>Extension points are storage-level: tiered storage
+(<code>storage/.../remote/</code>), pluggable serializers/connect API (separate
+repo), and the log-compact (&quot;compacted&quot;) retention mode that turns a
+topic into a key→latest-value table.</li>
+<li>Honest wart: rebalancing consumer groups has been the operational
+sore spot for a decade — the new KIP-848 protocol exists because
+global coordination on the hot path is genuinely hard.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-dumb-sequential-log-zero-copy-over-a-smart-store">Trade-off 1: dumb sequential log + zero-copy over a &quot;smart&quot; store</h3>
+<ul>
+<li><strong>Tension:</strong> millions of messages/sec on commodity disks and 10GbE.</li>
+<li><strong>Choice:</strong> append-only segments; sparse index maps offsets to
+positions; serving a fetch copies bytes from page cache to socket
+with <code>transferFrom</code>/<code>sendfile</code>
+(<code>clients/.../record/internal/FileRecords.java:writeTo:280</code>) —
+zero-copy, no user-space buffer churn.</li>
+<li><strong>Evidence:</strong> <code>LogSegment.append:250</code> (sequential), <code>AbstractIndex</code>
+mmap+binarySearch (501-513), <code>FileRecords.writeTo:280</code>
+(<code>destChannel.transferFrom</code>).</li>
+<li><strong>Given up:</strong> key-based random access (it&#39;s an offset log, not a
+database — consumers wanting keys build tables or use compaction),
+and disk-space discipline via retention policies instead of deletes.</li>
+<li><strong>Verdict:</strong> right when the workload is a firehose with replay;
+wrong for point lookups — which is why Kafka Streams builds state
+stores <em>on top of</em> the log, not inside it.</li>
+</ul>
+<h3 id="trade-off-2-pull-based-consumers-with-committed-positions-over-push">Trade-off 2: pull-based consumers with committed positions over push</h3>
+<ul>
+<li><strong>Tension:</strong> deliver events without overrunning slow consumers.</li>
+<li><strong>Choice:</strong> consumers fetch at their own pace; positions are data
+(committed to a topic); groups split partitions among members.</li>
+<li><strong>Evidence:</strong> fetch path <code>handleFetchRequest:568</code> →
+<code>LogSegment.read:435</code> slices from the HW; offsets committed to
+<code>__consumer_offsets</code>; <code>GroupCoordinatorShard</code> (event-sourced
+coordinator).</li>
+<li><strong>Given up:</strong> push latency floor (poll interval), and a nontrivial
+client (every consumer embeds a mini distributed system for
+rebalancing).</li>
+<li><strong>Verdict:</strong> backpressure for free and replayability forever — the
+two properties that made Kafka an integration backbone. Push systems
+(NATS core, MQTT) win on latency-to-slow-clients, and lose replay.</li>
+</ul>
+<h3 id="trade-off-3-isr-high-watermark-replication-over-quorum-commits">Trade-off 3: ISR + high watermark replication over quorum commits</h3>
+<ul>
+<li><strong>Tension:</strong> replicate durably without slowing every write to the
+slowest replica.</li>
+<li><strong>Choice:</strong> write to the leader + all in-sync replicas (<code>acks=all</code>);
+ISR membership is elastic (<code>maybeShrinkIsr:1091</code>); the high watermark
+gates consumer visibility (<code>maybeIncrementLeaderHW:1012</code>).</li>
+<li><strong>Evidence:</strong> both functions in <code>core/.../cluster/Partition.scala</code>;
+leader-epoch fencing in <code>ReplicaFetcherThread.scala:30</code>.</li>
+<li><strong>Given up:</strong> strict majority quorums — a mis-set <code>min.insync.replicas</code>
+or unclean election can lose data (the default forbids it, choosing
+unavailability).</li>
+<li><strong>Verdict:</strong> tuned for throughput with tunable durability; the same
+dial Raft fixes with consensus — which Kafka itself adopted for its
+<em>metadata</em> (KRaft), where correctness beats throughput.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>core/.../server/KafkaApis.scala:handleProduceRequest</code> (401) — the
+front door: validation, idempotence/txn checks, the local-vs-remote
+partition dispatch.</li>
+<li><code>core/.../server/ReplicaManager.scala:appendRecords</code> (638) and
+<code>appendRecordsToLeader</code> (586) — where replication policy meets the
+log; note the purgatory handoff for <code>acks=all</code>.</li>
+<li><code>storage/.../log/UnifiedLog.java:appendAsLeader</code> (1062) — per-
+partition lock, segment roll policy, index upkeep; then
+<code>LogSegment.append</code> (250): the actual sequential write + index
+entry append.</li>
+<li><code>storage/.../log/AbstractIndex.java</code> — mmap (72), sparse-entry
+layout, binary search (501-513); run <code>kafka-dump-log</code> on a test
+segment if you want to see it live.</li>
+<li>Fetch side: <code>KafkaApis.handleFetchRequest</code> (568) →
+<code>LogSegment.read</code> (435) → <code>FileRecords</code> slicing; then
+<code>FileRecords.writeTo</code> (280) — the zero-copy send to the socket.</li>
+<li><code>server-common/.../purgatory/DelayedOperationPurgatory.java</code> (38) —
+how waiting requests complete on replication events instead of
+polling.</li>
+<li><code>core/.../cluster/Partition.scala</code> — <code>maybeIncrementLeaderHW</code>
+(1012) and <code>maybeShrinkIsr</code> (1091): trace how one produce becomes
+visible to consumers.</li>
+<li><code>core/.../server/ReplicaFetcherThread.scala</code> (30, <code>processPartitionData</code>
+at 113) — followers are consumers; epoch fencing on truncation.</li>
+<li><code>group-coordinator/.../GroupCoordinatorShard.java</code> — the new
+coordinator as event-sourced state machine (metadata events in,
+responses out).</li>
+<li><code>core/.../server/KafkaRaftServer.scala</code> (49) +
+<code>metadata/.../QuorumController.java</code> (177) — brokers and the
+controller both boot from the same raft metadata log; the
+controller is a deterministic function over metadata events.</li>
+<li><code>core/.../network/SocketServer.scala</code> (71) +
+<code>core/.../server/KafkaRequestHandler.scala</code> (91) — the broker&#39;s
+thread architecture: selectors vs handler pool, one queue in
+between.</li>
+</ol>
+<p>You have now traced one message from producer batch to replicated,
+zero-copied, consumer-visible record — and seen how Kafka rebuilt its
+own control plane on the same log abstraction.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the sequential log your storage primitive</strong>: batching +
+zero-copy + sparse indexes is a repeatable throughput recipe, not a
+Kafka accident.</li>
+<li><strong>Offsets as data</strong>: storing consumer positions in the log itself
+removed a whole class of coordinator state (compare: external ZK
+offsets, the thing it replaced).</li>
+<li><strong>Backpressure by pull</strong>: consumers that fetch control their own
+fate; no broker-side queue accounting per slow client.</li>
+<li><strong>Version every wire message</strong>: generated, negotiated schemas made
+a decade of rolling upgrades survivable — most systems die here.</li>
+<li><strong>Event-source your control plane</strong> (KRaft/QuorumController):
+deterministic functions over an append-only metadata log replace
+fragile external consensus — the deepest pattern in this codebase.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — three languages of concern (Scala
+plumbing, Java log engine, generated protocol), plus distributed
+systems vocabulary.</li>
+<li>Budget: ~8 hours for the reading path; replication semantics need a
+second pass.</li>
+<li>Prerequisites: what a commit log is; replication and quorums at a
+textbook level; Java/Scala reading fluency; mmap basics.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Kafka&#39;s design doc in-repo: <code>docs/design.html</code> (the original 2011
+design rationale, still the best single read).</li>
+<li>KIP-500 (KRaft) and KIP-848 (new consumer groups) proposals — the
+two architecture migrations this reading path witnesses.</li>
+<li>Kreps, Narkhede, Rao — &quot;Kafka: a Distributed Messaging System for
+Log Processing&quot; (the original paper).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../postgresql/"><span class="dir">← Previous dive</span>PostgreSQL: the relational server as a federation of cooperating processes</a>
+  <a href="../kubernetes/" style="text-align:right"><span class="dir">Next dive →</span>Kubernetes: desired state + reconcile loops — an operating system as a control system</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 7 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

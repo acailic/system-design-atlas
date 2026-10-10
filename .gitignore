@@ -3,3 +3,6 @@ clones/
 
 # agent tool state
 .omc/
+
+# site build
+node_modules/

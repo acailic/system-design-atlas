@@ -13,31 +13,61 @@ how a large system stays coherent for decades — narrow contracts between
 layers, extensibility as load-bearing design — and what the
 process-per-connection bet costs and buys at scale.
 
+## Explain like I'm 10
+
+**A bank where every customer gets their own clerk — and receipts are
+never erased.** Walk in (connect) and the bank manager (the postmaster)
+assigns you a personal clerk (a backend process) who stays with you the
+whole visit; clerks never share desks — they coordinate through a shared
+vault in the middle of the bank (shared memory: the buffer pool and
+locks). When money moves, the clerk never erases the old receipt: a NEW
+receipt is written, stamped with who and when (`xmin`/`xmax`), so a
+reader can ask for "the world as of 10:00am" and never wait for a writer
+mid-scribble; a janitor (VACUUM) bins receipts that nobody can possibly
+still see. And before any change becomes real, the clerk pens it into a
+diary chained to the wall (the WAL, fsync'd at commit) — so even a fire
+only means replaying the diary, never losing a committed penny.
+
+**Why the grown-ups did it this way:** readers never wait for writers
+and a crash never loses committed work — the two promises that keep a
+bank (or any database) trusted for thirty years, paid for with extra
+receipt paper (dead tuples) and a janitor (vacuum) to collect it.
+
 ## 1. Architecture overview
 
-```
-                    connect() on port 5432
-                           │
-        ┌──────────────────▼──────────────────────┐
-        │ POSTMASTER (postmaster/postmaster.c)    │ supervisor: accepts,
-        │  BackendStartup (line 3599) forks one   │ never touches user data
-        │  backend per connection                 │
-        └───┬──────────┬──────────┬───────────────┘
-            │          │          │   + auxiliary processes:
-     BACKEND #1    BACKEND #2  ...   bgwriter, checkpointer, walwriter,
-     (tcop/postgres.c:          autovacuum launcher/workers, startup
-      PostgresMain)             (src/backend/postmaster/*.c)
-     parse → plan → execute
-     optimizer/    executor/
-            │
-        shared memory (storage/ipc/ipci.c:120)
-     ┌────▼──────────────────────────────────────┐
-     │ buffer pool (storage/buffer/bufmgr.c)     │
-     │ procarray: xacts & snapshots              │
-     │ lock table, WAL buffers                   │
-     └────┬──────────────────────────────────────┘
-          ▼
-   WAL segments  ←  heap/index files  (smgr → md.c per-fork files)
+```mermaid
+flowchart TD
+    CONN["connect() on port 5432"]
+    PM["POSTMASTER — postmaster/postmaster.c<br/>supervisor: accepts, never touches user data<br/>BackendStartup (3599) forks one backend per connection"]
+    subgraph backends["backends — one process per connection (tcop/postgres.c PostgresMain)"]
+        B1["backend 1<br/>parse → plan → execute"]
+        B2["backend 2"]
+        B3["backend N"]
+    end
+    subgraph aux["auxiliary processes — one job each, restartable"]
+        BGW["bgwriter (89)"]
+        CKPT["checkpointer (206)"]
+        WALW["walwriter (90)"]
+        AV["autovacuum launcher + workers"]
+        ST["startup — crash recovery"]
+    end
+    subgraph shm["shared memory — storage/ipc/ipci.c 120"]
+        BUF["buffer pool (bufmgr.c)"]
+        PA["procarray: xacts + snapshots"]
+        LT["lock table, WAL buffers"]
+    end
+    DISK[("WAL segments + heap/index files")]
+
+    CONN --> PM
+    PM -->|"fork"| B1
+    PM -->|"fork"| B2
+    PM -->|"fork"| B3
+    PM --> aux
+    B1 --> shm
+    B2 --> shm
+    B3 --> shm
+    aux --> shm
+    shm --> DISK
 ```
 
 - The **spine** — one `INSERT` — is: backend parses
@@ -51,6 +81,70 @@ process-per-connection bet costs and buys at scale.
   `src/backend/access/transam/xact.c:1338` → `XLogFlush`).
 - Every subsystem is a directory with a README — `src/backend/*/README`
   files are the contract documentation between layers.
+
+## Walkthrough: one INSERT, parse to fsync'd commit
+
+Follow the spine end to end — step through it on the site or read it
+straight down. The moment "committed" becomes true is the WAL fsync,
+not the data-file write.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant B as Backend (exec_simple_query 1030)
+    participant H as heap_insert (heapam.c 2007)
+    participant X as XLogInsert (481)
+    participant D as Disk (WAL)
+    C->>B: INSERT INTO users VALUES (7, 'ada')
+    B->>B: pg_parse_query → analyze/rewrite → pg_plan_queries
+    B->>H: ExecutorRun → ExecInsert
+    H->>H: new tuple version: xmin = my xid (xmax empty)
+    H->>X: register change (+ full-page image if first since checkpoint)
+    B->>X: RecordTransactionCommit (xact.c 1338)
+    X->>D: XLogFlush — fsync: committed is NOW true
+    B-->>C: CommandComplete
+    Note over H,D: data pages flush lazily; crash recovery replays WAL from the last checkpoint
+```
+
+**Step 1 — Parse, plan, execute.** The backend's `exec_simple_query`
+(`src/backend/tcop/postgres.c:1030`) runs the whole pipeline:
+`pg_parse_query` (617) → `pg_analyze_and_rewrite_fixedparams` (683) →
+`pg_plan_queries` (988) → `ExecutorRun` (`src/backend/executor/execMain.c:308`).
+
+**Step 2 — Write the new version.** `heap_insert`
+(`src/backend/access/heap/heapam.c:2007`) does NOT overwrite anything:
+it adds a new tuple whose header carries `t_xmin` = this transaction's
+id (`src/include/access/htup_details.h:122`). Update is insert + mark;
+"current" is a query, not a place.
+
+**Step 3 — Describe the change for the diary.** The insert registers its
+change with `XLogInsert` (`src/backend/access/transam/xloginsert.c:481`):
+block references plus payload — and a full-page image of the page if it
+is the first modification since the last checkpoint (torn-page
+insurance).
+
+**Step 4 — Commit means fsync.** `RecordTransactionCommit`
+(`src/backend/access/transam/xact.c:1338`) appends the commit record and
+`XLogFlush` fsyncs the WAL. THIS is the instant the insert is durable —
+the heap page may still be dirty in the shared buffer pool, flushed much
+later by bgwriter/checkpointer.
+
+**Step 5 — Visibility for others.** Another backend reading the table
+computes a snapshot from the procarray (`GetSnapshotData`); it sees our
+row only when our xmin is committed *in that snapshot* — no locks
+between our writer and their reader, ever.
+
+**Step 6 — The crash subplot.** Power loss before the data page flushed?
+The startup process replays WAL from the last checkpoint: `heap_redo`
+(`src/backend/access/heap/heapam_xlog.c:1290`) dispatches to
+`heap_xlog_insert` (400) and mechanically reapplies our change — same
+code for every subsystem, zero special cases.
+
+**Outcome — A row version is born.** Parse → plan → execute → WAL →
+fsync → visible-by-snapshot; later VACUUM collects the versions that
+die. You have traced the durable, the visible, and the
+garbage-collected parts of one INSERT.
 
 ## 2. Core data structures — and why these
 
@@ -127,6 +221,26 @@ structures stay decoupled.
   them and freezes old xmin values so old WAL/txids can be recycled.
   Autovacuum tunes itself from statistics — a GC pause story, in a
   database.
+
+```mermaid
+flowchart LR
+    subgraph fleet["the auxiliary fleet — one job per process, restartable"]
+        BGW["bgwriter (89)<br/>evicts clean buffers ahead of need"]
+        CKPT["checkpointer (206)<br/>bounds replay time: dirty pages → data files"]
+        WALW["walwriter (90)<br/>flushes WAL between commits"]
+        AV["autovacuum launcher + workers<br/>lazy_scan_heap (426) — the GC"]
+    end
+    BE["backends — buffer pins, clock-sweep eviction,<br/>no global lock on the hot path"]
+    POOL["shared buffer pool — StrategyGetBuffer (169),<br/>approximate LRU by clock sweep + usage counters"]
+    START["startup process — on crash: replay WAL<br/>from last checkpoint (StartupXLOG)"]
+
+    BE <-->|"pins / evicts concurrently"| POOL
+    BGW --> POOL
+    CKPT --> POOL
+    WALW -.->|"log buffers"| BE
+    AV -.->|"collects dead versions"| POOL
+    START -.->|"single-player mode at boot"| POOL
+```
 
 ## 4. API and extension design
 

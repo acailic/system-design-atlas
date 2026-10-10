@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nginx: shared-nothing processes, state machines, and ownership by lifetime — System Design Atlas</title>
+<meta name="description" content="nginx is the server that answered the C10K question at internet scale and now fronts a large share of the busiest sites. Its design is three intertwined commitments: a master process that ow">
+<meta property="og:title" content="nginx: shared-nothing processes, state machines, and ownership by lifetime — System Design Atlas">
+<meta property="og:description" content="nginx is the server that answered the C10K question at internet scale and now fronts a large share of the busiest sites. Its design is three intertwined commitments: a master process that ow">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-proxied-request-accept-to-pool-teardown">Walkthrough: one proxied request, accept to pool teardown</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>nginx: shared-nothing processes, state machines, and ownership by lifetime</h1>
+    <div class="meta-chips"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/nginx/nginx" rel="noopener">BSD-2-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>2b5c2b605b5df669da5dec6749dcc76c07d1315d</code> · 2026-09-30 · <a href="https://github.com/nginx/nginx" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">nginx is the server that answered the C10K question at internet scale
+and now fronts a large share of the busiest sites. Its design is three
+intertwined commitments: <strong>a master process that owns nothing but
+supervision; workers that share no memory and never block; and per-
+connection state machines driven by one event loop per process</strong> — with
+memory freed not by <code>free()</code> but by destroying a request-lifetime pool.
+This deep-dive teaches how architecture (not tuning) produces both the
+throughput and the operational properties nginx is famous for: zero-
+downtime reload and binary upgrade.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>An ice cream shop where every order gets a tray.</strong> nginx is a shop with
+one manager (the master process) who never scoops ice cream — the
+manager&#39;s whole job is hiring, watching, and replacing scoop workers
+(worker processes). Each worker serves MANY customers at once by taking
+tiny turns — one spoonful for you, one for the next person, round and
+round (the event loop + state machines) — instead of standing next to
+one customer until they finish licking. Every order gets a tray (a memory
+pool): all the mess goes on the tray, and when the order is done the
+whole tray is thrown away — nobody washes individual spoons mid-shift.
+And because workers each have their own tray and scoop, one clumsy worker
+dropping theirs closes one lane, not the shop; the manager just hires a
+replacement instantly.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> serving thousands of customers at
+once needs turns, not one staff member per customer — and workers that
+share nothing can&#39;t trip each other, which is also why the menu can
+change (reload) without ever closing the shop.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    START[&quot;nginx binary start — src/core/nginx.c main&quot;]
+    M[&quot;MASTER — os/unix/ngx_process_cycle.c 74&lt;br/&gt;owns listening sockets, config, pid file&lt;br/&gt;SIGHUP reload · SIGUSR2 upgrade · SIGCHLD respawn&lt;br/&gt;never touches a client connection&quot;]
+    subgraph workers[&quot;workers — fork inherits the listening fds&quot;]
+        W1[&quot;worker 1&quot;]
+        W2[&quot;worker 2&quot;]
+        WN[&quot;worker N (worker_processes)&lt;br/&gt;+ cache manager / loader helpers&quot;]
+    end
+    subgraph loop[&quot;each worker: one event loop — src/event/ngx_event.c 195&quot;]
+        EP[&quot;epoll / kqueue / select — src/event/modules/*&quot;]
+        ACC[&quot;accept mutex — one worker calls accept() at a time&quot;]
+        TIM[&quot;timers — rbtree (ngx_event_timer.c)&quot;]
+        CONN[&quot;each connection: ngx_connection_t + state machines&lt;br/&gt;request line → headers → phases → content&lt;br/&gt;→ upstream proxy → filters → out&quot;]
+    end
+
+    START --&gt; M
+    M --&gt;|&quot;fork&quot;| W1
+    M --&gt;|&quot;fork&quot;| W2
+    M --&gt;|&quot;fork&quot;| WN
+    W1 --&gt; loop
+    W2 --&gt; loop
+    WN --&gt; loop
+    EP --&gt; ACC --&gt; CONN
+    TIM --&gt; CONN
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — one HTTP request — is: accept →
+<code>src/http/ngx_http_request.c:ngx_http_init_connection</code> (211) sets
+<code>ngx_http_process_request_line</code> (1115) as the read handler → headers
+(1229) → <code>ngx_http_process_request</code> (2126) → phase engine
+(<code>src/http/ngx_http_core_module.c:ngx_http_core_run_phases</code>, 894) →
+content handler (static file, or <code>ngx_http_upstream_init</code>,
+<code>src/http/ngx_http_upstream.c:549</code>, which is its <em>own</em> set of state
+machines toward the backend) → output filters → finalize.</li>
+<li>Every step is a callback driven by socket readiness; nothing between
+accept and response is ever blocked on I/O.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-proxied-request-accept-to-pool-teardown">Walkthrough: one proxied request, accept to pool teardown</h2>
+<p class="walkthrough-intro">Follow one HTTP request through a worker — step through it on the site,
+or read it top to bottom. Notice how every &quot;waiting&quot; is a yield, never
+a block.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant E as event loop (worker)
+    participant P as phase engine
+    participant U as upstream (backend)
+    E-&gt;&gt;E: accept — new connection, install request-line handler
+    C-&gt;&gt;E: GET /api/x HTTP/1.1 (may arrive in pieces)
+    E-&gt;&gt;E: request line → headers (each return = yield)
+    E-&gt;&gt;P: process request → run phases (POST_READ → … → CONTENT)
+    P-&gt;&gt;U: proxy_pass — connect, send, read: own state machine
+    U--&gt;&gt;P: response headers + body
+    P-&gt;&gt;C: output filters rewrite buffer chains → sendfile / writev
+    P-&gt;&gt;P: finalize → LOG phase → destroy_pool frees everything at once
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-knock">The knock</h3>
+<p>A listening socket becomes readable; the worker
+holding the accept mutex calls <code>ngx_event_accept</code>
+(<code>src/event/ngx_event_accept.c:21</code>): a new <code>ngx_connection_t</code> is
+created and <code>ngx_http_init_connection</code> (<code>src/http/ngx_http_request.c:211</code>)
+installs the first state — <code>ngx_http_process_request_line</code> (1115) — as
+the read handler.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="read-the-request-line-piecewise">Read the request line, piecewise</h3>
+<p>Bytes arrive in dribs;
+<code>ngx_http_process_request_line</code> parses what it has and <em>returns</em> on a
+partial line (a yield — the loop goes off to serve other connections).
+Complete line → install the next handler:
+<code>ngx_http_process_request_headers</code> (1229).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="headers-then-the-phase-engine">Headers, then the phase engine</h3>
+<p>With headers done,
+<code>ngx_http_process_request</code> (2126) hands over to
+<code>ngx_http_core_run_phases</code> (<code>src/http/ngx_http_core_module.c:894</code>) — a
+resumable loop over POST_READ, SERVER_REWRITE, FIND_CONFIG, REWRITE,
+PREACCESS, ACCESS, PRECONTENT, CONTENT. Async handlers return
+<code>NGX_AGAIN</code> and resume exactly where they stopped on a later event.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="proxy-to-the-backend">Proxy to the backend</h3>
+<p>The content handler for <code>proxy_pass</code>
+is <code>ngx_http_upstream_init</code> (<code>src/http/ngx_http_upstream.c:549</code>): its
+own state machines connect, send the request, parse the upstream
+response, buffer to disk if needed, mark failures, retry peers — never
+blocking the worker.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="filters-and-out">Filters and out</h3>
+<p>The response flows as chains of
+<code>ngx_buf_t</code> — filters (charset, gzip, ranges) rewrite chains, not
+streams; whole file ranges can be handed to <code>sendfile</code> without copying.
+A partial write leaves the chain pointing at the unsent remainder.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="tear-down-the-tray">Tear down the tray</h3>
+<p>finalize → LOG phase →
+<code>ngx_destroy_pool</code> (<code>src/core/ngx_palloc.c:47</code>): every allocation made
+for this request disappears in one call (cleanup handlers close files
+first). Ownership by lifetime: free is O(1).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-request-zero-blocks">One request, zero blocks</h3>
+<p>From accept to teardown the
+worker never slept on this connection: it rotated among hundreds of
+them, resuming each state machine exactly where it yielded. That, plus
+tray-shaped memory, is the throughput story — architecture, not tuning.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="memory-pools-per-connection-request-src-core-ngx-palloc-c">Memory pools per connection/request (<code>src/core/ngx_palloc.c</code>)</h3>
+<p><code>ngx_create_pool</code> (19) carves a block; <code>ngx_palloc</code> (123) bumps a
+pointer for small allocations (large ones get dedicated blocks); cleanup
+handlers (line 316) run file closes/frees; <code>ngx_destroy_pool</code> (47)
+releases everything at once. Why: a request&#39;s lifetime is the unit of
+ownership — bulk free turns memory management into <em>lifetime
+management</em>, eliminating per-allocation bookkeeping and the leak/fault
+classes that come with it. (The cost: you cannot free early; bounded
+waste is accepted by design.)</p>
+<h3 id="event-driven-connection-objects-src-event-ngx-event-c">Event-driven connection objects (<code>src/event/ngx_event.c</code>)</h3>
+<p>Each fd has an <code>ngx_connection_t</code> with read/write <code>ngx_event_t</code>s whose
+<code>handler</code> fields <em>are</em> the current state: the request parser literally
+installs the next state (<code>rev-&gt;handler = ngx_http_process_request_headers</code>,
+request.c:1229). Timers live in a red-black tree
+(<code>src/event/ngx_event_timer.c:13</code>). The event module itself is a vtable
+— <code>#define ngx_process_events ngx_event_actions.process_events</code>
+(<code>src/event/ngx_event.h:401</code>) — so epoll/kqueue/select are drop-in.</p>
+<h3 id="the-phase-engine-src-http-ngx-http-c">The phase engine (<code>src/http/ngx_http.c</code>)</h3>
+<p>Requests walk a fixed sequence of phases — POST_READ, SERVER_REWRITE,
+FIND_CONFIG, REWRITE, PREACCESS, ACCESS, PRECONTENT, CONTENT (+LOG) —
+initialized in <code>ngx_http_init_phases</code> (<code>src/http/ngx_http.c:351</code>) and
+flattened into a handler array by <code>ngx_http_init_phase_handlers</code> (18).
+Modules register handlers into phases; <code>ngx_http_core_run_phases</code> (894)
+is the whole engine — a loop that resumes where it stopped. Why: it
+makes module composition <em>ordered and inspectable</em>, and it is
+suspendable (async handlers return NGX_AGAIN and resume on the next
+event).</p>
+<h3 id="buffer-chains-ngx-buf-t-ngx-chain-t">Buffer chains (<code>ngx_buf_t</code>/<code>ngx_chain_t</code>)</h3>
+<p>Response bytes flow as linked chains of buffers — multiple buffers can
+reference one file range or memory without copying, and filters
+(filetype/charset/gzip) rewrite chains, not streams. Why: zero-copy
+<code>sendfile</code> and partial writes fall out; the chain is the unit that
+survives &quot;the socket accepted 3KB of 10KB.&quot;</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Master/worker, shared-nothing</strong>: workers are forked clones
+(<code>ngx_process_cycle.c:130</code> → <code>ngx_spawn_process</code>, 366) that <em>inherit</em>
+the listening sockets. One mutex (<code>ngx_accept_mutex</code>,
+<code>src/event/ngx_event.c:52</code>, tried at line 224) decides which worker
+may call accept — preventing the thundering herd — and workers drop
+the lock under load so kernels with <code>SO_REUSEPORT</code>-style balancing
+still spread connections.</li>
+<li><strong>Crash containment</strong>: a segfaulting worker kills one connection set;
+the master&#39;s SIGCHLD path reaps and respawns
+(<code>ngx_reap_children</code>, process_cycle.c:20/174). The supervisor never
+holds client state, so it cannot be corrupted by request handling.</li>
+<li><strong>Zero-downtime reload</strong> (SIGHUP): the master re-runs
+<code>ngx_init_cycle</code> (<code>src/core/ngx_cycle.c:39</code>) with the new config,
+spawns <em>new</em> workers on the (already open) listening sockets, and
+signals old workers to drain. No connection is dropped because the
+listening fds never close.</li>
+<li><strong>Binary upgrade</strong> (SIGUSR2, <code>NGX_CHANGEBIN_SIGNAL</code> in
+<code>src/os/unix/ngx_process.c:65</code>): the master execs the new binary,
+passing the listening sockets through the environment; the new master
+takes over the pid file while the old master lingers as a fallback
+(<code>ngx_new_binary</code>, process_cycle.c:47) — an atomic handover
+choreography that survives failure at every step.</li>
+<li><strong>Graceful vs immediate shutdown</strong>: SIGQUIT drains (no new requests,
+existing finish), SIGTERM stops; timeouts hard-stop stragglers.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    M[&quot;master — owns no client state&quot;]
+    subgraph wk[&quot;workers — shared nothing&quot;]
+        A[&quot;worker A&lt;br/&gt;(own buffers, own open-file cache)&quot;]
+        B[&quot;worker B&quot;]
+        C[&quot;worker C — crashed!&quot;]
+    end
+    SHM[&quot;shared-memory zones — the rare exception:&lt;br/&gt;ssl session cache, rate limits, upstream health&lt;br/&gt;(spinlocks / atomics, never the heap)&quot;]
+    SIGCHLD[&quot;SIGCHLD → ngx_reap_children (174)&lt;br/&gt;reap and respawn&quot;]
+    HUP[&quot;SIGHUP → ngx_init_cycle (39) with new config&lt;br/&gt;spawn NEW workers on the same listening fds&lt;br/&gt;old workers drain, then exit&quot;]
+    USR2[&quot;SIGUSR2 → binary upgrade: exec new master,&lt;br/&gt;pass listening fds via environment, pid-file handover,&lt;br/&gt;old master lingers as fallback&quot;]
+
+    M --&gt;|&quot;fork, inherit fds&quot;| A
+    M --&gt;|&quot;fork&quot;| B
+    M --&gt;|&quot;fork&quot;| C
+    C --&gt;|&quot;one connection set lost, never the site&quot;| SIGCHLD
+    M --&gt; HUP
+    M --&gt; USR2
+    A -.-&gt; SHM
+    B -.-&gt; SHM
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The &quot;API&quot; is <strong>configuration as a language</strong>: directives nest into
+http → server → location contexts; modules declare directives and
+receive parsed per-context config structs. Extension = write a module:
+<code>ngx_module_t</code> with a type-specific ctx (core/event/http), handlers
+hooked into phases, header/body filters chained onto the output path.</li>
+<li><strong>Upstream is a protocol-framework</strong>, not just &quot;proxy_pass&quot;:
+<code>ngx_http_upstream_init</code> (549) drives load-balanced peer selection,
+connect/read/write state machines, buffering to disk, and failure
+marking — with pluggable load balancers and protocols (fastcgi,
+uwsgi, grpc...) as modules over it.</li>
+<li>Shared state between workers is <em>explicit and rare</em>: shared-memory
+zones (ssl session cache, rate limit state, upstream health) with
+spinlock/atomic primitives — the exception that proves the
+shared-nothing rule.</li>
+<li>Honest wart: because blocking is forbidden, ordinary procedural logic
+(a slow filesystem hit, a DNS lookup) must be re-expressed as evented
+state machines — this is why the codebase has handlers-installing-
+handlers and why module code has a learning cliff.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-processes-over-threads-for-connection-handling">Trade-off 1: processes over threads for connection handling</h3>
+<ul>
+<li><strong>Tension:</strong> use all cores without sharing memory.</li>
+<li><strong>Choice:</strong> N worker processes, forked from a supervisor, zero shared
+mutable state (one accept mutex as the only coordination).</li>
+<li><strong>Evidence:</strong> <code>ngx_start_worker_processes</code> (process_cycle.c:130);
+lock usage confined to accept gating (<code>ngx_event.c:224</code>) and shm
+zones.</li>
+<li><strong>Given up:</strong> in-process shared caches (each worker has its own open
+file cache, its own buffers — memory multiplies by worker count);
+slower context creation than threads.</li>
+<li><strong>Verdict:</strong> right when isolation, reload semantics, and crash
+containment beat memory costs — the classic web-tier calculus. The
+same decision looks different in a latency-critical monolith.</li>
+</ul>
+<h3 id="trade-off-2-evented-state-machines-over-thread-per-connection">Trade-off 2: evented state machines over thread-per-connection</h3>
+<ul>
+<li><strong>Tension:</strong> 10k+ concurrent connections per machine.</li>
+<li><strong>Choice:</strong> one epoll loop per worker; every connection phase is a
+resumable handler; blocking calls are architecturally forbidden.</li>
+<li><strong>Evidence:</strong> <code>ngx_process_events_and_timers</code> (195); request parsing
+as handler installation (<code>request.c:533</code>, <code>1229</code>); upstream as a
+machine (upstream.c:549).</li>
+<li><strong>Given up:</strong> simple blocking code style; CPU-heavy work (TLS at
+scale, compression) eats the loop; every third-party integration must
+be re-architected as async.</li>
+<li><strong>Verdict:</strong> right for I/O-bound multiplexing where per-connection
+state is small; wrong for long CPU-bound streaming — that&#39;s why
+nginx offloads TLS termination concerns to dedicated machines and
+keeps gzip buffers bounded.</li>
+</ul>
+<h3 id="trade-off-3-pool-memory-with-lifetime-ownership-over-general-allocation">Trade-off 3: pool memory with lifetime ownership over general allocation</h3>
+<ul>
+<li><strong>Tension:</strong> millions of tiny allocations per second vs allocator
+overhead and fragmentation.</li>
+<li><strong>Choice:</strong> per-request pools, bump allocation, wholesale free.</li>
+<li><strong>Evidence:</strong> <code>ngx_palloc.c:19/47/123</code>; cleanup handlers (316) for
+resources that need real closing.</li>
+<li><strong>Given up:</strong> early frees (memory held until request end), precise
+per-object lifetimes.</li>
+<li><strong>Verdict:</strong> right when lifetimes align with a natural unit
+(request/connection); in systems with long-lived mixed-lifetime
+objects it would waste badly — note how Redis&#39;s per-client buffers
+and SQLite&#39;s per-statement allocations make the same bet in different
+shapes.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/os/unix/ngx_process_cycle.c:ngx_master_process_cycle</code> (74) —
+the supervisor&#39;s entire life: signal set (lines 92-97), the
+respawn/reload/upgrade switch. Read <code>src/os/unix/ngx_process.c:40-66</code>
+alongside for the signal table mapping SIGHUP/SIGUSR2 to semantic
+names.</li>
+<li><code>ngx_start_worker_processes</code> (130) → <code>ngx_spawn_process</code> (366) —
+fork, slot bookkeeping, fd inheritance; note what the master does
+<em>not</em> do afterward.</li>
+<li><code>ngx_worker_process_cycle</code> (729) + <code>ngx_worker_process_init</code> (23) —
+per-worker setup (affinity, priority, channels), then the loop that
+is the whole worker: <code>ngx_process_events_and_timers</code> (751).</li>
+<li><code>src/event/ngx_event.c:ngx_process_events_and_timers</code> (195) — the
+loop&#39;s anatomy: timer computation, accept-mutex acquire/release,
+event dispatch, posted-event processing.</li>
+<li><code>src/event/ngx_event_timer.c</code> (whole file, ~200 lines) — the rbtree
+timer wheel that makes timeouts O(log n) without a timer thread.</li>
+<li><code>src/event/ngx_event_accept.c:ngx_event_accept</code> (21) — what accept
+means here: new <code>ngx_connection_t</code>, handler install, client
+connection limits.</li>
+<li><code>src/http/ngx_http_request.c:ngx_http_init_connection</code> (211) →
+<code>ngx_http_process_request_line</code> (1115) → <code>ngx_http_process_request</code>
+(2126) — trace one request&#39;s parser states; note every early
+<code>return</code> is a yield, not a block.</li>
+<li><code>src/http/ngx_http.c:ngx_http_init_phases</code> (351) +
+<code>src/http/ngx_http_core_module.c:ngx_http_core_run_phases</code> (894) —
+the phase pipeline: registration at init, resumable loop at runtime.</li>
+<li><code>src/core/ngx_palloc.c</code> (whole file, ~450 lines) — pools, large
+blocks, cleanup handlers; then spot <code>ngx_pool_t</code> owners across the
+codebase (connection pool, request pool).</li>
+<li><code>src/http/ngx_http_upstream.c:ngx_http_upstream_init</code> (549) and the
+handlers it installs — the deepest state machine in the tree:
+connect, send request, process header, body filters, retries/fail
+marking.</li>
+<li>Back to <code>src/os/unix/ngx_process_cycle.c</code> for the SIGHUP path:
+<code>ngx_init_cycle</code> (<code>src/core/ngx_cycle.c:39</code>) builds the new config
+world, then old workers are told to drain — draw the timeline of
+one reload on paper. Finally read the SIGUSR2 dance
+(<code>NGX_CHANGEBIN_SIGNAL</code>, process.c:65/374) for in-place binary
+upgrade.</li>
+</ol>
+<p>You have now followed one connection from fork inheritance through
+accept, parse, phase execution, proxying, and pool teardown — plus both
+zero-downtime operations (reload, upgrade) from the master&#39;s side.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the supervisor stateless</strong>: a master that owns no client state
+can supervise, reload, and upgrade forever; put all risk in
+expendable workers.</li>
+<li><strong>Ownership by lifetime</strong> (pools): choose allocation units equal to
+natural lifetimes (request, connection, statement) and free becomes
+O(1) — the same lesson as Redis&#39;s client buffers.</li>
+<li><strong>Serialize only the contentious primitive</strong>: one accept mutex (and
+nothing else) buys fair distribution without a shared heap.</li>
+<li><strong>Config as a compiled tree with per-context override</strong> — nginx&#39;s
+directive model makes &quot;same code, per-location behavior&quot; a data
+problem, which is why one binary serves wildly different sites.</li>
+<li><strong>Design reload and upgrade as protocol dances, not reboots</strong>:
+inherited listening fds + pid-file handover + lingering old master is
+a reusable zero-downtime upgrade pattern for any long-running server.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — the C is idiomatic and dense, and the
+state-machine style requires re-orienting how you read control flow.</li>
+<li>Budget: ~7–8 hours for the reading path; the process/event chapters
+(steps 1–6) alone are a rewarding 3 hours.</li>
+<li>Prerequisites: <code>fork</code>/exec and fd inheritance, epoll basics, HTTP/1.1
+message framing, and comfort reading function-pointer-driven C.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>nginx internals primer (Evan Miller, &quot;Guide to Nginx Module
+Development&quot; and the internals series) — the classic orientation for
+<code>ngx_module_t</code>/phase machinery.</li>
+<li>The nginx docs (<a href="https://nginx.org/en/docs/">https://nginx.org/en/docs/</a>) — events module and
+worker/accept mutex directives (<code>accept_mutex</code>, <code>reuseport</code>).</li>
+<li>Kegel, &quot;The C10K Problem&quot; — the problem statement this architecture
+answered.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../leveldb/"><span class="dir">← Previous dive</span>LevelDB: the LSM-tree in its teachable form — logs, levels, and immutable tables</a>
+  <a href="../postgresql/" style="text-align:right"><span class="dir">Next dive →</span>PostgreSQL: the relational server as a federation of cooperating processes</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 5 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

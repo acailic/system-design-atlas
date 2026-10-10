@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>git: the version control that is really a content-addressed database — System Design Atlas</title>
+<meta name="description" content="git displaced every centralized VCS incumbent with one structural bet: the repository is a persistent, content-addressed object database — immutable blobs, trees, commits, and tags keyed by ">
+<meta property="og:title" content="git: the version control that is really a content-addressed database — System Design Atlas">
+<meta property="og:description" content="git displaced every centralized VCS incumbent with one structural bet: the repository is a persistent, content-addressed object database — immutable blobs, trees, commits, and tags keyed by ">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-git-add-git-commit-fingerprint-to-sticky-note">Walkthrough: git add + git commit, fingerprint to sticky note</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>git: the version control that is really a content-addressed database</h1>
+    <div class="meta-chips"><span class="chip domain">vcs</span><span class="chip domain">storage-engine</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/git/git" rel="noopener">GPL-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>e9019fcafe0040228b8631c30f97ae1adb61bcdc</code> · tag v2.55.0, 2026-06-29 · <a href="https://github.com/git/git" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">git displaced every centralized VCS incumbent with one structural bet:
+the repository is a <strong>persistent, content-addressed object database</strong> —
+immutable blobs, trees, commits, and tags keyed by the hash of their
+bytes — with a minuscule mutable layer (refs: named pointers into the
+DAG) on top. Branching, merging, history rewriting, dedup, verification,
+and offline work are all <em>derived</em> operations on that model. This
+deep-dive teaches what choosing the right core data model buys you, and
+what it costs (garbage, packs, and protocol complexity).</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A photo album where nothing is ever erased.</strong> Every time you save your
+drawing, git takes a brand-new photo of each changed file (a <strong>blob</strong>), a
+new photo of each folder&#39;s list of contents (a <strong>tree</strong>), and a new photo
+of the whole moment (a <strong>commit</strong>) — and names each photo by a
+fingerprint of its exact pixels (the SHA hash). Identical photos get
+identical fingerprints, so they are stored only once, and if anyone
+sneakily changes one pixel, the fingerprint changes and the trick is
+caught. A branch is just a sticky note (a <strong>ref</strong>) pointing at a favorite
+photo; &quot;merging&quot; means comparing two photo collections and adding only
+the photos you&#39;re missing — you never need to phone a central office,
+because every computer that cloned the album owns every photo.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> never overwriting anything means
+history can always be verified, duplicates disappear for free, and two
+people (or two laptops, offline) can always compare and combine safely —
+without anyone having to be in charge.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    PORC[&quot;porcelain — git commit, git log, git merge...&lt;br/&gt;libgit.a + builtin (130 builtins)&quot;]
+    PLUMB[&quot;plumbing — hash-object, cat-file, rev-parse,&lt;br/&gt;update-ref (the data model as commands)&quot;]
+    subgraph core[&quot;the object database — odb.c + odb/*.c&quot;]
+        ODB[&quot;sources walked in order:&lt;br/&gt;in-memory → loose files → packs&lt;br/&gt;key = hash of type + bytes; value = the bytes&quot;]
+    end
+    REFS[&quot;refs — refs.c&lt;br/&gt;files / packed / reftable backends&lt;br/&gt;name → oid: the only mutable state&quot;]
+    IDX[&quot;index — read-cache.c&lt;br/&gt;staging snapshot + stat cache&lt;br/&gt;(derived, always rebuildable)&quot;]
+    WT[&quot;working tree — just files&quot;]
+
+    PORC --&gt; PLUMB --&gt; ODB
+    REFS --&gt;|&quot;point into&quot;| ODB
+    IDX --&gt;|&quot;built from&quot;| ODB
+    WT --&gt;|&quot;git add&quot;| IDX
+    IDX --&gt;|&quot;git commit&quot;| ODB
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>Four object types (<code>src</code> of truth: <code>object.c:29</code>
+<code>object_type_strings[]</code>): <strong>blob</strong> (file bytes), <strong>tree</strong> (directory
+listing: mode+name+child oid), <strong>commit</strong> (tree oid + parent oids +
+author/message), <strong>tag</strong> (signed pointer). Everything else — branches,
+HEAD, tags-as-ref, remotes — is a <em>ref</em>, a mutable file/mapping
+<code>name → oid</code>.</li>
+<li>The <strong>spine</strong> — &quot;git add + git commit&quot; — is: working file → blob
+(<code>odb_write_object</code>) → new tree (bottom-up) → new commit (points at
+tree + parents) → move one ref. Note the asymmetry: writes create
+immutable objects; the <em>only</em> mutation is the ref update.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-git-add-git-commit-fingerprint-to-sticky-note">Walkthrough: git add + git commit, fingerprint to sticky note</h2>
+<p class="walkthrough-intro">One save, end to end — step through it on the site or read it here. The
+sequence matters: objects are written first, the pointer moves last.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant W as working tree
+    participant I as index (read-cache.c)
+    participant O as object database
+    participant R as refs
+    W-&gt;&gt;I: git add f — hash file, stage blob oid + stat
+    I-&gt;&gt;O: write blob: deflate, temp file, rename into objects/xx/38hex
+    I-&gt;&gt;O: git commit — write tree objects bottom-up from the index
+    O-&gt;&gt;O: write commit: tree oid + parents + message
+    O-&gt;&gt;R: update-ref moves the branch sticky note (atomic rename)
+    R-&gt;&gt;R: reflog appends the move (the undo journal)
+    Note over O,R: a crash anywhere before the ref move = orphan objects, never corruption
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="fingerprint-the-file">Fingerprint the file</h3>
+<p><code>git add f</code> runs the write path:
+<code>builtin/hash-object.c:hash_object</code> (38) → <code>odb_write_object</code> — note that
+by default &quot;write&quot; only <em>computes</em> the id; persistence is a flag. The
+content is prefixed <code>&lt;type&gt; &lt;size&gt;\0</code>, hashed, and deflated
+(<code>object-file.c:write_object_file_prepare</code>, 329).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="store-the-blob-immutably">Store the blob immutably</h3>
+<p><code>write_loose_object_common</code> (704)
+writes a temp file and renames it into
+<code>.git/objects/&lt;2-hex&gt;/&lt;38-hex&gt;</code> — the fanout directory. The rename is
+the atomicity: an object either exists whole or not at all.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="stage-it">Stage it</h3>
+<p>The index (<code>read-cache.c:do_read_index</code>, 2198)
+gains a <code>cache_entry</code>: path, oid, stat data. The stat cache is why
+<code>git status</code> is O(changed files) — unchanged files are never re-hashed.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="write-the-trees">Write the trees</h3>
+<p><code>git commit</code> turns the index into tree
+objects bottom-up: one flat sorted list per directory
+(<code>tree.c:parse_tree_buffer</code>, 175), each named by its own hash, parents
+referenced by fingerprint — <code>decode_tree_entry</code> (17) shows the
+<code>&lt;mode&gt; &lt;name&gt;\0&lt;raw oid&gt;</code> format.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="write-the-commit">Write the commit</h3>
+<p><code>commit.c:parse_commit_buffer</code> (516) is
+the format in prose: <code>tree &lt;oid&gt;</code>, <code>parent &lt;oid&gt;</code>..., author, message.
+A new commit points at the new tree and at the old HEAD as parent —
+the DAG grows by append, never by edit.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="move-the-sticky-note">Move the sticky note</h3>
+<p><code>update-ref</code> writes the new oid under
+<code>.git/refs/heads/&lt;branch&gt;</code> (temp file + rename) and the reflog appends a
+line. This one-line file update is the <em>entire</em> mutation git performed
+for your commit.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="history-you-can-prove">History you can prove</h3>
+<p>Everything else — log, diff, merge,
+push — is derived by walking fingerprints. If the process died at any
+earlier step, you&#39;d have unreferenced objects (garbage for <code>git gc</code>),
+never a broken repository.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-object-database-with-swappable-sources-odb-c-odb">The object database with swappable sources (<code>odb.c</code>, <code>odb/</code>)</h3>
+<p><code>odb_read_object</code> (<code>odb.c:744</code>) → <code>odb_read_object_info_extended</code>
+(<code>odb.c:656</code>) walks a list of <strong>sources</strong>: in-memory (<code>odb/source-inmemory.c</code>),
+loose files (<code>odb/source-loose.c</code>), packs (the classic <code>packfile.c</code>
+machinery). Writes go through <code>odb_write_object_ext</code> (<code>odb.c:988</code>).
+Why layered sources: correctness first (loose objects are trivially
+inspectable), performance later (packs), plus testing and partial-clone
+backends — all without touching the model. Note
+<code>odb/source-loose.c:odb_source_loose_read_object_info</code> (line 206) and
+the vtable registration at line 712.</p>
+<h3 id="content-addressing-the-object-id-is-the-checksum">Content addressing: the object ID is the checksum</h3>
+<p>An object&#39;s key is the hash of <code>&lt;type&gt; &lt;size&gt;\0&lt;bytes&gt;</code> — computed while
+writing (<code>object-file.c:write_object_file_prepare</code>, line 329, hashing
+through the deflate in <code>write_loose_object_common</code>, line 704). Verifying
+an object (<code>object-file.c:check_object_signature</code>, line 101) is re-hashing
+it. Storage path = <code>.git/objects/&lt;2-hex&gt;/&lt;38-hex&gt;</code> (fanout directory).
+Why: <strong>integrity, dedup, and addressing collapse into one mechanism.</strong>
+Identical content stored once; corruption detectable by construction;
+no registry to maintain.</p>
+<h3 id="the-index-read-cache-c">The index (<code>read-cache.c</code>)</h3>
+<p>A flat, sorted array of <code>cache_entry</code> (path, oid, stat data) — the
+staging area between working tree and tree objects, loaded by
+<code>do_read_index</code> (<code>read-cache.c:2198</code>). Why a <em>derived</em> cache: because the
+truth is the object DAG, the index can be deleted and rebuilt; its stat
+cache makes <code>git status</code> O(changed files), not O(files).</p>
+<h3 id="refs-refs-c-backends">Refs (<code>refs.c</code> + backends)</h3>
+<p>A ref is <code>name → oid</code>. The files backend keeps loose files under
+<code>.git/refs/</code> with a packed-refs fallback (<code>refs/files-backend.c:files_read_raw_ref</code>,
+line 596; <code>refs/packed-backend.c:packed_refs_lock</code>, line 1217); a
+reftable backend (<code>refs/reftable-backend.c</code>) offers a log-structured
+alternative. Reflogs record every movement. Why: the entire mutable state
+of a distributed system reduced to ~a hundred tiny files with atomic
+rename semantics — cheap to lock, cheap to audit.</p>
+<h3 id="packs-deltas-builtin-pack-objects-c-diff-delta-c">Packs + deltas (<code>builtin/pack-objects.c</code>, <code>diff-delta.c</code>)</h3>
+<p>Loose objects are wasteful, so packs concatenate objects with per-object
+headers and a fanout index for binary search (<code>packfile.c:bsearch_pack</code>,
+line 2002); similar objects are stored as deltas against bases
+(<code>builtin/pack-objects.c:try_delta</code>, line 2789; <code>diff-delta.c:create_delta</code>,
+line 320), with <code>pack-revindex.c</code> mapping offsets→order to resolve chains.
+Why: the immutable model makes repacking a pure function — pack any
+subset, delete the rest, nothing breaks.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Concurrency is file-lock granularity</strong>: <code>.git/index.lock</code> serializes
+index writes; ref updates take per-ref locks (<code>refs/files-backend.c</code>);
+packed-refs takes one global lock (<code>packed_refs_lock:1217</code>). No daemon,
+no shared memory — the filesystem is the coordinator.</li>
+<li><strong>Crash safety via atomicity of the tiny mutable surface</strong>: object
+writes complete into a temp file then rename; a crashed commit leaves
+unreferenced objects (garbage, not corruption) because refs moved last.
+<code>git fsck</code> re-verifies reachability and signatures.</li>
+<li><strong>The reflog is the undo journal</strong> — every ref move appends a history
+line, making &quot;destructive&quot; operations recoverable.</li>
+<li><strong>Failure of trust</strong> (bitrot, hostile mirrors) is caught by the model
+itself: <code>check_object_signature</code> re-hashes content; transport
+(<code>index-pack</code>) verifies every received object&#39;s hash before install.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph locks[&quot;the filesystem is the coordinator — no daemon&quot;]
+        IL[&quot;index.lock — serializes index writes&quot;]
+        RL[&quot;per-ref locks — refs/files-backend.c&quot;]
+        PL[&quot;packed-refs lock — one global&lt;br/&gt;(packed_refs_lock 1217)&quot;]
+    end
+    W1[&quot;git process 1&quot;]
+    W2[&quot;git process 2&quot;]
+    OBJ[&quot;object writes: temp file → rename&lt;br/&gt;crash = orphan object, not corruption&quot;]
+    REF[&quot;ref move: last write wins per ref,&lt;br/&gt;reflog records every move&quot;]
+    FSCK[&quot;git fsck — re-verifies reachability&lt;br/&gt;and every object signature (101)&quot;]
+
+    W1 --&gt; IL
+    W2 --&gt; IL
+    W1 --&gt; OBJ
+    W2 --&gt; OBJ
+    OBJ --&gt; REF
+    REF --&gt; FSCK
+    RL -.-&gt; REF
+    PL -.-&gt; REF
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>Plumbing before porcelain</strong>: the data model is directly exposed as
+commands — <code>hash-object</code> (<code>builtin/hash-object.c:64</code>), <code>cat-file</code>,
+<code>update-ref</code>, <code>rev-list</code>. Porcelain is shell/UI over plumbing; users
+and scripts share the same substrate (the &quot;scriptable core&quot; decision
+that made CI possible).</li>
+<li><strong>Swappable backends at every layer</strong>: odb sources (incl. alternates —
+borrow objects from other repos on disk), ref backends (files vs
+reftable), <strong>hash algorithm polymorphism</strong> (<code>hash.h:struct git_hash_algo</code>,
+line 275): v2.55 writes compatibility oids during SHA-1↔SHA-256
+interop (<code>compat_oid</code> parameter of <code>odb_write_object_ext</code>) — a live
+lesson in migrating a hash-addressed ecosystem without a flag day.</li>
+<li>The wart: config/UI surface sprawl, and the wire protocol grew
+negotiation features (partial clone, promisor remotes) that strain the
+&quot;everything is local objects&quot; simplicity.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-immutable-content-addressed-core-over-mutable-state">Trade-off 1: immutable content-addressed core over mutable state</h3>
+<ul>
+<li><strong>Tension:</strong> version history wants cheap edits; distributed use wants
+verifiable, deduplicated, mergeable state.</li>
+<li><strong>Choice:</strong> all history immutable and hash-addressed; mutation confined
+to ref pointers.</li>
+<li><strong>Evidence:</strong> <code>odb_write_object</code> never overwrites (new bytes ⇒ new
+oid); a commit that changes one character writes a new blob, new trees
+up the path, new commit (<code>commit.c:parse_commit_buffer:516</code> shows the
+parent links that build the DAG); ref move is a one-line file update.</li>
+<li><strong>Given up:</strong> in-place anything. Every save produces garbage; every
+&quot;edit&quot; is add; storage and GC become core concerns (→ trade-off 3).</li>
+<li><strong>Verdict:</strong> right when history integrity, distribution, and
+branch/merge are the product. Wrong for hot mutable data — the lesson
+generalizes: pick immutability where <em>derivation</em> (diffs, merges,
+sync) dominates.</li>
+</ul>
+<h3 id="trade-off-2-full-local-replica-over-central-server">Trade-off 2: full local replica over central server</h3>
+<ul>
+<li><strong>Tension:</strong> collaboration needs shared state; networks fail.</li>
+<li><strong>Choice:</strong> every clone holds the complete DAG; sharing (fetch/push)
+is object transfer + ref negotiation between peers.</li>
+<li><strong>Evidence:</strong> <code>git clone</code> copies the odb; <code>alternates</code> even lets repos
+share object stores locally; <code>git log</code>/<code>git diff</code> never touch the
+network.</li>
+<li><strong>Given up:</strong> global ordering/permissions, cheap single-source
+backups; &quot;server&quot; products (GitHub) became the trust and auth layer
+<em>outside</em> the model.</li>
+<li><strong>Verdict:</strong> right for development workflows (offline speed,
+forking culture); the price is that identity of humans/repos is
+metadata, not model — patch-ids, mailmaps, signing keys all bolt on.</li>
+</ul>
+<h3 id="trade-off-3-loose-objects-lazy-packing-over-one-canonical-format">Trade-off 3: loose objects + lazy packing over one canonical format</h3>
+<ul>
+<li><strong>Tension:</strong> write path wants cheap appends; disk/network want density;
+reads want random access.</li>
+<li><strong>Choice:</strong> write loose (one zlib file per object), periodically
+repack with deltas (<code>try_delta</code>), keep packs immutable once written.</li>
+<li><strong>Evidence:</strong> <code>odb/source-loose.c</code> for the write/read-loose path;
+<code>builtin/pack-objects.c</code> for the compaction; <code>pack-revindex.c</code> exists
+purely to reverse-map pack offsets so delta chains can be walked.</li>
+<li><strong>Given up:</strong> read locality (a 3-byte blob may need its base&#39;s base),
+and a real GC story (unreachable-but-locked objects can accumulate).</li>
+<li><strong>Verdict:</strong> right because both formats serve different phases of the
+object lifecycle — hot (fresh, inspected) vs cold (packed, shipped).
+Systems that merge the two pay on both ends.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>object.c</code> (whole file, ~250 lines) — the four types as an enum and
+a type-name table (line 29); the in-memory <code>struct object</code> header all
+parsed objects share.</li>
+<li>Hands-on: in a scratch repo run <code>git init; echo hi &gt; f; git add f</code>,
+then <code>find .git/objects -type f</code> and <code>git cat-file -p &lt;oid&gt;</code> — you
+have just exercised everything step 3 describes.</li>
+<li><code>builtin/hash-object.c:hash_object</code> (line 38) → <code>odb.h:odb_write_object</code>
+(inline, line 557; note <code>ODB_WRITE_OBJECT_PERSIST</code> — by default
+&quot;write&quot; only <em>computes</em> the id!) → <code>object-file.c:write_object_file_prepare</code>
+(329) + <code>write_loose_object_common</code> (704): header <code>&lt;type&gt; &lt;len&gt;\0</code>,
+hash, deflate, temp-file-then-rename into the fanout path.</li>
+<li><code>tree.c:parse_tree_buffer</code> (175) + <code>tree-walk.c:decode_tree_entry</code>
+(17) — the tree entry format <code>&lt;mode&gt; &lt;name&gt;\0&lt;raw oid&gt;</code>; directories
+are flat sorted lists, recursively addressed.</li>
+<li><code>commit.c:parse_commit_buffer</code> (516) — the commit format is prose:
+<code>tree &lt;oid&gt;</code>, <code>parent &lt;oid&gt;</code>..., author/committer lines; notice the
+graft/shallow hooks that let history be spliced.</li>
+<li><code>odb.c:odb_read_object</code> (744) → <code>odb_read_object_info_extended</code> (699)
+— the source walk (in-memory → loose → packed); then
+<code>odb_read_object_peeled</code> (762) for tag→commit→tree dereferencing.</li>
+<li><code>object-file.c:check_object_signature</code> (101) — the model&#39;s free
+integrity check; pair with <code>git fsck</code> in your scratch repo.</li>
+<li><code>refs.c:refs_read_ref</code> (464) → <code>refs/files-backend.c:files_read_raw_ref</code>
+(596) with the packed-refs fallback, then <code>refs/packed-backend.c:packed_refs_lock</code>
+(1217) — the entire mutable state of the system.</li>
+<li><code>read-cache.c:do_read_index</code> (2198) + <code>set_index_entry</code> (134) — the
+index as derived cache; <code>git ls-files --debug</code> makes it visible.</li>
+<li><code>builtin/pack-objects.c:try_delta</code> (2789) + <code>packfile.c:bsearch_pack</code>
+(2002) + <code>diff-delta.c:create_delta_index</code> (135) — how density is
+bought with copy-window heuristics and binary-searchable fanouts.</li>
+<li><code>revision.c:prepare_revision_walk</code> (3974) and <code>merge-ort.c:merge_ort_internal</code>
+(5303) — the payoff: log/blame/merge are pure graph algorithms over
+the DAG, no special cases for &quot;the server&#39;s copy&quot;.</li>
+</ol>
+<p>You have now traced content → object → tree → commit → ref → pack, and
+seen every mutation the system allows.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the core immutable and content-addressed; confine mutation to a
+pointer layer</strong> — verification, dedup, and distribution fall out of
+the addressing scheme (CAS avant la lettre: S3, Nix, OCI images all
+rediscovered this).</li>
+<li><strong>Derive caches aggressively</strong> (index, commit-graph, packs): when
+truth is append-only and hash-named, caches are always rebuildable —
+you can add performance structures for years without migrations.</li>
+<li><strong>Expose the data model directly in the API</strong> (cat-file/hash-object):
+scriptability and debuggability come from letting users touch the
+substrate.</li>
+<li><strong>Migrate breaking changes with dual-write interop</strong>
+(<code>compat_oid</code>) — a hash-format ecosystem can be moved across
+algorithms without a flag day if new writes speak both.</li>
+<li><strong>Atomic-rename + append-only reflogs as your only &quot;transactions&quot;</strong> —
+filesystem primitives, correctly sequenced, replace a database.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong> — the model is simple; the C is plain; the
+challenge is holding the DAG in your head while reading merge/repack.</li>
+<li>Budget: ~5–7 hours for the reading path with a scratch repo at hand.</li>
+<li>Prerequisites: DAGs and topological ordering; zlib at a &quot;it&#39;s
+compression&quot; level; comfort with <code>.git</code> as a directory you can <code>ls</code>.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>Documentation/gitformat-*.txt</code> in the repo (object, index, pack, and
+reftable formats — the specs the code implements).</li>
+<li><code>Documentation/technical/</code> — especially <code>protocol-capabilities.txt</code>,
+<code>partial-design.txt</code> (partial clone/promisors).</li>
+<li>Linus Torvalds&#39; original Google talk on git (2007) — the design
+argument in the author&#39;s own words.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../sqlite/"><span class="dir">← Previous dive</span>SQLite: a database as a layered library — and a query as compiled bytecode</a>
+  <a href="../leveldb/" style="text-align:right"><span class="dir">Next dive →</span>LevelDB: the LSM-tree in its teachable form — logs, levels, and immutable tables</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 3 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

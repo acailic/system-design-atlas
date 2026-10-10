@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>etcd: Raft as a deterministic state machine, keyspace as MVCC history — System Design Atlas</title>
+<meta name="description" content="etcd is the coordination store beneath Kubernetes and countless platforms: a small replicated key-value service whose entire design is consensus made deployable . Two decisions carry it: the">
+<meta property="og:title" content="etcd: Raft as a deterministic state machine, keyspace as MVCC history — System Design Atlas">
+<meta property="og:description" content="etcd is the coordination store beneath Kubernetes and countless platforms: a small replicated key-value service whose entire design is consensus made deployable . Two decisions carry it: the">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-put-proposal-to-watch-notification">Walkthrough: one Put, proposal to watch notification</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>etcd: Raft as a deterministic state machine, keyspace as MVCC history</h1>
+    <div class="meta-chips"><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/etcd-io/etcd" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>—</code> · <a href="https://github.com/etcd-io/etcd" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">etcd is the coordination store beneath Kubernetes and countless
+platforms: a small replicated key-value service whose entire design is
+<strong>consensus made deployable</strong>. Two decisions carry it: the Raft
+consensus module is a <strong>deterministic, event-driven state machine</strong>
+with no goroutines of its own (the host pumps it), and the applied
+keyspace is an <strong>MVCC log of revisions</strong> (v3) rather than a flat map —
+which is what made watches and transactions correct. This deep-dive
+teaches the gap between a consensus paper and a service: leases,
+linearizable reads, and why every read needs an explicit consistency
+decision.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A club notebook that most members must agree on.</strong> etcd is a club with
+one precious notebook (the keyspace). Any important note (a Put) is
+only written after MOST members agree on the next line (a quorum in the
+Raft vote) — so the notebook never contradicts itself, even if some
+members nap or storm off. Every line gets a number (a revision), so you
+can ask &quot;read me the notebook as of line 500&quot; (a watch) or &quot;read me only
+notes newer than line 500.&quot; Even &quot;this note expired at noon&quot; goes
+through the notebook (leases), so a member who missed the meeting can
+never secretly disagree later. And reading has two speeds: quick,
+straight from your copy (maybe slightly old), or confirmed-fresh — the
+leader first checks the club still agrees, then answers (ReadIndex).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> with most-members agreement,
+even power cuts and split rooms can&#39;t produce two disagreeing
+notebooks — the difference between &quot;probably fine&quot; and &quot;provably
+agreed,&quot; which is exactly what Kubernetes needs under it.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    C[&quot;client — gRPC: Range / Txn / Watch / Lease&quot;]
+    subgraph server[&quot;EtcdServer — server/etcdserver/server.go&quot;]
+        ADAPT[&quot;raftNode adapter (server.go raft.go 81)&lt;br/&gt;pumps Ready(): persist → send → apply&quot;]
+        RAFT[&quot;raft library — etcd-io/raft&lt;br/&gt;deterministic FSM, no goroutines of its own&quot;]
+        RUN[&quot;run loop (751) → applyEntries (1180)&lt;br/&gt;→ applier pipeline&quot;]
+        READ[&quot;reads: serializable (local)&lt;br/&gt;| linearizable — ReadIndex (read/read.go 109)&quot;]
+    end
+    subgraph store[&quot;storage&quot;]
+        WALF[&quot;WAL — storage/wal/wal.go&lt;br/&gt;Save 1000, ReadAll 477&quot;]
+        MVCC[&quot;MVCC keyspace — storage/mvcc/kvstore.go&lt;br/&gt;every mutation at a revision; currentRev 72&quot;]
+        WATCH[&quot;watchable store — synced push (notify 470),&lt;br/&gt;unsynced catch-up&quot;]
+        LEASE[&quot;leases — lease/lessor.go Grant 281&lt;br/&gt;expiry applied as normal entries&quot;]
+    end
+    BE[(&quot;backend — boltdb B+tree&quot;)]
+
+    C --&gt; ADAPT
+    ADAPT &lt;--&gt; RAFT
+    ADAPT --&gt; WALF
+    RUN --&gt; MVCC --&gt; BE
+    MVCC --&gt; WATCH
+    RUN --&gt; LEASE
+    C --&gt; READ
+    READ -.-&gt; MVCC
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — one <code>Put</code> — is: gRPC handler wraps it as a proposal →
+raft <code>Step</code> appends to the <code>raftLog</code> → WAL <code>Save</code> persists the entry
+(<code>wal.go:1000</code>) → leader replicates; on quorum commit, the server&#39;s
+<code>run</code> loop (<code>server.go:751</code>) <code>applyEntries</code> (1180) → the applier
+runs a backend transaction on the MVCC store, bumping <code>currentRev</code>
+(<code>kvstore.go:72</code>) → watchers are notified
+(<code>watchable_store.go:470</code>) → the client&#39;s proposal future resolves.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-put-proposal-to-watch-notification">Walkthrough: one Put, proposal to watch notification</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. Count the places where durability is bought before visibility.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client (gRPC Put)
+    participant R as raft library (Step 1089)
+    participant W as WAL (wal.go Save 1000)
+    participant F as follower peers
+    participant A as apply loop (run 751)
+    participant M as MVCC store + watchers
+    C-&gt;&gt;R: proposal: Put key value
+    R-&gt;&gt;R: leader appends entry to the raft log
+    R-&gt;&gt;W: Save — fsync before anything else
+    R-&gt;&gt;F: MsgApp replicate the entry
+    F--&gt;&gt;R: MsgAppResp — quorum reached
+    R-&gt;&gt;R: commit index advances
+    A-&gt;&gt;M: applyEntries (1180) — backend txn, currentRev++
+    M-&gt;&gt;M: notify synced watchers (470)
+    A--&gt;&gt;C: proposal future resolves — done
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="wrap-the-wish-as-a-proposal">Wrap the wish as a proposal</h3>
+<p>The gRPC handler turns
+<code>Put(key, value)</code> into a raft proposal and funnels it into <code>Step</code>
+(<code>etcd-io/raft/raft.go:1089</code>) — a single message-driven function. The
+raft state machine itself owns no goroutines: it only computes what
+should happen next.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="persist-before-you-promise">Persist before you promise</h3>
+<p>The leader appends the entry
+to its log and the host&#39;s <code>raftNode</code> adapter writes it to the WAL
+(<code>wal.go:Save:1000</code>, length-crc framed records) — persistence ordering
+is the host&#39;s explicit responsibility in the Ready contract.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="ask-the-club">Ask the club</h3>
+<p>The entry ships to followers in <code>MsgApp</code>;
+peers persist it and answer <code>MsgAppResp</code>. When a quorum has it, the
+commit index advances — the line is now official.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="apply-don-t-improvise">Apply, don&#39;t improvise</h3>
+<p>The server&#39;s single consumer loop
+(<code>run</code>, 751) picks up committed entries and <code>applyEntries</code> (1180) hands
+them to the applier, which runs a backend transaction on the MVCC
+store — deterministic, or it&#39;s a design bug.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="stamp-and-shout">Stamp and shout</h3>
+<p>The mutation lands at a fresh revision
+(<code>currentRev</code>, <code>kvstore.go:72</code>); synced watchers are notified by push
+(<code>watchable_store.go:470</code>) — watchers that joined at an older revision
+are caught up from history first by <code>syncWatchers</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-future-resolves">The future resolves</h3>
+<p>The client&#39;s Put returns only now:
+persisted on a quorum, applied, visible to watchers. Reads that need
+guaranteed freshness go through ReadIndex (<code>read/read.go:109</code>) — the
+leader confirms its commit index with one heartbeat round, then serves
+from local state.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="a-write-that-survives-the-worst-night">A write that survives the worst night</h3>
+<p>As long as a
+majority of members (and their disks) live, this Put survives crashes,
+partitions, and restarted peers — and every watcher sees it at a
+numbered point in history.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-raft-state-machine-etcd-io-raft-raft-go-343">The raft state machine (<code>etcd-io/raft/raft.go:343</code>)</h3>
+<p><code>struct raft</code> holds the <em>entire</em> node state: role, term, votes, the
+log, progress trackers for peers. All transitions happen inside
+<code>Step(msg)</code> (1089) — a single message-driven function with a big
+dispatch (e.g. <code>MsgVote</code> handling at 1212) — and <code>tickElection</code>/
+<code>tickHeartbeat</code> (850/862) convert the host&#39;s clock into logical time.
+Why goroutine-free: a consensus library that owns no concurrency is
+<strong>deterministic</strong> — the same message sequence always yields the same
+state, which is why etcd&#39;s raft ships with a simulated-network test
+harness that found bugs no integration test could. (The same property
+makes Raft&#39;s cousin design in Kafka&#39;s KRaft — see that deep-dive —
+event-sourced and testable.)</p>
+<h3 id="the-raft-log-with-unstable-tail-log-go-25-log-unstable-go-37">The raft log with unstable tail (<code>log.go:25</code>, <code>log_unstable.go:37</code>)</h3>
+<p><code>raftLog</code> composes a stable (storage-backed) section and an
+<code>unstable</code> in-memory tail; <code>append</code> (133) only mutates the tail until
+the host persists it. Why the split: the library must never pretend
+durability it doesn&#39;t own — the boundary between &quot;in memory&quot; and
+&quot;saved&quot; is an explicit, inspectable type.</p>
+<h3 id="the-mvcc-revision-keyspace-storage-mvcc-kvstore-go-53">The MVCC revision keyspace (<code>storage/mvcc/kvstore.go:53</code>)</h3>
+<p>v3 stores every mutation at key
+<code>(main_rev, sub)=(key, value, tombstone)</code> — history is the store;
+&quot;current value&quot; is the latest rev ≤ your read rev. <code>currentRev</code>
+(kvstore.go:72) is the clock of the database. Why: watchers replay
+exact history, transactions compare revisions atomically, and
+compaction truncates the past by rev — the same MVCC pattern as
+PostgreSQL (see PATTERNS.md), implemented on a tiny B+tree (boltdb).</p>
+<h3 id="watchable-store-synced-and-unsynced-watcher-sets">Watchable store: synced and unsynced watcher sets</h3>
+<p>(<code>storage/mvcc/watchable_store.go:56</code>)</p>
+<p>Watchers are partitioned by whether their start revision is already
+visible in the backend; synced watchers get events pushed
+(<code>notify:470</code>), unsynced ones are caught up by <code>syncWatchers</code> scanning
+history — converging to the synced set. Why: a watcher joining at an
+arbitrary past revision is a <em>batch</em> problem, but steady-state
+notification must be a <em>push</em> problem; the store physically separates
+the two regimes.</p>
+<h3 id="wal-storage-wal-wal-go-73-and-leases-lease-lessor-go-145">WAL (<code>storage/wal/wal.go:73</code>) and leases (<code>lease/lessor.go:145</code>)</h3>
+<p>The WAL frames raft entries/snapshots in length-crc records
+(<code>Save:1000</code>, <code>SaveSnapshot:1044</code>, recovered by <code>ReadAll:477</code>).
+Leases (<code>Grant:281</code>) attach TTLs to keys through the same raft log —
+expiry runs only on the leader, applied as normal entries. Why: even
+timeouts flow through consensus, so a partitioned minority can never
+resurrect expired keys differently than the majority.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One goroutine per concern, one raft</strong>: <code>EtcdServer.run</code> is the
+single consumer of committed entries; clients&#39; proposals funnel
+through channels into <code>Step</code>. Concurrency lives at the <em>service</em>
+edges (gRPC handlers, watcher fan-out), not inside consensus.</li>
+<li><strong>The Ready() contract</strong>: raft never does I/O; it exposes a <code>Ready</code>
+bundle (entries to persist, messages to send, entries to apply) and
+the host (<code>server/etcdserver/raft.go:81 raftNode</code>) executes it —
+persistence ordering is the host&#39;s responsibility, formalized.</li>
+<li><strong>Failure/partition semantics</strong>: a minority partition keeps serving
+serializable (possibly stale) reads but fails writes and
+linearizable reads; on heal, the follower&#39;s divergent log tail is
+truncated by term/commit rules. Learners and <code>MoveLeader</code>
+(<code>server.go:1238</code>) smooth leadership changes.</li>
+<li><strong>Crash recovery</strong> = WAL replay + snapshot + backend consistency
+check (apply/ has an explicit corruption detector). Anything not
+through the log does not exist — same WAL discipline as PostgreSQL
+and LevelDB in this atlas.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph svc[&quot;service edges — where concurrency lives&quot;]
+        GRPC[&quot;gRPC handlers&lt;br/&gt;(many concurrent callers)&quot;]
+        WF[&quot;watcher fan-out&quot;]
+    end
+    subgraph core2[&quot;the serialized core — one consumer&quot;]
+        RUNL[&quot;EtcdServer.run (751)&lt;br/&gt;single consumer of committed entries&quot;]
+        STEPF[&quot;proposals funnel through channels&lt;br/&gt;into raft Step (1089)&quot;]
+    end
+    subgraph raftside[&quot;the deterministic library&quot;]
+        RAFTS[&quot;struct raft (343) — no channels, no locks,&lt;br/&gt;same messages in → same state out&quot;]
+        READY[&quot;Ready() bundle: entries to persist,&lt;br/&gt;messages to send, entries to apply —&lt;br/&gt;host executes all I/O&quot;]
+    end
+    PART[&quot;minority partition: serves serializable (stale)&lt;br/&gt;reads; writes and linearizable reads fail;&lt;br/&gt;divergent tails truncated on heal&quot;]
+
+    GRPC --&gt; STEPF --&gt; RAFTS --&gt; READY --&gt; RUNL
+    RUNL --&gt; WF
+    PART -.-&gt; RUNL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The API is <strong>gRPC with explicit consistency choices</strong>: <code>Range</code>
+(<code>v3_server.go:106</code>) decides serializable vs linearizable per
+request; <code>Txn</code> composes compare/success/failure batches; <code>Watch</code>
+streams revisions; <code>Lease</code> grants TTLs. Small surface, sharp
+semantics — every method answers &quot;what consistency do I get?&quot;.</li>
+<li><strong>The read path is the extension story</strong>: linearizable reads use
+ReadIndex (<code>etcdserver/read/read.go</code> — the <code>linearizableReadLoop</code>
+around line 109): the leader records its commit index, confirms via
+one round of heartbeats, then serves from local state — correct
+reads without a log entry per read. A textbook optimization, made
+operational (timeouts, waiting for apply index <code>waitAppliedIndex</code>,
+backoff on leader change).</li>
+<li>Honest wart: every write is a full cluster round trip — etcd is
+deliberately tiny (metadata, not data); teams that put queues or
+blobs in it meet the design&#39;s ceiling (default quotas, ~10k writes/s
+class), which is the intended guardrail, not a flaw.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-consensus-as-a-deterministic-library-over-a-threaded-service">Trade-off 1: consensus as a deterministic library over a threaded service</h3>
+<ul>
+<li><strong>Tension:</strong> consensus must be exactly right; threads make
+reproducibility hard.</li>
+<li><strong>Choice:</strong> raft library owns state and logic only; the host pumps
+messages/ticks and executes I/O described by <code>Ready</code>.</li>
+<li><strong>Evidence:</strong> <code>raft struct</code> (<code>raft.go:343</code>) — no channels, no locks;
+<code>Step</code> (1089) as the single entry; the adapter
+<code>server/etcdserver/raft.go:81</code>.</li>
+<li><strong>Given up:</strong> some performance tricks available to consensus that
+owns its scheduling; extra host complexity to honor the
+persist-before-send ordering.</li>
+<li><strong>Verdict:</strong> determinism made the library exhaustively testable
+(simulated nets) and reusable (Kafka&#39;s KRaft descends from this
+design). For any correctness-core subsystem: separate the state
+machine from its I/O.</li>
+</ul>
+<h3 id="trade-off-2-mvcc-revision-store-over-flat-key-value">Trade-off 2: MVCC revision store over flat key-value</h3>
+<ul>
+<li><strong>Tension:</strong> watchers and transactions need history; a map is
+cheaper.</li>
+<li><strong>Choice:</strong> every mutation gets a global revision; current state is
+a query; compaction bounds history.</li>
+<li><strong>Evidence:</strong> <code>store</code>/<code>currentRev</code> (<code>kvstore.go:53/72</code>);
+<code>watchableStore.notify</code> (470) + unsynced catch-up regime.</li>
+<li><strong>Given up:</strong> write amplification (boltdb rewrites), compaction as
+an operational task, value size discipline.</li>
+<li><strong>Verdict:</strong> v2 (flat, in-memory, TTL keys) was replaced by v3
+precisely because watch correctness and transactions required
+history — a system-level admission that &quot;just a map&quot; was the wrong
+core model.</li>
+</ul>
+<h3 id="trade-off-3-explicit-read-consistency-serializable-default-opt-in-to-linearizable-over-one-size-reads">Trade-off 3: explicit read consistency (serializable default opt-in to linearizable) over one-size reads</h3>
+<ul>
+<li><strong>Tension:</strong> reads dominate (config polling); not all reads need
+quorum freshness.</li>
+<li><strong>Choice:</strong> local serializable reads by default; <code>serializable=false</code>
+triggers ReadIndex confirmation.</li>
+<li><strong>Evidence:</strong> <code>Range</code> (<code>v3_server.go:106</code>) branching; the
+<code>linearizableReadLoop</code> (<code>read/read.go:109</code>) machinery.</li>
+<li><strong>Given up:</strong> default surprises (stale reads after partition heal
+unless clients opt in); two read code paths to maintain and reason
+about.</li>
+<li><strong>Verdict:</strong> consistency-as-a-parameter is honest distributed
+design — hide it and clients get either waste (quorum everything)
+or silent staleness. Every distributed API should make this choice
+explicit.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>raft/raft.go:343</code> — <code>struct raft</code>: inventory the state (term,
+role, votes, log, progresses); this one struct is the paper&#39;s
+Figure 2 made literal.</li>
+<li><code>raft.go:tickElection</code> (850) / <code>tickHeartbeat</code> (862) — time as
+injected ticks; then <code>campaign</code> (1025) → <code>becomeLeader</code> (933), and
+<code>becomeFollower</code> (891): all role changes in one file.</li>
+<li><code>raft.go:Step</code> (1089) — walk one message of each kind: <code>MsgVote</code>
+(1212), <code>MsgApp</code>, <code>MsgAppResp</code> — notice commit index advance and
+message sending are <em>return effects</em>, not actions.</li>
+<li><code>raft/log.go:25</code> + <code>log_unstable.go:37</code> — <code>append</code> (133): where
+&quot;durable&quot; is an explicit boundary.</li>
+<li><code>server/etcdserver/raft.go:81</code> (<code>raftNode</code>) — the bridge: how the
+host loops over <code>Ready()</code>, persisting to WAL before sending, then
+applying — the ordering contract in code.</li>
+<li><code>server/etcdserver/server.go:run</code> (751) → <code>applyEntries</code> (1180) →
+<code>apply/uber_applier.go</code> — proposals become backend transactions;
+errors here are design bugs (apply must be deterministic).</li>
+<li><code>server/storage/wal/wal.go</code> — <code>Save</code> (1000), <code>SaveSnapshot</code>
+(1044), <code>ReadAll</code> (477): the restart story.</li>
+<li><code>server/storage/mvcc/kvstore.go</code> — revision allocation,
+<code>TxnBegin</code>, compaction entry points; keep <code>currentRev</code> (72) in
+mind as the database clock.</li>
+<li><code>server/storage/mvcc/watchable_store.go</code> — <code>syncWatchers</code> vs
+<code>notify</code> (470): the two watcher regimes; start a watch at an old
+revision with etcdctl while reading.</li>
+<li><code>server/lease/lessor.go:Grant</code> (281) — expiry as consensus
+entries; then <code>server/etcdserver/read/read.go</code> (~109) —
+ReadIndex: linearizable reads without log writes.</li>
+<li>Finish with <code>server/etcdserver/v3_server.go:Range</code> (106) — one
+method, both consistency modes, the API honest about each.</li>
+</ol>
+<p>You have now traced one Put through consensus, persistence, apply,
+watch, and read-consistency — the complete distance from a Raft paper
+to a production service.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make correctness-critical cores deterministic and I/O-free</strong>:
+pump them from the edges (the Ready pattern) and you can simulate
+what you can never reproduce in production.</li>
+<li><strong>Give data a global revision</strong> (MVCC) if watches or transactions
+matter — flat stores converge to this design eventually, painfully.</li>
+<li><strong>Make read consistency an explicit API choice</strong>, never an ambient
+accident; ReadIndex shows the middle path between quorum-everything
+and stale-by-default.</li>
+<li><strong>Route even timeouts through consensus</strong> (leases): a partitioned
+minority expiring keys on its own clock is a split-brain you
+designed yourself.</li>
+<li><strong>Split regimes, not just functions</strong> (synced/unsynced watchers):
+batch catch-up and push steady-state are different problems — make
+the split structural.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — the raft library is readable by design,
+but consensus vocabulary is assumed.</li>
+<li>Budget: ~7 hours for the reading path; steps 1–6 are the core.</li>
+<li>Prerequisites: read the Raft paper first (extended version,
+<a href="https://raft.github.io">https://raft.github.io</a>); Go concurrency; what a WAL buys (see the
+LevelDB deep-dive&#39;s WAL section).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Ongaro &amp; Ousterhout, &quot;In Search of an Understandable Consensus
+Algorithm&quot; (Raft) — then re-read step 3 against the paper.</li>
+<li>The etcd docs&#39; consistency and hardware tuning pages
+(<a href="https://etcd.io/docs/">https://etcd.io/docs/</a>) — operational framing of these trade-offs.</li>
+<li><code>etcd-io/raft</code>&#39;s <code>README.md</code> and the interop/test harness
+(<code>rafthttp</code> simulated tests) — determinism as a testing strategy.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../vscode/"><span class="dir">← Previous dive</span>VS Code: extension architecture as the product — process isolation and protocol seams</a>
+  <a href="../elasticsearch/" style="text-align:right"><span class="dir">Next dive →</span>Elasticsearch: a search engine behind a friendly distributed façade</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 12 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

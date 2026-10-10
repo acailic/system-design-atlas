@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LevelDB: the LSM-tree in its teachable form — logs, levels, and immutable tables — System Design Atlas</title>
+<meta name="description" content="LevelDB is Google's distilled storage engine (Jeff Dean &amp; Sanjay Ghemawat, the Bigtable tablet lineage): an ordered key-value store built entirely from append-only structures — a WAL, an in-">
+<meta property="og:title" content="LevelDB: the LSM-tree in its teachable form — logs, levels, and immutable tables — System Design Atlas">
+<meta property="og:description" content="LevelDB is Google's distilled storage engine (Jeff Dean &amp; Sanjay Ghemawat, the Bigtable tablet lineage): an ordered key-value store built entirely from append-only structures — a WAL, an in-">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-put-through-crash-and-back-out-of-get">Walkthrough: one Put, through crash and back out of Get</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>LevelDB: the LSM-tree in its teachable form — logs, levels, and immutable tables</h1>
+    <div class="meta-chips"><span class="chip domain">storage-engine</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/google/leveldb" rel="noopener">BSD-3-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>bb74ef739973a70ca9f0d90788a1da89b788c0ad</code> · 2026-10-08 · <a href="https://github.com/google/leveldb" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">LevelDB is Google&#39;s distilled storage engine (Jeff Dean &amp; Sanjay
+Ghemawat, the Bigtable tablet lineage): an ordered key-value store built
+entirely from <strong>append-only structures</strong> — a WAL, an in-memory skip
+list, and immutable sorted files (SSTables) organized in levels and
+merged by background compaction. It is the smallest complete
+implementation of the write-optimized (LSM) answer to B-trees, small
+enough to read end-to-end in a week, and it begat RocksDB and a decade
+of storage engines. This deep-dive teaches the fundamental trade:
+<strong>sequential writes + amortized reorganization vs read amplification</strong>,
+with almost no incidental complexity around it.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A diary, a scratch page, and a tidy-up robot.</strong> When you tell LevelDB
+something (<code>Put</code>), it does two fast things: writes the fact in pen in a
+diary you never re-read (the WAL — its only job is to survive a crash)
+and scribbles it on a scratch page (the memtable). When the scratch page
+fills up (~4MB), it is copied neatly into a labeled folder (an immutable
+SSTable) and filed into a drawer, and folders from fuller drawers keep
+getting merged into bigger, tidier folders by a tidy-up robot
+(compaction) that works in the background. Each folder wears a magic
+sticker (a Bloom filter) that says &quot;this key is DEFINITELY not in here,&quot;
+so a lookup can skip most drawers without opening them.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> writing in pen at the back of a
+notebook is much faster than erasing and rewriting sorted pages in place
+— so writes stay blazing fast, and the tidying happens later, a little at
+a time, off the critical path.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph write[&quot;write path — single writer at a time, group commit&quot;]
+        PUT[&quot;Put key, val — DBImpl Write (db_impl.cc 1206)&quot;]
+        WAL[&quot;WAL append — db/log_writer.cc&lt;br/&gt;32KB blocks: crc / length / type&quot;]
+        MEM[&quot;memtable — skiplist keyed by user key, seq&lt;br/&gt;db/memtable.cc&quot;]
+        IMMF[&quot;mem frozen to imm, new mem + new WAL&quot;]
+        BT[&quot;BuildTable — db/builder.cc 17&lt;br/&gt;write immutable SSTable to level 0&quot;]
+    end
+    subgraph bg[&quot;background&quot;]
+        COMP[&quot;BackgroundCompaction 708 —&lt;br/&gt;merge SSTables level by level&lt;br/&gt;k-way merge, drops shadowed versions&quot;]
+        MAN[&quot;MANIFEST — log of VersionEdits;&lt;br/&gt;CURRENT names the live manifest&quot;]
+    end
+    subgraph read[&quot;read path — Get (db_impl.cc 1121)&quot;]
+        R1[&quot;mem → imm → levels 0..N&lt;br/&gt;(newest → oldest)&quot;]
+        R2[&quot;Version (version_set.cc 324) → Table&lt;br/&gt;+ Bloom filters skip whole files&quot;]
+    end
+
+    PUT --&gt; WAL
+    PUT --&gt; MEM
+    MEM --&gt;|&quot;~4MB: MakeRoomForWrite 1331&quot;| IMMF --&gt; BT
+    BT --&gt; COMP
+    COMP --&gt; MAN
+    R1 --&gt; R2
+    R2 -.-&gt;|&quot;reads immutable files&quot;| BT
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>Two threads of control: <strong>the foreground</strong> (user calls: Get/Put/Write)
+and <strong>one background compaction thread</strong>, coordinated by one mutex and
+condition variables (<code>db/db_impl.cc:MaybeScheduleCompaction</code>, line 668).</li>
+<li>The <strong>spine</strong> — one <code>Put</code> — is: <code>DBImpl::Write</code> → WAL record → memtable
+insert → (maybe) <code>MakeRoomForWrite</code> (line 1331) freezes/flushes.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-put-through-crash-and-back-out-of-get">Walkthrough: one Put, through crash and back out of Get</h2>
+<p class="walkthrough-intro">The complete life of an LSM record — step through it on the site, or
+read it straight down.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Caller (Put)
+    participant W as DBImpl Write 1206
+    participant L as WAL (log_writer.cc)
+    participant M as memtable skiplist
+    participant BG as compaction thread
+    participant D as disk (SSTables + MANIFEST)
+    C-&gt;&gt;W: Put key, val
+    W-&gt;&gt;L: append record (crc, block-framed) — mutex released
+    W-&gt;&gt;M: insert (user_key, seq) — newest sorts first
+    Note over W,M: durable here; readable by any Get that starts now
+    M-&gt;&gt;D: at ~4MB: freeze mem, BuildTable → L0 SSTable
+    BG-&gt;&gt;D: merge levels, install via MANIFEST VersionEdit
+    Note over BG,D: crash? reopen = replay WAL + replay MANIFEST
+    C-&gt;&gt;W: later: Get key
+    W-&gt;&gt;M: mem → imm → levels, Bloom filters skip files
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="one-writer-many-passengers">One writer, many passengers</h3>
+<p><code>DBImpl::Write</code> (1206) parks
+the caller in a writer queue; the front writer becomes the serialization
+point and <code>BuildBatchGroup</code> merges everyone waiting into one batch —
+group commit for free.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-pen-stroke">The pen stroke</h3>
+<p>The batch is appended to the WAL: 32KB
+blocks of <code>&lt;crc | length | type&gt;</code> with FULL/FIRST/MIDDLE/LAST framing
+(<code>db/log_format.h</code>). A torn write can corrupt at most one block; the
+reader resyncs at the next block boundary. The mutex is <em>released</em>
+during this append and the memtable insert — the slow parts run without
+the lock.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="scribble-on-the-scratch-page">Scribble on the scratch page</h3>
+<p>Each key/value lands in the
+skiplist as <code>(user_key, sequence_number)</code> with the newest version
+sorting first (<code>db/dbformat.h</code>) — lookups always see the latest value,
+and this is what makes snapshots cheap later.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-page-fills">The page fills</h3>
+<p>At ~4MB, <code>MakeRoomForWrite</code> (1331) freezes
+the memtable (<code>mem_</code> becomes <code>imm_</code>), starts a fresh one, and hands the
+frozen page to <code>BuildTable</code> (<code>db/builder.cc:17</code>): iterate in order, emit
+prefix-compressed blocks, an index entry per block, a Bloom filter, and
+the fixed footer — an immutable file appears.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-robot-tidies">The robot tidies</h3>
+<p>The single background thread merges
+levels (<code>BackgroundCompaction</code>, 708): a k-way merge re-sorts runs,
+drops versions shadowed below the oldest snapshot (910–971), and
+installs the new layout by appending a <code>VersionEdit</code> to the MANIFEST
+(<code>VersionSet::LogAndApply</code>, 777). Files are only deleted after that
+edit is durable.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="crash-restart-replay">Crash, restart, replay</h3>
+<p>On reopen, <code>VersionSet::Recover</code>
+(861) replays MANIFEST edits to rebuild the layout, and the WAL is
+replayed into a fresh memtable — stopping at the first bad crc. An
+orphan SSTable from a crashed flush is adopted or deleted, never
+half-visible, because <em>installation is the manifest write</em>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="read-it-back">Read it back</h3>
+<p><code>DBImpl::Get</code> (1121) takes a snapshot seq,
+then walks mem → imm → levels via <code>Version::Get</code> (324); Bloom filters
+skip whole files, and the first version found (newest wins) is the
+answer.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="append-merge-never-rewrite">Append, merge, never rewrite</h3>
+<p>The key was durable at step
+2, searchable at step 3, and ordered-by-merge forever after — the LSM
+bargain: fast writes today, amortized sorting later.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="memtable-arena-skip-list-db-memtable-cc-db-skiplist-h">MemTable = arena + skip list (<code>db/memtable.cc</code>, <code>db/skiplist.h</code>)</h3>
+<p>The skiplist (<code>db/skiplist.h:40</code>, <code>kMaxHeight = 12</code>, <code>kBranching = 4</code>
+at lines 100/242) keys entries by <code>(user_key, sequence_number)</code> with
+descending sequence, so the newest version sorts first and lookups see
+the latest value. Memory comes from an <code>Arena</code> (<code>util/arena.h:16</code>) —
+bump allocation, freed wholesale; the skip list needs no per-node
+dealloc because the memtable lives and dies as a unit. Why a skip list
+not a red-black tree: lock-free-friendly, simpler code, and — crucial
+for a structure dumped to a sorted file — iteration order falls out of
+the same descent as search.</p>
+<h3 id="the-wal-record-format-db-log-format-h-db-log-writer-cc">The WAL record format (<code>db/log_format.h</code>, <code>db/log_writer.cc</code>)</h3>
+<p>Records are 32KB blocks of <code>&lt;4-byte crc | 2-byte length | 1-byte type&gt;</code>
+(<code>kHeaderSize</code> at <code>log_format.h:30</code>) with types FULL/FIRST/MIDDLE/LAST
+(<code>enum RecordType</code>, line 14) for splitting large batches across blocks.
+Why blocks: a torn write at crash time corrupts at most one block, and
+the reader resyncs at the next block boundary — recovery reads the log
+and stops at the first bad crc. The log is <em>the</em> durability boundary;
+everything after it is a cache.</p>
+<h3 id="sstables-table">SSTables (<code>table/</code>)</h3>
+<p>A table is: data blocks (prefix-compressed key/value chunks) + an
+optional filter block (Bloom) + an index block (one entry per data
+block, its key ≥ all keys in that block) + a fixed <strong>footer</strong> with the
+index/metaindex handles and magic number (<code>table/format.cc:Footer::EncodeTo</code>,
+line 32). Reads use a two-level iterator (<code>table/two_level_iterator.cc:18</code>):
+index block → data block. Why immutable sorted files: write once, then
+mmap/read-only forever — no torn structures, trivially shareable
+between readers and the compactor, cheap crc verification per block.</p>
+<h3 id="version-versionset-manifest-db-version-set-cc">Version / VersionSet / MANIFEST (<code>db/version_set.cc</code>)</h3>
+<p>The <em>current layout</em> (which files, which levels, which compaction
+pointers) is itself an append-only log: every compaction appends a
+<code>VersionEdit</code> to the MANIFEST; <code>CURRENT</code> names the live manifest;
+<code>VersionSet::Recover</code> (line 861) replays edits at startup. Why: the file
+layout is mutable state, and LevelDB refuses special treatment — mutable
+state gets the same log+replay discipline as user data
+(<code>VersionSet::LogAndApply</code>, line 777).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One foreground mutex</strong> guards everything mutable; the big lesson is
+<em>what runs outside it</em>: WAL append + memtable insert happen with
+<code>mutex_.Unlock()</code> (see <code>DBImpl::Write</code>, db_impl.cc:1206-1258 — a
+single front-of-queue writer acts as the serialization point for the
+whole batch group, so the lock is dropped during the slow parts).</li>
+<li><strong>Group commit</strong>: queued writers are merged by <code>BuildBatchGroup</code> into
+one WAL record — batching under load for free.</li>
+<li><strong>Snapshots are sequence numbers</strong> (<code>db/snapshot.h</code>): reads pin a seq;
+compaction must retain versions above <code>smallest_snapshot</code>
+(<code>db/db_impl.cc:910-971</code>) — MVCC with two dozen lines, because the
+key already carries the version.</li>
+<li><strong>Failure/recovery</strong>: on open, replay WAL into a fresh memtable
+(<code>DBImpl::Recover</code>); if the MANIFEST is torn, its log format means
+replay stops at the last complete edit. A crash mid-flush leaves an
+orphan SSTable that is either adopted (via manifest edit) or deleted —
+never half-visible, because <em>installation is the manifest write</em>.</li>
+<li><strong>Overload = backpressure, not errors</strong>: too many L0 files → writes
+slow down (<code>kL0_SlowdownWritesTrigger</code>, db_impl.cc:1342), then stall
+(<code>kL0_StopWritesTrigger</code>, line 1362) until compaction drains —
+<code>MakeRoomForWrite</code> (1331) is where the engine chooses delay over
+unbounded memory.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph fg[&quot;foreground — user calls&quot;]
+        MUTEX[&quot;one mutex guards mutable state&quot;]
+        WR[&quot;writer queue — front writer serializes&lt;br/&gt;the batch group; lock released during WAL + insert&quot;]
+    end
+    subgraph snaps[&quot;snapshots&quot;]
+        SN[&quot;a snapshot = a sequence number&lt;br/&gt;compaction keeps versions above&lt;br/&gt;smallest_snapshot (910-971)&quot;]
+    end
+    subgraph bgd[&quot;background — one thread&quot;]
+        BGT[&quot;flush + compaction share it (the honest wart)&lt;br/&gt;coordinated by MaybeScheduleCompaction 668&quot;]
+    end
+    subgraph overload[&quot;overload = backpressure, not errors&quot;]
+        SLOW[&quot;kL0 SlowdownWritesTrigger 1342&lt;br/&gt;writes get slower&quot;]
+        STOP[&quot;kL0 StopWritesTrigger 1362&lt;br/&gt;writes stall until compaction drains&quot;]
+    end
+
+    WR --&gt; MUTEX
+    MUTEX --&gt; BGT
+    BGT --&gt; SLOW --&gt; STOP
+    SN -.-&gt;|&quot;bounds what compaction may drop&quot;| BGT
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The public surface (<code>include/leveldb/</code>) is a masterclass in small C++
+APIs: <code>DB::Put/Get/Delete/Write(WriteBatch)</code>, <code>Iterator</code> (with the
+Seek/Next/Valid contract), <code>Slice</code> (non-owning view — no string
+copies across the boundary), <code>Status</code> (state machine, not
+exceptions).</li>
+<li><strong>Seams, each one interface</strong>: <code>Comparator</code> (custom key orders — the
+engine never assumes bytes), <code>Env</code> (<code>include/leveldb/env.h</code> — all OS
+dependency: files, time, threads; <code>env_posix.cc</code>/<code>env_windows.cc</code> are
+the two real implementations), <code>FilterPolicy</code> (pluggable Bloom or
+none), <code>Cache</code> (block cache as a sharded LRU, swappable), plus
+C bindings (<code>db/c.cc</code>) for embedding from other languages.</li>
+<li>Honest wart: a single background thread means compaction and flush
+contend; no range deletes; no built-in checksums per-file beyond
+blocks. RocksDB exists to fix exactly these — read it next to see
+<em>how requirements erode a clean design</em>.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-lsm-log-merge-over-b-tree-in-place-update">Trade-off 1: LSM (log + merge) over B-tree (in-place update)</h3>
+<ul>
+<li><strong>Tension:</strong> disks/streaming media love sequential appends; point
+reads love sorted in-place pages.</li>
+<li><strong>Choice:</strong> writes only append (WAL) or insert (memtable); sorted
+order is created later by merging immutable files.</li>
+<li><strong>Evidence:</strong> <code>DBImpl::Write</code> (1206) touches only log + skiplist;
+ordering emerges in <code>BackgroundCompaction</code> (708) → <code>DoCompactionWork</code>
+merging iterators (a k-way merge over <code>MergingIterator</code>).</li>
+<li><strong>Given up:</strong> read path touches memtable + imm + every level whose
+range covers the key (<code>Version::Get</code>, version_set.cc:324) — read
+amplification is the tax; mitigated by Bloom filters
+(<code>util/bloom.cc:CreateFilter</code>).</li>
+<li><strong>Verdict:</strong> right for write-heavy/scan-heavy workloads (queues,
+feeds, telemetry); wrong for strict p99 point-read stores — the
+exact inverse of a B-tree engine like SQLite&#39;s layer.</li>
+</ul>
+<h3 id="trade-off-2-immutable-files-manifest-over-mutable-file-map">Trade-off 2: immutable files + manifest over mutable file map</h3>
+<ul>
+<li><strong>Tension:</strong> the level layout changes constantly; changing it safely
+under crashes needs its own transaction mechanism.</li>
+<li><strong>Choice:</strong> files never change; layout changes are logged edits;
+live layout = replay of log.</li>
+<li><strong>Evidence:</strong> <code>VersionSet::LogAndApply</code> (777) writes the edit
+<em>then</em> installs the new <code>Version</code>; deletes of obsolete files happen
+only after the edit is durable.</li>
+<li><strong>Given up:</strong> an extra level of indirection at startup (replay), and
+orphan-file GC.</li>
+<li><strong>Verdict:</strong> this is the &quot;WAL your own metadata&quot; pattern — steal it
+for any system whose <em>configuration</em> must survive crashes.</li>
+</ul>
+<h3 id="trade-off-3-leveled-compaction-with-write-stall-backpressure-over-proportional-resources">Trade-off 3: leveled compaction with write-stall backpressure over proportional resources</h3>
+<ul>
+<li><strong>Tension:</strong> merge work must keep up with write rate; bounding space
+and read amp requires <em>eventually</em> compacting everything.</li>
+<li><strong>Choice:</strong> level sizes grow ×10 (<code>MaxBytesForLevel</code>,
+version_set.cc:41); L0 overlaps, deeper levels are disjoint sorted
+runs; compaction picks by score (<code>size/level_bytes</code>, line 1056);
+when L0 backs up, writes slow then stall (MakeRoomForWrite, 1331).</li>
+<li><strong>Evidence:</strong> the two triggers (<code>kL0_SlowdownWritesTrigger</code> 1342,
+<code>kL0_StopWritesTrigger</code> 1362) — latency degradation as a designed
+control system input, not an accident.</li>
+<li><strong>Given up:</strong> bounded worst-case write latency (stalls are real);
+tuning is per-workload.</li>
+<li><strong>Verdict:</strong> right when throughput is the product and slowdowns are
+acceptable; RocksDB&#39;s tiered compaction and rate limits are the
+industrial-strength evolution of this same dial.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>include/leveldb/db.h</code> + <code>include/leveldb/write_batch.h</code> — the whole
+user contract in two headers (~200 lines): note <code>Slice</code>, <code>Status</code>,
+and that Delete is Put with a tombstone.</li>
+<li><code>db/db_impl.cc:DBImpl::Write</code> (1206) — the write spine end-to-end:
+writer queue, group commit, WAL append (mutex released!), memtable
+insert, sequence bump.</li>
+<li><code>db/log_format.h</code> (whole file, ~35 lines) + <code>db/log_writer.cc</code> —
+the record/block framing; then <code>db/log_reader.cc:ReadRecord</code> for the
+crash-resync story.</li>
+<li><code>db/skiplist.h</code> — one of the most-commented skip lists anywhere:
+read the template, the height probability (line 242), and the memory
+barriers discussion; then <code>db/memtable.cc</code> (200 lines) to see the
+<code>(key,seq)</code> internal-key encoding (<code>db/dbformat.h</code>).</li>
+<li><code>db/db_impl.cc:MakeRoomForWrite</code> (1331) — where flushes are
+triggered and where writes learn to wait; identify the two
+triggers.</li>
+<li><code>db/builder.cc:BuildTable</code> (17) + <code>table/table_builder.cc</code> — watch
+a memtable iteration become an immutable file: blocks, restart
+points (prefix compression), index entries.</li>
+<li><code>table/format.cc</code> (Footer, line 32) + <code>table/table.cc</code> — read path
+of one file: footer → index → two-level iterator → block; then
+<code>table/filter_block.cc</code> + <code>util/bloom.cc</code> — the Bloom filter that
+makes level scans affordable.</li>
+<li><code>db/db_impl.cc:DBImpl::Get</code> (1121) — the full read spine: snapshot
+seq, mem → imm → Version search, ref-counting to read lock-free.</li>
+<li><code>db/version_set.cc:Version::Get</code> (324) — per-level file selection
+(<code>SomeFileOverlapsRange</code>, level search order); notice seeks count as
+compaction-triggering reads (seek compaction).</li>
+<li><code>db/db_impl.cc:BackgroundCompaction</code> (708) and <code>DoCompactionWork</code>
+— the k-way merge, dropping shadowed versions below
+<code>smallest_snapshot</code> (lines 910-971), installing via
+<code>VersionSet::LogAndApply</code> (777).</li>
+<li><code>db/version_set.cc:VersionSet::Recover</code> (861) — startup as replay:
+CURRENT → manifest edits → Version; then <code>db/repair.cc</code> — the
+disaster-recovery tool that rebuilds a manifest from orphan files.</li>
+</ol>
+<p>You have now traced one key from <code>Put</code> to disk, through crash, restart,
+compaction, and back out of <code>Get</code> — the complete life of an LSM record.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make writes append-only and buy order later</strong> — sequential I/O plus
+background merge is the throughput recipe for any disk-bound system.</li>
+<li><strong>Log your own metadata</strong> (manifest pattern): configuration changes
+get the same crash-safety machinery as data, instead of ad-hoc
+two-phase file swaps.</li>
+<li><strong>Version your keys, snapshot by sequence number</strong> — MVCC falls out
+of carrying the version in the key; readers never block writers.</li>
+<li><strong>Degrade before you fail</strong>: slowdown triggers then stop triggers
+(MakeRoomForWrite) turn overload into latency, protecting
+correctness and memory bounds.</li>
+<li><strong>Quarantine the OS behind one class</strong> (<code>Env</code>) — LevelDB ports to a
+new platform by implementing an interface, not by sprinkling ifdefs.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong> — the friendliest complete engine in the
+atlas; comments are plentiful and the C++ is deliberately plain.</li>
+<li>Budget: ~6 hours for the reading path; the whole <code>db/</code> + <code>table/</code>
+core is readable in a focused week.</li>
+<li>Prerequisites: skip lists (LevelDB&#39;s own comments suffice), what a
+Bloom filter is (any 5-minute explainer), mmap basics for reading
+<code>table.cc</code>.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The LevelDB README and <code>doc/</code> directory in-repo (log format, impl
+notes).</li>
+<li>O&#39;Neil et al., &quot;The Log-Structured Merge-Tree&quot; (1996) — the paper
+this engine implements.</li>
+<li>RocksDB&#39;s wiki (<a href="https://github.com/facebook/rocksdb/wiki">https://github.com/facebook/rocksdb/wiki</a>) — read as
+&quot;what production demanded after this design.&quot;</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../git/"><span class="dir">← Previous dive</span>git: the version control that is really a content-addressed database</a>
+  <a href="../nginx/" style="text-align:right"><span class="dir">Next dive →</span>nginx: shared-nothing processes, state machines, and ownership by lifetime</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 4 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -15,27 +15,56 @@ single master-computed, diff-published world model), and
 **scatter-gather query execution** across shards — and what each layer
 costs at scale.
 
+## Explain like I'm 10
+
+**A library with a "today" drawer.** When a new book's index card
+arrives, the librarian drops it into a "today" pile (the in-memory
+buffer) — writing to the pile is instant, so nobody waits. Every second
+or so, a librarian photocopies the whole pile into a new fixed card
+catalog that anyone can search (a refresh opens a new segment) — THAT is
+why new things take about a second to become findable (near-real-time).
+Every card written is also noted in a safety diary (the translog), so a
+power cut loses nothing even though the photocopy isn't permanent yet;
+and periodically the small catalogs are glued into bigger ones (segment
+merges) so the shelves don't overflow with tiny catalogs. Searching a
+huge library: each department (shard) finds its own top-10 cards, the
+head librarian merges the lists and fetches only the winning books
+(two-phase search).
+
+**Why the grown-ups did it this way:** photocopying once a second keeps
+writing fast while search still feels instant — and keeping "can be
+found" (refresh) separate from "is safe forever" (translog fsync) lets
+each run at the speed its job needs.
+
 ## 1. Architecture overview
 
-```
- REST/JSON (index doc, search, bulk)
-     │
- ┌───▼──── node ────────────────────────────────────────────────┐
- │ Transport layer (netty) → handlers                          │
- │ ClusterApplierService ← diffs ── Coordinator (118):         │
- │   master election + publishing (cluster/coordination/)      │
- │ MasterService (85): batch cluster-state updates             │
- │   → AllocationService: shard placement/routing table        │
- ├──────────────────────────────────────────────────────────────┤
- │ IndicesService → IndexShard (218) → Engine:                 │
- │   InternalEngine (154) over Lucene segments                 │
- │   write path: translog (103) + in-memory indexer            │
- │   refresh (2744) → visible; flush (Engine:1599) → fsync     │
- │   forceMerge (3172): segment compaction                     │
- ├──────────────────────────────────────────────────────────────┤
- │ search: SearchService (190) — per-shard query/fetch;        │
- │   coordinating node runs phases (AbstractSearchAsyncAction) │
- └──────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    REST["REST / JSON — index doc, search, bulk"]
+    subgraph node["node"]
+        NETW["transport layer (netty) → handlers"]
+        subgraph coord["cluster coordination"]
+            CO["Coordinator (118) — master election + publishing"]
+            MS["MasterService (85) — batched cluster-state updates"]
+            ALLOC["AllocationService — shard placement / routing table"]
+            CAS["ClusterApplierService ← diffs"]
+        end
+        subgraph shard["IndicesService → IndexShard (218) → InternalEngine (154)"]
+            TL["translog (103) + in-memory indexer"]
+            REF["refresh (2744) → new segment, docs searchable"]
+            FL["flush (1599) → fsync segments, clear translog"]
+            FM["forceMerge (3172) — segment compaction"]
+        end
+        SS["SearchService (190) — per-shard query / fetch"]
+    end
+
+    REST --> NETW
+    NETW --> CO
+    MS -->|"ClusterState + diff (1330)"| CAS
+    MS --> ALLOC
+    NETW --> TL --> REF --> FL
+    FL -.-> FM
+    NETW --> SS
 ```
 
 - The **spine** — index one document, then find it — is: the write
@@ -46,6 +75,67 @@ costs at scale.
   background merges (`forceMerge:3172` machinery) compact segments.
   A search fans out to each shard's `SearchService` (190), merges
   sorted top-ids, then fetches full documents (two-phase).
+
+## Walkthrough: index one document, then find it
+
+The spine as a story — step through it on the site or read straight
+down. The key insight: "searchable" and "durable" are two different
+clocks ticking at different speeds.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant E as InternalEngine (154)
+    participant T as translog (103)
+    participant L as Lucene segments
+    participant S as SearchService (190)
+    C->>E: PUT doc (routed to shard by _id)
+    E->>T: append + checkpoint — ack (durable)
+    E->>L: add to in-memory buffer (not searchable yet)
+    Note over E,L: ~1s later: refresh (2744) → new segment → searchable
+    C->>S: GET _search
+    S->>S: query phase: each shard returns sorted top-K ids
+    S->>S: coordinator merges, then fetch phase pulls full docs
+    S-->>C: results
+    Note over L: later: flush (1599) fsyncs segments, clears translog;<br/>forceMerge (3172) compacts segments
+```
+
+**Step 1 — Route the document.** The PUT lands on any node; the
+coordinating layer hashes the `_id` to pick the shard — the shard is
+the unit of indexing, search, and failure (`IndexShard`, 218).
+
+**Step 2 — Write it twice, cheaply.** `InternalEngine` (154) appends
+the operation to the per-shard translog (`Translog.java:103`, with its
+checksummed checkpoint) AND to Lucene's in-memory buffer. The translog
+append makes it durable; the buffer makes it *almost* searchable.
+
+**Step 3 — The photocopy.** About once a second, `refresh` (2744)
+turns the in-memory buffer into a new immutable segment — now the
+document is findable by search. Nothing was fsynced yet: searchable ≠
+durable, by design.
+
+**Step 4 — Search fans out.** The client's search hits a coordinating
+node, which scatters the query phase to one copy of every shard
+(`SearchService:190` per shard) — primaries or replicas, the routing
+table decides.
+
+**Step 5 — Top-K, two phases.** Each shard runs the query and returns
+only sorted top-K ids + sort keys; the coordinator merges those lists,
+then runs the fetch phase for just the final page's documents —
+`AbstractSearchAsyncAction` / `FetchSearchPhase` orchestrate fan-out,
+merge, timeouts, and partial-failure policy.
+
+**Step 6 — The slow clocks.** Later, `flush` (`Engine.java:1599`)
+fsyncs segments and clears the translog; background merges compact
+small segments into bigger ones (the `forceMerge:3172` machinery).
+Crash before flush? The translog replays on restart — recovery is
+`IndexShard` replaying the diary against the last flushed segments.
+
+**Outcome — Found in a second, safe forever.** The document became
+searchable ~1s after the write (refresh), durable at the translog
+policy's speed, and findable across any number of shards — because
+finding was reduced to merging sorted top-K lists.
 
 ## 2. Core data structures — and why these
 
@@ -107,6 +197,31 @@ database.
   breakers on request/jvm memory (real memory accounting baked into
   search aggregation) — search's unboundedness is fenced early, a
   lesson from years of OOM incidents.
+
+```mermaid
+flowchart LR
+    subgraph coordlayer["coordination"]
+        CO2["Coordinator (118) — master election<br/>by majority term voting (Raft lineage)"]
+        LC["LeaderChecker (59) / LagDetector (54)<br/>demote stuck leaders, exclude laggards"]
+        MS2["MasterService (85) — single-threaded<br/>state computer, batched updates"]
+    end
+    subgraph writeside["per shard"]
+        ENG["single writer through the engine<br/>(Lucene commits exclusive)"]
+        SEQ["optimistic concurrency:<br/>seq_no / primary_term per op<br/>(mirrors k8s resourceVersion)"]
+    end
+    subgraph overload2["overload fencing"]
+        TP["thread-pool queues per operation class"]
+        CB["circuit breakers — real memory accounting<br/>baked into search aggregation"]
+    end
+    FAIL2["failure: replicas take over (routing flips);<br/>translog replay recovers a shard;<br/>rejoining node = lagging replica resync"]
+
+    CO2 --> LC
+    CO2 --> MS2
+    MS2 -.->|"placement as pure computation"| ENG
+    ENG --> SEQ
+    TP --> CB
+    FAIL2 -.-> ENG
+```
 
 ## 4. API and extension design
 

@@ -14,29 +14,48 @@ sparse indexes), the replication machinery (ISR + high watermark), and
 the newest lesson: Kafka's own metadata became an event-sourced raft log
 (KRaft), the system eating its own dog food.
 
+## Explain like I'm 10
+
+**A conveyor belt of numbered boxes.** Kafka is a very long belt that
+only moves forward (the append-only log). Senders drop sealed boxes onto
+it (batches of records), and each box gets a number as it lands
+(its offset). Every reader (a consumer group) walks the belt at their own
+pace — fast walkers and slow walkers never collide — and each remembers
+their box number in a little notebook (committed offsets... stored on
+ANOTHER belt, because everything in Kafka is a belt). The belt is long
+(retention), so a brand-new reader can go back to box 1 and replay
+everything. Copies of the belt run at friends' houses (replicas), and a
+special marker (the high watermark) shows how far the belt has been
+copied — readers may only read up to the marker, never past it.
+
+**Why the grown-ups did it this way:** belts (disks and networks) are
+fastest when moving in one direction without stopping — and storing each
+reader's position as data means nobody has to keep a giant "who received
+what" list.
+
 ## 1. Architecture overview
 
-```
- producer ──► broker ──► broker ──► broker        (a cluster; each
-              │topic-partition = one log dir       partition has one
-              ▼                                    leader replica)
- ┌──────────────── broker (core/.../server) ────────────────┐
- │ SocketServer (network/SocketServer.scala:71)             │
- │   acceptor → N processor threads (per-listener)          │
- │ request queue → KafkaRequestHandler pool (91)            │
- │   → KafkaApis.handleProduceRequest (401)                 │
- │     / handleFetchRequest (568)                           │
- │ ReplicaManager.appendRecords (638) ─► Partition           │
- │   └► UnifiedLog.appendAsLeader (storage/…/UnifiedLog:1062)│
- │        └► LogSegment.append (250) → .log + .index + .time │
- │ delayed ops wait in DelayedOperationPurgatory             │
- │   (server-common/…/purgatory/DelayedOperationPurgatory:38)│
- ├──────────────────────────────────────────────────────────┤
- │ KRaft: metadata raft log + QuorumController              │
- │   (metadata/…/QuorumController.java:177)                 │
- │ group coordinator: group-coordinator/…/GroupCoordinator* │
- └──────────────────────────────────────────────────────────┘
- consumer groups pull: fetch offsets, commit positions, rebalance
+```mermaid
+flowchart TD
+    P["producer — batches records, compresses"]
+    subgraph broker["broker (core/.../server)"]
+        SS["SocketServer (network/SocketServer.scala 71)<br/>acceptor → N processor threads (NIO selectors)"]
+        RQ["request queue"]
+        RH["KafkaRequestHandler pool (91)"]
+        API["KafkaApis<br/>handleProduceRequest (401) / handleFetchRequest (568)"]
+        RM["ReplicaManager.appendRecords (638)"]
+        LOG["UnifiedLog.appendAsLeader (1062)<br/>→ LogSegment.append (250)<br/>.log + sparse .index + .timeIndex"]
+        PURG["DelayedOperationPurgatory (38)<br/>timer wheel + key-indexed watchers"]
+        KR["KRaft: metadata raft log + QuorumController (177)<br/>group coordinator: GroupCoordinatorShard"]
+    end
+    CG["consumer groups — pull, fetch offsets,<br/>commit positions, rebalance"]
+    F["followers — ReplicaFetcherThread<br/>fetch from the leader log like consumers"]
+
+    P --> SS --> RQ --> RH --> API --> RM --> LOG
+    RM -->|"acks=all waits here"| PURG
+    LOG --> F
+    LOG -->|"read up to the high watermark"| CG
+    KR -.->|"metadata for both"| RM
 ```
 
 - The **spine** — one produce — is: `handleProduceRequest`
@@ -49,6 +68,71 @@ the newest lesson: Kafka's own metadata became an event-sourced raft log
   response waits in purgatory until followers replicate.
 - A *partition* is the unit of everything: ordering, leadership,
   retention, parallelism. Topics are just names over partition sets.
+
+## Walkthrough: one produce with acks=all, then a consumer reads it
+
+The spine as a story — step through it on the site or read straight
+down. Watch where the record becomes durable and where it becomes
+visible: those are two different moments.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant N as broker network (SocketServer)
+    participant H as KafkaApis + ReplicaManager
+    participant L as UnifiedLog.appendAsLeader (1062)
+    participant F as follower replicas
+    participant C as Consumer
+    P->>N: produce batch (acks=all)
+    N->>H: request queue → handler pool
+    H->>L: appendRecords → partition leader, per-partition lock
+    L->>L: LogSegment.append — sequential write + sparse index entry
+    H-->>P: response parked in purgatory (not yet acked)
+    L->>F: followers fetch like consumers, replicate
+    F-->>L: caught up → ISR advances
+    L->>L: maybeIncrementLeaderHW (1012) — high watermark moves
+    L-->>P: purgatory completes → ack sent
+    L->>C: fetch returns data up to the high watermark (zero-copy)
+```
+
+**Step 1 — The batch leaves.** The producer groups records into a
+compressed batch with a base offset and CRC — the batch is the unit of
+send, of append, and of retry, so throughput is paid once, everywhere.
+
+**Step 2 — Into the broker.** An acceptor hands the connection to a
+processor thread (NIO selector, `network/SocketServer.scala:71`); the
+request lands on a queue consumed by a `KafkaRequestHandler`
+(`server/KafkaRequestHandler.scala:91`), which calls
+`KafkaApis.handleProduceRequest` (401).
+
+**Step 3 — Append to the leader.** `ReplicaManager.appendRecords` (638)
+routes to the partition leader; `UnifiedLog.appendAsLeader` (1062) takes
+the per-partition lock — one partition's append is serial, and that
+serialness IS the ordering guarantee — and `LogSegment.append` (250)
+writes the batch sequentially, adding one sparse index entry per ~4KB.
+
+**Step 4 — Wait in purgatory.** With `acks=all`, the produce response
+parks in `DelayedOperationPurgatory` (`server-common/.../purgatory/`, 38)
+— a timer wheel plus per-key watchers — until the ISR replicates the
+record or the request times out.
+
+**Step 5 — Followers copy the belt.** `ReplicaFetcherThread`s (30) fetch
+from the leader exactly like consumers; the leader truncates divergent
+tails using leader epochs (zombie-leader fencing). When the in-sync set
+has the record, `maybeIncrementLeaderHW` (`cluster/Partition.scala:1012`)
+moves the high watermark.
+
+**Step 6 — Ack, and only then visible.** Purgatory completes the parked
+response → the producer's ack returns. Consumers fetching see data only
+up to the high watermark (`handleFetchRequest` 568 → `LogSegment.read`
+435), served from the page cache to the socket by zero-copy
+`transferFrom` (`FileRecords.writeTo:280`).
+
+**Outcome — Durable, then visible.** One batch is now: (a) on the
+leader's disk, (b) on every in-sync replica, (c) readable by any
+consumer — and replayable forever by any NEW consumer that starts at
+offset 0. The dumb belt did all the work.
 
 ## 2. Core data structures — and why these
 
@@ -114,6 +198,27 @@ sane.
   partition ownership on membership changes — the new-generation
   coordinator is itself an event-sourced state machine in
   `group-coordinator/.../GroupCoordinatorShard.java`.
+
+```mermaid
+flowchart LR
+    subgraph net["network — role-partitioned threads"]
+        ACC["acceptor — owns the listener socket"]
+        PROC["N processor threads — NIO selectors,<br/>one per listener group (SocketServer 71)"]
+    end
+    subgraph work["request handling"]
+        RQ["request queue"]
+        POOL["KafkaRequestHandler pool (91)<br/>run loop at 108"]
+    end
+    subgraph logthreads["log engine — lock per partition"]
+        LOCK["each partition: its own lock.<br/>Different partitions append in parallel;<br/>one partition's append is serial = ordering"]
+        PURG["purgatory timer wheel (38)<br/>waiting is the common case"]
+    end
+    KR["KRaft — QuorumController (177)<br/>metadata as raft log; brokers + controller<br/>boot from the same metadata log"]
+
+    ACC --> PROC --> RQ --> POOL --> LOCK
+    LOCK --> PURG
+    KR -.->|"leadership + config"| LOCK
+```
 
 ## 4. API and extension design
 

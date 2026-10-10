@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQLite: a database as a layered library — and a query as compiled bytecode — System Design Atlas</title>
+<meta name="description" content="SQLite is the most deployed database in the world — every phone, browser, and messaging app embeds it — and it earned that by two architectural commitments: it is a library, not a server (th">
+<meta property="og:title" content="SQLite: a database as a layered library — and a query as compiled bytecode — System Design Atlas">
+<meta property="og:description" content="SQLite is the most deployed database in the world — every phone, browser, and messaging app embeds it — and it earned that by two architectural commitments: it is a library, not a server (th">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-insert-from-sql-text-to-bytes-on-disk">Walkthrough: one INSERT from SQL text to bytes on disk</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>SQLite: a database as a layered library — and a query as compiled bytecode</h1>
+    <div class="meta-chips"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/sqlite/sqlite" rel="noopener">public domain</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>d76e14d85ee6688763c9e91ab95bfe33652b1684</code> · 2026-10-10, version 3.55.0 · <a href="https://github.com/sqlite/sqlite" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">SQLite is the most deployed database in the world — every phone, browser,
+and messaging app embeds it — and it earned that by two architectural
+commitments: it is a <strong>library, not a server</strong> (the database file is the
+contract), and it is <strong>strictly layered</strong>, with every environment
+assumption quarantined behind one interface. This deep-dive teaches how a
+SQL statement becomes bytecode for a tiny virtual machine, how pages flow
+through pager to disk, and how crash-safety is layered (journal vs WAL) —
+the same problems a client/server database solves, solved without a
+process of its own.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A magic cookbook that lives inside your toy box.</strong> Most databases are
+restaurants: you phone a waiter (a server process) who talks to the
+kitchen. SQLite is a cookbook that lives in YOUR box — nothing to
+install, nothing to call. You ask a question in a special language (SQL);
+the book turns your question into a little recipe card (a bytecode
+program for the VDBE virtual machine); a tiny cook follows the card one
+step at a time (<code>sqlite3VdbeExec</code>). The cook reads and writes recipe
+pages stored in one box (b-tree pages in the single database file), and a
+careful librarian (the pager) makes sure nothing is ever half-rewritten:
+either the librarian photocopies a page before changing it, so juice
+spilled mid-recipe can be undone (the rollback journal), or the librarian
+writes new pages at the back of a notebook so friends can keep reading
+the old pages while you write (WAL mode). The book even works on any
+shelf — phones, browsers, planes — because the only thing it needs to
+know about the outside world is one small adapter (the VFS).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> putting the whole database in one
+file, built from layers that each only talk to their neighbor, made it
+run anywhere with zero setup — which is why it is the most deployed
+database on earth.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    SQL[&quot;SQL text&quot;]
+    PREP[&quot;sqlite3_prepare — src/prepare.c sqlite3Prepare 703&quot;]
+    TOK[&quot;tokenizer — src/tokenize.c&lt;br/&gt;(lemon grammar in src/parse.y)&quot;]
+    GEN[&quot;code generators — src/build.c, insert.c, select.c&lt;br/&gt;emit VDBE opcodes&quot;]
+    subgraph vdbe[&quot;VDBE — src/vdbe.c sqlite3VdbeExec 903&lt;br/&gt;giant switch: OP_Transaction, OP_OpenRead,&lt;br/&gt;OP_Column, OP_Seek, OP_Insert, OP_ResultRow&lt;br/&gt;sqlite3_step drives this loop&quot;]
+        PROG[&quot;Op array + registers aMem + cursors&quot;]
+    end
+    BT[&quot;btree layer — src/btree.c&lt;br/&gt;table and index b-trees over 4KB pages&quot;]
+    PG[&quot;pager — src/pager.c&lt;br/&gt;page cache, rollback journal, WAL, savepoints&quot;]
+    VFS[&quot;VFS — src/os_unix.c / os_win.c&lt;br/&gt;sqlite3_vfs_register (os.c 408)&quot;]
+    FILES[(&quot;database file +&lt;br/&gt;journal / -wal / -shm files&quot;)]
+
+    SQL --&gt; PREP --&gt; TOK --&gt; GEN --&gt;|&quot;VDBE program&quot;| PROG
+    PROG --&gt; BT --&gt; PG --&gt; VFS --&gt; FILES
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>The <strong>spine</strong> — the story of one <code>SELECT</code>/<code>INSERT</code> — is the vertical
+path above. Each layer speaks only to its neighbors; the btree layer
+has <em>no idea</em> what SQL is, the pager has no idea what a btree is.</li>
+<li>The layer contracts are documented as header comments at the top of
+each file — read the first ~300 lines of <code>src/btree.c</code>, <code>src/pager.c</code>,
+and <code>src/btreeInt.h</code> (the file-format spec lives in prose there) before
+any code.</li>
+<li>No network, no daemon: <code>sqlite3_open</code> (<code>src/main.c:3757</code> →
+<code>openDatabase</code> at 3388) is a library call; concurrency is file locking
+(POSIX advisory locks in <code>src/os_unix.c</code>).</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-insert-from-sql-text-to-bytes-on-disk">Walkthrough: one INSERT from SQL text to bytes on disk</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site, or read it top to
+bottom here. One <code>INSERT INTO users VALUES (7, &#39;ada&#39;)</code> travels the whole
+stack.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant A as App (sqlite3_step)
+    participant V as VDBE (vdbe.c 903)
+    participant B as btree layer
+    participant P as pager
+    participant D as VFS / disk
+    A-&gt;&gt;V: sqlite3_step — run the compiled program
+    V-&gt;&gt;P: OP_Transaction — begin write, lock state machine
+    V-&gt;&gt;B: OP_OpenWrite — cursor on the table b-tree
+    V-&gt;&gt;B: OP_Insert — write the new row into a leaf page
+    B-&gt;&gt;P: dirty page — journal original (or append to -wal)
+    V-&gt;&gt;P: OP_Halt — commit
+    P-&gt;&gt;D: journal deleted / WAL kept for readers, fsync per policy
+    A--&gt;&gt;A: sqlite3_step returns SQLITE_DONE
+    Note over P,D: crash before commit? next open replays the hot journal (pager_playback 2872)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="compile-the-question">Compile the question</h3>
+<p><code>sqlite3_prepare</code> (<code>src/prepare.c:703</code>)
+runs the pipeline: the tokenizer (<code>src/tokenize.c:sqlite3GetToken</code>, 273)
+feeds the LEMON-generated parser (<code>src/parse.y</code> is the readable grammar),
+the planner picks a strategy, and code generators emit a VDBE program —
+for our INSERT, <code>src/insert.c:sqlite3Insert</code> (888) emits constraint
+checks, rowid assignment, and index maintenance as opcodes.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="step-the-machine">Step the machine</h3>
+<p><code>sqlite3_step</code> (<code>src/vdbeapi.c:980</code>) is a
+thin driver around <code>sqlite3VdbeExec</code> (<code>src/vdbe.c:903</code>): one <code>for(;;)</code>
+loop, one colossal switch, operands in registers <code>aMem[]</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="open-the-transaction">Open the transaction</h3>
+<p><code>OP_Transaction</code> (4246) asks the
+pager to begin a write: its state machine walks <code>PAGER_READER → WRITER_LOCKED → WRITER_CACHEMOD</code>, and in journal mode the original pages
+are saved to the rollback journal before any modification.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="position-and-write">Position and write</h3>
+<p><code>OP_OpenWrite</code> (the write-side sibling
+of <code>OP_OpenRead</code> at 4530) opens a cursor on the table b-tree; <code>OP_Insert</code>
+(5913) descends to the leaf page and adds the row as a cell —
+<code>maxLocal/minLocal</code> decide whether large payloads spill to overflow
+pages.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="commit">Commit</h3>
+<p><code>OP_Halt</code> ends the program: the pager syncs the
+journal (or leaves the new pages in the <code>-wal</code> log), releases locks, and
+<code>sqlite3_step</code> returns <code>SQLITE_DONE</code>. &quot;Committed&quot; means the log record is
+durable — the database pages themselves may still be flushed lazily.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-crash-subplot">The crash subplot</h3>
+<p>If the process dies mid-transaction,
+nothing repairs anything at crash time. The next <code>sqlite3_open</code> finds a
+hot journal and <code>pager_playback</code> (<code>src/pager.c:2872</code>) restores the
+pre-transaction page images — recovery on open, not on crash.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-row-durably">One row, durably</h3>
+<p>A SQL sentence became a bytecode
+program, executed against pages behind a pager, behind a VFS — five
+layers, each only knowing its neighbor. <code>EXPLAIN</code> shows you the exact
+recipe card your query compiled to.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="b-tree-pages-src-btreeint-h-mempage-line-273">B-tree pages (<code>src/btreeInt.h:MemPage</code>, line 273)</h3>
+<p>Every table and index is a b-tree over 4KB pages: interior pages route,
+leaf pages hold cells (rows / index entries), overflow pages spill large
+payloads. <code>MemPage</code> is the in-memory image of one page, with the packed
+on-disk header mirrored into typed fields (<code>leaf</code>, <code>nCell</code>, <code>cellOffset</code>,
+<code>maxLocal/minLocal</code> — the payload-splitting thresholds that decide when a
+cell overflows). Cell arrays grow toward the middle of the page; free
+space is coalesced by <code>allocateBtreePage</code>/<code>sqlite3BtreeInsert</code> machinery
+in <code>src/btree.c</code>. Why a clustered page b-tree: table scans and range
+scans are page-sequential, the unit of I/O is the unit of caching, and
+row size decisions (maxLocal/minLocal) become explicit, tunable policy.</p>
+<h3 id="the-vdbe-program-src-vdbe-c-src-vdbe-h">The VDBE program (<code>src/vdbe.c</code>, <code>src/vdbe.h</code>)</h3>
+<p>A compiled statement is an array of <code>Op</code> structs plus registers
+(<code>Mem aMem[]</code>) and cursors (<code>VdbeCursor</code>, one per open b-tree). The
+interpreter is one <code>for(;;)</code> loop with a colossal switch —
+<code>sqlite3VdbeExec</code> at <code>src/vdbe.c:903</code> is among the largest functions in
+the atlas (tens of thousands of lines with cases like <code>OP_Column</code> at
+3036, <code>OP_Transaction</code> at 4246, <code>OP_OpenRead</code> at 4530, <code>OP_Insert</code> at
+5913). Why bytecode over an AST-walking interpreter: the program is
+data — you can count opcodes for cost estimation (<code>sqlite3_stmt</code> status),
+rewrite plans, and test one engine instead of N statement forms.</p>
+<h3 id="the-pager-and-its-page-cache-src-pager-c">The pager and its page cache (<code>src/pager.c</code>)</h3>
+<p>The pager owns database pages between btree and VFS: read-through cache,
+dirty-page tracking, journal and WAL, savepoints. Its state machine
+(<code>PAGER_READER → WRITER_LOCKED → WRITER_CACHEMOD → ...</code>, documented in
+the header comment around lines 150–330) is the single place transaction
+state transitions live. Why here: btree stays pure, and every durability
+policy (journal vs WAL, sync modes) becomes pager configuration.</p>
+<h3 id="wal-wal-index-src-wal-c">WAL + wal-index (<code>src/wal.c</code>)</h3>
+<p>Write-ahead logging appends changed pages to <code>-wal</code> while readers see a
+consistent snapshot through the wal-index (a hash table mapped in shared
+memory, <code>-shm</code>, built by <code>unixOpenSharedMemory</code> in <code>src/os_unix.c:4952</code>).
+Checkpointing (<code>walCheckpoint</code>, <code>src/wal.c:2281</code>) folds the log back
+into the main file. Why: readers never block the writer — the
+reader/writer concurrency SQLite couldn&#39;t offer with rollback journals.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Single writer, many readers.</strong> Writes take the database file lock
+(whole-file, not page-level): simple, correct, and fine for the
+embedded workloads SQLite targets. In WAL mode, readers and one writer
+proceed concurrently.</li>
+<li><strong>Crash safety is recovery-on-open, not recovery-on-crash</strong>: nothing
+repairs mid-write; instead the next open detects a <em>hot journal</em>
+(journal file newer than db) and replays it — <code>pager_playback</code>
+(<code>src/pager.c:2872</code>, with <code>pager_playback_one_page</code> at 2336) restores
+pre-transaction page images. In WAL mode, the wal-index is rebuilt from
+the log itself.</li>
+<li><strong>Savepoints and nested transactions</strong> are pager-level journal marks
+(<code>SAVEPOINT</code> SQL maps to journal save/rollback points), not btree
+concepts — one more reason the layering pays.</li>
+<li><strong>Failure surfaces as return codes + <code>SQLITE_IOERR</code>/<code>SQLITE_FULL</code>
+classes</strong>; the library never crashes the host process on data errors.
+(The project&#39;s famous testing regime — TH3, 100% branch coverage
+ambitions, dozens of generated test DBs — is the credibility engine
+behind this promise; see sqlite.org/testing.html.)</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph procs[&quot;many processes, one file&quot;]
+        R1[&quot;reader A — shared lock,&lt;br/&gt;sees a consistent snapshot&quot;]
+        R2[&quot;reader B — same or older snapshot&quot;]
+        W[&quot;the one writer —&lt;br/&gt;whole-file write lock&quot;]
+    end
+    subgraph walmode[&quot;WAL mode (journal_mode = wal)&quot;]
+        WALF[&quot;-wal — writer appends new page versions&quot;]
+        SHM[&quot;-shm — wal-index hash table in shared memory:&lt;br/&gt;which pages live in the log&quot;]
+        CKPT[&quot;checkpoint — walCheckpoint (wal.c 2281)&lt;br/&gt;folds the log back into the main file&quot;]
+    end
+    HOT[&quot;hot journal on crash —&lt;br/&gt;next open replays it (pager_playback 2872)&quot;]
+
+    R1 --&gt;|&quot;never blocks the writer&quot;| WALF
+    R2 --&gt; WALF
+    W --&gt; WALF
+    WALF --&gt; SHM
+    WALF --&gt; CKPT
+    W -.-&gt;|&quot;rollback-journal mode instead&quot;| HOT
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The C API is a <strong>state-machine lifecycle</strong>: <code>sqlite3_open</code> →
+<code>sqlite3_prepare</code> (compile once, reuse) → bind parameters →
+<code>sqlite3_step</code> (execute one row at a time) → <code>sqlite3_column_*</code> →
+reset/finalize. <code>sqlite3_step</code> (<code>src/vdbeapi.c:980</code>) is just a driver
+around <code>sqlite3VdbeExec</code>. The streaming <code>step</code> design means memory
+usage is O(1) per row regardless of result size — an API decision that
+is an architecture decision.</li>
+<li><strong>Extension seams, each orthogonal:</strong><ul>
+<li><em>VFS</em>: swap the entire OS layer (<code>sqlite3_vfs_register</code>,
+<code>src/os.c:408</code>) — this is how SQLite runs on phones, in-memory
+(<code>memdb.c</code>), or over user-space files.</li>
+<li><em>Virtual tables</em>: <code>sqlite3_create_module</code> (<code>src/vtab.c:108</code>) —
+tables backed by arbitrary code (see <code>src/dbstat.c</code>, a virtual table
+over SQLite&#39;s own btree internals, used to inspect itself).</li>
+<li><em>Loadable extensions</em>: <code>sqlite3_load_extension</code>
+(<code>src/loadext.c:731</code>) with a strict ABI (<code>SQLITE_EXTENSION_INIT</code>).</li>
+<li>Functions, collations, authorizers, progress handlers — each a
+C callback registered on the connection.</li>
+</ul>
+</li>
+<li>Honest wart: the single <code>sqlite3*</code> connection is not thread-safe for
+concurrent use without serialized mode or separate connections, and
+the whole-file write lock scales poorly for writers — by design, since
+client/server was explicitly out of scope.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-library-over-client-server">Trade-off 1: library over client/server</h3>
+<ul>
+<li><strong>Tension:</strong> durability and query power vs deployment friction.</li>
+<li><strong>Choice:</strong> no process, no wire protocol; the file (plus locks) is the
+interface.</li>
+<li><strong>Evidence:</strong> <code>openDatabase</code> (<code>src/main.c:3388</code>) mostly wires VFS and
+mutexes; locking lives in <code>src/os_unix.c</code> (<code>unixRead</code> 3512,
+<code>unixWrite</code> 3643, POSIX advisory fcntl locks).</li>
+<li><strong>Given up:</strong> network access, per-user auth/quotas, concurrent writers
+across machines.</li>
+<li><strong>Verdict:</strong> right whenever the trust boundary is the process (apps,
+browsers, devices); wrong for multi-tenant servers — which is why
+PostgreSQL (this atlas) exists as the complement, not a rival.</li>
+</ul>
+<h3 id="trade-off-2-bytecode-vm-over-direct-statement-execution">Trade-off 2: bytecode VM over direct statement execution</h3>
+<ul>
+<li><strong>Tension:</strong> SQL has unbounded statement shapes; you still want one
+fast, testable engine.</li>
+<li><strong>Choice:</strong> code generators (<code>src/build.c</code>, <code>src/insert.c:sqlite3Insert</code>
+at 888, <code>src/select.c:sqlite3Select</code> at 7739) emit VDBE programs; one
+interpreter runs them all.</li>
+<li><strong>Evidence:</strong> prepare a statement with <code>EXPLAIN</code> and you see the
+program; in code, the emitters in <code>insert.c</code>/<code>select.c</code> append <code>Op</code>s
+(e.g. <code>OP_Insert</code> emitted by the insert generator, executed at
+<code>src/vdbe.c:5913</code>).</li>
+<li><strong>Given up:</strong> peak per-statement specialization (no JIT); compile cost
+must be amortized via prepared statements.</li>
+<li><strong>Verdict:</strong> right when statements repeat and workloads are I/O-bound —
+the interpreter&#39;s simplicity became SQLite&#39;s testability. This is the
+same bet Postgres makes with its own executor, and that JVM/BEAM make
+at larger scale.</li>
+</ul>
+<h3 id="trade-off-3-rollback-journal-and-wal-durability-policy-as-a-mode">Trade-off 3: rollback journal AND WAL — durability policy as a mode</h3>
+<ul>
+<li><strong>Tension:</strong> crash safety with either maximum compatibility or
+reader/writer concurrency.</li>
+<li><strong>Choice:</strong> journal mode writes original pages to a rollback journal
+before modifying the db; WAL mode appends new pages to a log and
+checkpoints later (<code>PRAGMA journal_mode</code>).</li>
+<li><strong>Evidence:</strong> journal lifecycle in <code>src/pager.c</code> (state machine comment
+lines ~150–330; playback 2872) vs <code>src/wal.c:walCheckpoint</code> (2281);
+the pager hides which mode is active from btree entirely.</li>
+<li><strong>Given up:</strong> journal mode blocks readers during writes; WAL adds
+<code>-wal</code>/<code>-shm</code> files, checkpoint pauses, and network-filesystem
+caveats.</li>
+<li><strong>Verdict:</strong> offering both, selected by pragma, keeps the embedded
+contract (&quot;it&#39;s just files&quot;) while letting read-heavy apps scale —
+a reminder that durability semantics are a <em>deployment</em> decision your
+architecture must be able to defer.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/btreeInt.h</code> header comment + <code>struct MemPage</code> (line 273) — the
+on-disk format spec in prose; internal vs leaf pages, cell layout,
+overflow. Read before any btree code.</li>
+<li><code>src/main.c:openDatabase</code> (3388) — what &quot;opening a database&quot; means:
+VFS lookup, mutexes, pager/btree construction. Notice what is <em>not</em>
+there: no sockets, no threads.</li>
+<li><code>src/tokenize.c:sqlite3GetToken</code> (273) and <code>sqlite3RunParser</code> (600) —
+the one-pass tokenizer feeding the LEMON-generated parser
+(<code>src/parse.y</code> is the readable grammar; parse.c is generated).</li>
+<li><code>src/prepare.c:sqlite3Prepare</code> (703) — the compile pipeline entry:
+parse → resolve names → plan → codegen.</li>
+<li><code>src/insert.c:sqlite3Insert</code> (888) — watch a real code generator:
+constraint checks, rowid assignment, index maintenance, all as
+emitted opcodes.</li>
+<li><code>src/vdbe.c:sqlite3VdbeExec</code> (903) — read the loop skeleton, then
+three cases only: <code>OP_Transaction</code> (4246), <code>OP_OpenRead</code> (4530),
+<code>OP_Column</code> (3036). Notice register-machine style: every op reads and
+writes <code>aMem[]</code>.</li>
+<li><code>src/btree.c</code> cursor functions (<code>sqlite3BtreeCursorHasMoved</code>, 949) and
+<code>allocateBtreePage</code> (6546) — how cursors walk pages and how page
+allocation/defragmentation works.</li>
+<li><code>src/pager.c</code> header comment (lines ~1–350) — the transaction state
+machine; then <code>pager_playback</code> (2872): crash recovery as replay of
+the rollback journal.</li>
+<li><code>src/wal.c:walCheckpoint</code> (2281) and the wal-index build path via
+<code>src/os_unix.c:unixOpenSharedMemory</code> (4952) — the concurrent
+read/write story.</li>
+<li><code>src/vtab.c:sqlite3_create_module</code> (108) + <code>src/dbstat.c</code> — a
+virtual table implemented over SQLite&#39;s own internals; the best
+&quot;extension API done well&quot; example in the tree.</li>
+<li><code>src/os.c:sqlite3_vfs_register</code> (408) + <code>src/os_unix.c:unixRead</code>
+(3512) — the end of the stack: every byte SQLite touches goes through
+a swappable method table.</li>
+</ol>
+<p>You have now traced one SQL statement from text to tokens to bytecode to
+pages to bytes on disk — and back through crash recovery.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Quarantine environment assumptions behind one interface</strong> (VFS) —
+portability is an architectural decision, not a build-system chore.</li>
+<li><strong>Compile to a small program, interpret it</strong> — one bytecode engine
+made of a giant switch turns unbounded input shapes into one testable
+unit, and makes <code>EXPLAIN</code> free.</li>
+<li><strong>Document layer contracts in the file headers</strong> — SQLite&#39;s header
+comments (btree format, pager states) are why a 200k-line codebase
+stays navigable; the docs live where the code lives.</li>
+<li><strong>Recovery on open, not on crash</strong> — a system that repairs itself
+lazily at next mount is simpler and more robust than one that tries to
+be crash-aware in-flight.</li>
+<li><strong>Make durability a mode, not a fate</strong> — journal vs WAL selected by
+pragma shows how to offer conflicting guarantees without forking the
+architecture.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> (the size of <code>vdbe.c</code>/<code>btree.c</code>/<code>pager.c</code>
+demands patience) but the layering keeps it tractable.</li>
+<li>Budget: ~6–8 hours for the reading path; a full week to internalize
+btree + pager.</li>
+<li>Prerequisites: b-tree basics (any DB textbook chapter), what a WAL is
+conceptually, C reading fluency including <code>#ifdef</code> discipline. No SQL
+internals background needed — the header comments teach it.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>SQLite architecture overview and file-format docs:
+<a href="https://www.sqlite.org/arch.html">https://www.sqlite.org/arch.html</a> , <a href="https://www.sqlite.org/fileformat2.html">https://www.sqlite.org/fileformat2.html</a></li>
+<li>SQLite testing philosophy: <a href="https://www.sqlite.org/testing.html">https://www.sqlite.org/testing.html</a></li>
+<li>The LEMON parser generator (ships in the repo under <code>tool/lemon/</code>).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../redis/"><span class="dir">← Previous dive</span>Redis: an event loop plus data structures built like they're the product</a>
+  <a href="../git/" style="text-align:right"><span class="dir">Next dive →</span>git: the version control that is really a content-addressed database</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 2 of 13 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

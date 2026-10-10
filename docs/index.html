@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Design Atlas — learn system design from great open-source code</title>
+<meta name="description" content="A curated atlas of canonical open-source codebases: deep-dives written from the source, ELI10 explainers, step-through walkthroughs, and read-aloud pages.">
+<meta property="og:title" content="System Design Atlas — learn system design from great open-source code">
+<meta property="og:description" content="A curated atlas of canonical open-source codebases: deep-dives written from the source, ELI10 explainers, step-through walkthroughs, and read-aloud pages.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="index.html"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="index.html#dives">Deep-dives</a>
+  <a href="patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page">
+<section class="hero">
+  <div class="kicker">A curated atlas of great open-source code</div>
+  <h1>Learn system design by reading the code that proved it</h1>
+  <p class="tagline">Thirteen canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <div class="cta">
+    <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
+    <a class="btn btn-ghost" href="patterns/">Patterns index</a>
+    <a class="btn btn-ghost" href="https://github.com/acailic/system-design-atlas" rel="noopener">Read the markdown on GitHub ↗</a>
+  </div>
+</section>
+
+<section class="home-section">
+  <h2>Why an atlas, not another book</h2>
+  <div class="readable">
+<p>Books teach system design in the abstract: &quot;use a write-ahead log&quot;, &quot;prefer
+event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
+and useless until you have watched a real codebase pay for them — where the
+loop lives, what the log record looks like, what trade was made to get there.</p>
+<p>The atlas points at 34 (and growing) canonical codebases and walks through
+the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
+the data structures that carry the design, the concurrency model, the seams
+where the system extends. You read the atlas entry, then you read the code
+alongside it. That is the whole method.</p>
+
+  </div>
+</section>
+
+<section class="home-section" id="dives">
+  <h2>The deep-dives</h2>
+  <div class="filter-row" role="group" aria-label="Filter by domain">
+    <button type="button" class="filter-chip" aria-pressed="false">All</button>
+    <button type="button" class="filter-chip" data-domain="cache" aria-pressed="false">cache</button>
+    <button type="button" class="filter-chip" data-domain="container" aria-pressed="false">container</button>
+    <button type="button" class="filter-chip" data-domain="database" aria-pressed="false">database</button>
+    <button type="button" class="filter-chip" data-domain="distributed" aria-pressed="false">distributed</button>
+    <button type="button" class="filter-chip" data-domain="editor" aria-pressed="false">editor</button>
+    <button type="button" class="filter-chip" data-domain="language" aria-pressed="false">language</button>
+    <button type="button" class="filter-chip" data-domain="networking" aria-pressed="false">networking</button>
+    <button type="button" class="filter-chip" data-domain="orchestration" aria-pressed="false">orchestration</button>
+    <button type="button" class="filter-chip" data-domain="proxy-lb" aria-pressed="false">proxy-lb</button>
+    <button type="button" class="filter-chip" data-domain="queue-log" aria-pressed="false">queue-log</button>
+    <button type="button" class="filter-chip" data-domain="runtime" aria-pressed="false">runtime</button>
+    <button type="button" class="filter-chip" data-domain="search-engine" aria-pressed="false">search-engine</button>
+    <button type="button" class="filter-chip" data-domain="storage-engine" aria-pressed="false">storage-engine</button>
+    <button type="button" class="filter-chip" data-domain="vcs" aria-pressed="false">vcs</button>
+    <button type="button" class="filter-chip" data-domain="web-server" aria-pressed="false">web-server</button>
+  </div>
+  <div class="dive-grid">
+<a class="dive-card" href="dive/redis/" data-domains="cache database networking">
+  <span class="dc-name">Redis</span>
+  <span class="dc-headline">an event loop plus data structures built like they're the product</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A restaurant with exactly one chef. Redis is a kitchen with one chef (one thread runs all commands) and a doorbell — the event loop — that rings whenever a table needs something or a timer goes…</span>
+  <span class="dc-meta"><span class="chip domain">cache</span><span class="chip domain">database</span><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/sqlite/" data-domains="database storage-engine">
+  <span class="dc-name">SQLite</span>
+  <span class="dc-headline">a database as a layered library — and a query as compiled bytecode</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A magic cookbook that lives inside your toy box. Most databases are restaurants: you phone a waiter (a server process) who talks to the kitchen. SQLite is a cookbook that lives in YOUR box —…</span>
+  <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/git/" data-domains="vcs storage-engine">
+  <span class="dc-name">git</span>
+  <span class="dc-headline">the version control that is really a content-addressed database</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A photo album where nothing is ever erased. Every time you save your drawing, git takes a brand-new photo of each changed file (a blob ), a new photo of each folder&amp;#39;s list of contents (a tree…</span>
+  <span class="dc-meta"><span class="chip domain">vcs</span><span class="chip domain">storage-engine</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/leveldb/" data-domains="storage-engine">
+  <span class="dc-name">LevelDB</span>
+  <span class="dc-headline">the LSM-tree in its teachable form — logs, levels, and immutable tables</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A diary, a scratch page, and a tidy-up robot. When you tell LevelDB something ( Put ), it does two fast things: writes the fact in pen in a diary you never re-read (the WAL — its only job is to…</span>
+  <span class="dc-meta"><span class="chip domain">storage-engine</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/nginx/" data-domains="web-server proxy-lb">
+  <span class="dc-name">nginx</span>
+  <span class="dc-headline">shared-nothing processes, state machines, and ownership by lifetime</span>
+  <span class="dc-eli"><b>Like you're 10:</b> An ice cream shop where every order gets a tray. nginx is a shop with one manager (the master process) who never scoops ice cream — the manager&amp;#39;s whole job is hiring, watching, and replacing…</span>
+  <span class="dc-meta"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/postgresql/" data-domains="database storage-engine">
+  <span class="dc-name">PostgreSQL</span>
+  <span class="dc-headline">the relational server as a federation of cooperating processes</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A bank where every customer gets their own clerk — and receipts are never erased. Walk in (connect) and the bank manager (the postmaster) assigns you a personal clerk (a backend process) who stays…</span>
+  <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/kafka/" data-domains="queue-log distributed storage-engine">
+  <span class="dc-name">Kafka</span>
+  <span class="dc-headline">the append-only log as an operating system for data</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A conveyor belt of numbered boxes. Kafka is a very long belt that only moves forward (the append-only log). Senders drop sealed boxes onto it (batches of records), and each box gets a number as it…</span>
+  <span class="dc-meta"><span class="chip domain">queue-log</span><span class="chip domain">distributed</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/kubernetes/" data-domains="orchestration container distributed">
+  <span class="dc-name">Kubernetes</span>
+  <span class="dc-headline">desired state + reconcile loops — an operating system as a control system</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A wish list pinned to the fridge, and a helper robot that keeps comparing. You never tell the house what to do step by step — you pin a wish to the fridge: &amp;quot;5 cupcakes on the table&amp;quot; (a…</span>
+  <span class="dc-meta"><span class="chip domain">orchestration</span><span class="chip domain">container</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/cpython/" data-domains="runtime language">
+  <span class="dc-name">CPython</span>
+  <span class="dc-headline">the interpreter that won by making extensions easy</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A puppet theater where every puppet wears a name tag. Every puppet (every value) wears a tag that counts how many hands are holding it (the reference count). The moment the count reaches zero,…</span>
+  <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/moby/" data-domains="container">
+  <span class="dc-name">Moby/Docker</span>
+  <span class="dc-headline">images as content-addressed layers, execution as delegation</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A program shipped as a stack of clear plastic sheets. Instead of mailing someone a whole heavy toy box (a whole computer disk image), Docker ships a stack of clear sheets: each sheet has part of…</span>
+  <span class="dc-meta"><span class="chip domain">container</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/vscode/" data-domains="editor">
+  <span class="dc-name">VS Code</span>
+  <span class="dc-headline">extension architecture as the product — process isolation and protocol seams</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A school where guest teachers get their own room — never the office. VS Code is a school. The front office (the workbench — the UI you see) never lets guest teachers (extensions) teach from inside…</span>
+  <span class="dc-meta"><span class="chip domain">editor</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/etcd/" data-domains="distributed database">
+  <span class="dc-name">etcd</span>
+  <span class="dc-headline">Raft as a deterministic state machine, keyspace as MVCC history</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A club notebook that most members must agree on. etcd is a club with one precious notebook (the keyspace). Any important note (a Put) is only written after MOST members agree on the next line (a…</span>
+  <span class="dc-meta"><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/elasticsearch/" data-domains="search-engine distributed database">
+  <span class="dc-name">Elasticsearch</span>
+  <span class="dc-headline">a search engine behind a friendly distributed façade</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A library with a &amp;quot;today&amp;quot; drawer. When a new book&amp;#39;s index card arrives, the librarian drops it into a &amp;quot;today&amp;quot; pile (the in-memory buffer) — writing to the pile is instant,…</span>
+  <span class="dc-meta"><span class="chip domain">search-engine</span><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+  </div>
+</section>
+
+<section class="home-section">
+  <h2>How to use the atlas</h2>
+  <div class="readable">
+<ol>
+<li><strong>Pick a domain you want to understand</strong> — cache, storage engine, VCS,
+web server, database, runtime... Browse <a href="https://github.com/acailic/system-design-atlas/blob/main/catalog.yaml"><code>catalog.yaml</code></a>
+(entries are tagged by domain and difficulty).</li>
+<li><strong>Read the catalog entry&#39;s &quot;why&quot; paragraph</strong> — it tells you what design
+lesson this codebase is unusually good at teaching.</li>
+<li><strong>Shallow-clone the project</strong> so you can follow along:<pre><code class="language-bash">mkdir -p clones &amp;&amp; git clone --depth 1 &lt;repo-url&gt; clones/&lt;id&gt;
+</code></pre>
+Deep-dives pin the commit they were written against; expect small drift,
+the file/function landmarks are stable for years in mature projects.</li>
+<li><strong>Read the deep-dive top to bottom once</strong> (architecture → data
+structures → concurrency → trade-offs), then <strong>work the reading path</strong>
+in the actual clone, opening every cited file. The reading path is the
+product; the prose is the guide.</li>
+<li><strong>Steal the lessons</strong> — each deep-dive ends with &quot;what to steal&quot;:
+transferable design moves you can apply to your own systems.</li>
+</ol>
+<p>Time budget: a deep-dive plus its reading path is a focused 3–8 hours
+(depending on the entry&#39;s difficulty rating). Do not rush the reading path.</p>
+
+  </div>
+</section>
+
+<section class="home-section">
+  <h2>The wider catalog</h2>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 13 have deep-dives so far. Grouped by primary domain:</p>
+  <details class="catalog-group">
+<summary>os-kernel <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The most-used piece of software in existence, and the clearest proof that architecture beats features: “everything is a file” (VFS over wildly different filesystems), a driver model that lets thousands of vendors add…</div></li></ul>
+</details>
+<details class="catalog-group" open>
+<summary>cache <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/redis/">Redis</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The canonical answer to &quot;what does an I/O-bound server look like when you optimize for simplicity under load&quot;: a single-threaded event loop plus purpose-built data structures (SDS strings, incremental-rehash hash…</div></li>
+<li><span class="cat-name"><a href="https://github.com/memcached/memcached" rel="noopener">Memcached ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The original &quot;scale the database with a cache layer&quot; tool that won the mid-2000s web by being aggressively boring: a text protocol you can speak with netcat, a slab-class allocator that fights fragmentation by never…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>database <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/sqlite/">SQLite</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The most deployed database on earth — in every phone, browser, and airliner — because of one architectural choice: strict layering with every environment assumption isolated behind one interface. Tokenizer → parser →…</div></li>
+<li><span class="cat-name"><a href="dive/postgresql/">PostgreSQL</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The reference relational server that outlived every proprietary rival: process-per-connection (not threads), MVCC via tuple versioning, write-ahead logging, and a planner/executor split that has shaped every database…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>storage-engine <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/leveldb/">LevelDB</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The cleanest published LSM-tree (log-structured merge tree) engine, small enough to read in a week: a memtable backed by a skip list, an append-only WAL, leveled compaction of immutable SSTables, and a manifest that…</div></li>
+<li><span class="cat-name"><a href="https://github.com/facebook/rocksdb" rel="noopener">RocksDB ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">LevelDB's design pushed to production extremes: column families, tiered compaction, rate limiting, Bloom filters per level, transactions via a write batch pipeline. Read after LevelDB to see what the elegant textbook…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>web-server <span class="count">(3)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/nginx/">nginx</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The web server that broke Apache's thread-per-connection model and owns the top of the web-tier market share because of it: a master/worker process model where a supervisor holds the listening sockets, workers…</div></li>
+<li><span class="cat-name"><a href="https://github.com/apache/httpd" rel="noopener">Apache httpd ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The server that dominated the early web and stayed dominant for decades because of one architectural bet: extensibility as the product. The module API (handlers, filters, per-directory config like .htaccess) and…</div></li>
+<li><span class="cat-name"><a href="https://github.com/caddyserver/caddy" rel="noopener">Caddy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A modern web server where the idioms do the hard work: Go's goroutines where nginx hand-rolls state machines, an HTTP middleware chain, and automatic-HTTPS as a first-class subsystem rather than a bolt-on. Read…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>proxy-lb <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/haproxy/haproxy" rel="noopener">HAProxy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The load balancer that refuses to drop traffic: run queues and tasks instead of threads, zero-downtime reload via socket handoff, and obsessive per-connection memory accounting (pools + ebtree). Teaches how to design…</div></li>
+<li><span class="cat-name"><a href="https://github.com/envoyproxy/envoy" rel="noopener">Envoy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The modern data-plane architecture: an event loop per worker thread, filter chains as the extension model (network filters, HTTP filters), xDS as the control-plane API, and stats/tracing built into the skeleton.…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>vcs <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/git/">git</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">A distributed VCS that displaced every centralized incumbent because of one structural bet, not features: a persistent, content-addressed object database (blobs/trees/commits/tags under a DAG of refs) with porcelain…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>queue-log <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/kafka/">Apache Kafka</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The nervous system of every large data platform, and it won that slot with a design inversion: not a smart message router but a dumb, append-only, partitioned log that exploits the one thing disks and networks do at…</div></li>
+<li><span class="cat-name"><a href="https://github.com/nats-io/nats-server" rel="noopener">NATS ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A messaging server whose entire protocol is a handful of text lines (INFO/CONNECT/PUB/SUB), with subject-based addressing (foo.*.bar) and per-subscription goroutine delivery. Teaches protocol minimalism and the…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>runtime <span class="count">(4)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/nodejs/node" rel="noopener">Node.js ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">V8 + libuv + a module system, glued so that JavaScript became a server language. Teaches the embedding lesson: how you wrap an engine (handles/scopes/contexts in V8) and an event loop (libuv) into a coherent…</div></li>
+<li><span class="cat-name"><a href="dive/cpython/">CPython</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The most widely run language implementation on earth, and it won that position through design decisions that predate its hype: a stable C API + reference-counted PyObject model that made native extensions…</div></li>
+<li><span class="cat-name"><a href="https://github.com/libuv/libuv" rel="noopener">libuv ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The portable event loop, distilled: poll/epoll/kqueue/IOCP behind one API, plus the async-cross-thread escape hatch (uv_async_t) and thread pool for blocking work (fs, dns). Small enough to read completely in a…</div></li>
+<li><span class="cat-name"><a href="https://github.com/v8/v8" rel="noopener">V8 ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The fastest widely-deployed JS engine: Ignition interpreter, TurboFan optimizing compiler, concurrent+incremental marking, generational heap, hidden classes. Included for influence and as a reference, not a first…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>language <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/lua/lua" rel="noopener">Lua ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A whole language — lexer, parser, register-based VM, incremental GC, and the friendliest C embedding API ever designed — in ~30k lines with almost no dependencies. Teaches that a runtime's power comes from a few…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>search-engine <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/elasticsearch/">Elasticsearch</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">Search made universally accessible — and it won by API design as much as by engineering: Lucene's inverted index wrapped in a JSON over HTTP interface with schema-on-the-fly, sharding and replication declaratively…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>orchestration <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/kubernetes/">Kubernetes</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The operating system of the datacenter, and the biggest architectural bet in modern infrastructure: declarative desired state + level-triggered reconcile loops (controllers) instead of imperative actions. Users…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>container <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/opencontainers/runc" rel="noopener">runc ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">What &quot;a container&quot; actually is, in ~30k lines: parse an OCI bundle (config.json), clone(2) with namespaces, set up cgroups, pivot_root, exec. Teaches the Linux container primitives one syscall at a time — the rare…</div></li>
+<li><span class="cat-name"><a href="dive/moby/">Moby (Docker)</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The tool that made containers mainstream, and it won on a packaging design decision: images as immutable, content-addressed, layered tarballs with copy-on-write union mounts, plus one command (dockerfile → docker…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>ml-framework <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/pytorch/pytorch" rel="noopener">PyTorch ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A tensor library that became the dominant training framework via one architectural bet: define-by-run autodiff, where the forward pass records a dynamic graph and backward walks it. Teaches how to layer an eager…</div></li>
+<li><span class="cat-name"><a href="https://github.com/ggml-org/llama.cpp" rel="noopener">llama.cpp ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">LLM inference with no framework: ggml tensors, memory-mapped weight files, quantization as first-class, graph-built-per-model eval loops. Teaches performance engineering as architecture — how batching, KV cache…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>browser-engine <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/servo/servo" rel="noopener">Servo ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A browser engine built as independent crates (html5ever parser, stylo style system, WR/WebRender compositor) with task-based parallelism instead of one monolithic main thread. Teaches how to decompose a gigantic…</div></li>
+<li><span class="cat-name"><a href="https://github.com/chromium/chromium" rel="noopener">Chromium ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The most dominant browser engine ever and the codebase behind Chrome/Edge/Opera: multiprocess sandboxing (browser vs renderer vs utility processes), Mojo IPC, the V8/Blink split. Its process architecture — splitting…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>distributed <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/etcd/">etcd</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">Raft consensus in production clothes: a WAL-backed state machine, leader election, log replication, and snapshot/compaction — plus the watch API that turned it into Kubernetes' brain. Teaches the gap between a…</div></li>
+<li><span class="cat-name"><a href="https://github.com/apache/zookeeper" rel="noopener">Apache ZooKeeper ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The coordination kernel beneath the entire Hadoop-era stack: it won because it turned consensus into a usable product — a tiny ordered namespace of znodes backed by an atomic-broadcast (ZAB) log, with ephemeral nodes…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>editor <span class="count">(2)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/vscode/">VS Code</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The most-used code editor of the era, built on an unfashionable bet that won: Electron (Chromium + Node) for the UI, with all editor intelligence pushed out of the renderer into a separate extension-host process that…</div></li>
+<li><span class="cat-name"><a href="https://github.com/neovim/neovim" rel="noopener">Neovim ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">A 40-year-old editor architecture modernized without forking its soul: core/editor split, msgpack-RPC as the extension seam (clients, LSP, plugins all speak it), and Lua as embedded language replacing ad-hoc…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>networking <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/curl/curl" rel="noopener">curl ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">Every protocol, every platform, zero dependencies, one API — for decades. Teaches portability as an architectural commitment (curl_multi for event-loop integration, a build system that spans embedded to…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>media <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/FFmpeg/FFmpeg" rel="noopener">FFmpeg ↗</a></span><span class="cat-status cataloged">cataloged</span>
+  <div class="cat-why">The universal media toolbox: demuxers, decoders, filters, encoders, muxers as registered components behind lavf/lavc/avfilter APIs, with a directed-graph filter engine and SIMD-per-architecture optimizations. Teaches…</div></li></ul>
+</details>
+</section>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" defer></script>
+<script src="assets/site.js" defer></script>
+</body>
+</html>
