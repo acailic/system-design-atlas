@@ -91,6 +91,8 @@ understanding Lucene segments, and you'll see how much of "search" is
 index structure + ranking rules. (Full entry in
 [observability-and-search.md](observability-and-search.md).)
 
+**Reading path.** Cross-reference entry: see [observability-and-search.md](observability-and-search.md) for routes → `milli` index internals.
+
 **Exercise.** Index 1k docs, enable typo tolerance, and find where the query gets rewritten for typos in `milli`.
 
 ---

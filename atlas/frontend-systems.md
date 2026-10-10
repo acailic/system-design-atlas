@@ -12,7 +12,7 @@ Systems thinking transfers directly between these and the rest of the atlas.
 
 **Why it's here.** The most-used UI runtime in the world, whose design is a systems curriculum: a work loop with cooperative scheduling, incremental reconciliation over a fiber tree, priority lanes, and a hook model based on linked lists. It's an OS scheduler for UI.
 
-**Reading source.**
+**Reading path.**
 1. Skip `node_modules`-style noise; go to `packages/react-reconciler/src/ReactFiberWorkLoop.js` — the main loop with `shouldYield` time slicing.
 2. `ReactFiber.js` — the node type.
 3. `ReactFiberBeginWork.js` / `ReactFiberCommitWork.js` — render vs commit phases.
