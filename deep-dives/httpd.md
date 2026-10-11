@@ -128,7 +128,7 @@ sequenceDiagram
     P->>P: translate → map_to_storage → authn/authz hooks
     W->>H: ap_invoke_handler → ap_run_handler (module hook)
     H->>F: handler writes brigade → ap_pass_brigade
-    F-->>C: coalesced writev; connection parked for next request
+    F-->>C: coalesced writev — connection parked for next request
 ```
 
 **Step 1 — The MPM hands the connection to the machinery.** In `event`,

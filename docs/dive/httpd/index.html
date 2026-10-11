@@ -147,7 +147,7 @@ in the repo it reads top to bottom.</p>
     P-&gt;&gt;P: translate → map_to_storage → authn/authz hooks
     W-&gt;&gt;H: ap_invoke_handler → ap_run_handler (module hook)
     H-&gt;&gt;F: handler writes brigade → ap_pass_brigade
-    F--&gt;&gt;C: coalesced writev; connection parked for next request
+    F--&gt;&gt;C: coalesced writev — connection parked for next request
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
 <div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-mpm-hands-the-connection-to-the-machinery">The MPM hands the connection to the machinery</h3>
 <p>In <code>event</code>,
