@@ -108,7 +108,7 @@ flowchart TD
 - **Configuration is a subscription, not a file.** xDS resources
   arrive as versioned updates on gRPC streams
   (`source/extensions/config_subscription/grpc/xds_mux/grpc_mux_impl.cc`;
-  delta/SotW state machines in `delta_subscription_state.cc:158
+  delta/SotW state machines in `delta_subscription_state.cc:187
   handleGoodResponse`), pass validation, are applied via config
   providers, and are ACKed with the version that took — NACK on
   rejection. Static files bootstrap the same machinery.
@@ -340,8 +340,9 @@ flowchart LR
   then applied atomically, with ACK/NACK closing the loop to the
   control plane.
 - **Evidence:** `grpc_mux_impl.cc` (mux over one ADS stream);
-  `delta_subscription_state.cc:158 handleGoodResponse` /
-  `:251 getNextRequestInternal`; config providers applying updates.
+  `delta_subscription_state.cc:187 handleGoodResponse`,
+  `:292 getNextRequestAckless`, `:373 getNextRequestWithAck`;
+  config providers applying updates.
 - **Given up:** the simplicity of "the config file *is* the truth";
   debugging now needs both sides' versions, and the API becomes a
   compatibility contract you must version forever.
@@ -398,7 +399,7 @@ flowchart LR
    onPoolReady` — pooling, ready callbacks, and why HTTP/2 changes
    only the stream-per-conn arithmetic.
 10. `source/extensions/config_subscription/grpc/xds_mux/
-    grpc_mux_impl.cc` + `delta_subscription_state.cc:158` — one
+    grpc_mux_impl.cc` + `delta_subscription_state.cc:187` — one
     multiplexed stream, per-type state machines, ACK/NACK.
 11. `source/server/overload_manager_impl.cc` and the overload drop
     in step 6 — close the loop between resource pressure and the

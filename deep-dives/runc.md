@@ -136,7 +136,8 @@ data; there is no policy inside runc itself.
 
 **Step 2 — Create the container record.** `factory_linux.go:35
 Create` makes the per-container state directory and writes
-`state.json` (the `State` struct in `libcontainer/state.go`) — the
+`state.json` (the `State` struct in
+`libcontainer/container_linux.go:49`) — the
 disk memory that lets a *future* `runc exec` or `runc kill` find the
 container's init PID and namespace paths after today's parent is gone.
 

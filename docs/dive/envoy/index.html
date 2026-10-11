@@ -130,7 +130,7 @@ injection, wasm — enters the same conveyor belt.</li>
 <li><strong>Configuration is a subscription, not a file.</strong> xDS resources
 arrive as versioned updates on gRPC streams
 (<code>source/extensions/config_subscription/grpc/xds_mux/grpc_mux_impl.cc</code>;
-delta/SotW state machines in <code>delta_subscription_state.cc:158 handleGoodResponse</code>), pass validation, are applied via config
+delta/SotW state machines in <code>delta_subscription_state.cc:187 handleGoodResponse</code>), pass validation, are applied via config
 providers, and are ACKed with the version that took — NACK on
 rejection. Static files bootstrap the same machinery.</li>
 <li><strong>Clusters and their state</strong> live in <code>ClusterManagerImpl</code>
@@ -356,8 +356,9 @@ can&#39;t.</li>
 then applied atomically, with ACK/NACK closing the loop to the
 control plane.</li>
 <li><strong>Evidence:</strong> <code>grpc_mux_impl.cc</code> (mux over one ADS stream);
-<code>delta_subscription_state.cc:158 handleGoodResponse</code> /
-<code>:251 getNextRequestInternal</code>; config providers applying updates.</li>
+<code>delta_subscription_state.cc:187 handleGoodResponse</code>,
+<code>:292 getNextRequestAckless</code>, <code>:373 getNextRequestWithAck</code>;
+config providers applying updates.</li>
 <li><strong>Given up:</strong> the simplicity of &quot;the config file <em>is</em> the truth&quot;;
 debugging now needs both sides&#39; versions, and the API becomes a
 compatibility contract you must version forever.</li>
@@ -411,7 +412,7 @@ and <code>chooseHost</code> in
 <code>load_balancing_policies/common/load_balancer_impl.cc:658</code>.</li>
 <li><code>source/common/http/conn_pool_base.cc:60 newStream</code> → <code>:84 onPoolReady</code> — pooling, ready callbacks, and why HTTP/2 changes
 only the stream-per-conn arithmetic.</li>
-<li><code>source/extensions/config_subscription/grpc/xds_mux/ grpc_mux_impl.cc</code> + <code>delta_subscription_state.cc:158</code> — one
+<li><code>source/extensions/config_subscription/grpc/xds_mux/ grpc_mux_impl.cc</code> + <code>delta_subscription_state.cc:187</code> — one
 multiplexed stream, per-type state machines, ACK/NACK.</li>
 <li><code>source/server/overload_manager_impl.cc</code> and the overload drop
 in step 6 — close the loop between resource pressure and the

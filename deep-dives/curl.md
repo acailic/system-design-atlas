@@ -242,8 +242,8 @@ holding zero timers, threads, or secret sleeps.
   implementation with different flags.
   **Why:** the engine's branches key off *flags*, not scheme names —
   so "add a new TLS-wrapped protocol" is a table entry plus flag
-  reuse, the registered-component pattern [FFmpeg](ffmpeg.md) also
-  runs (and curl runs it in ~200 lines).
+  reuse, the registered-component pattern FFmpeg also runs (and curl
+  runs it in ~200 lines).
 
 - **The client-writer chain (`cw-*`).**
   **What:** response bytes flow through `cw-out` (terminal delivery

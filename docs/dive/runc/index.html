@@ -153,7 +153,8 @@ profile, hooks. Everything runc will do is already decided by this
 data; there is no policy inside runc itself.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="create-the-container-record">Create the container record</h3>
 <p><code>factory_linux.go:35 Create</code> makes the per-container state directory and writes
-<code>state.json</code> (the <code>State</code> struct in <code>libcontainer/state.go</code>) — the
+<code>state.json</code> (the <code>State</code> struct in
+<code>libcontainer/container_linux.go:49</code>) — the
 disk memory that lets a <em>future</em> <code>runc exec</code> or <code>runc kill</code> find the
 container&#39;s init PID and namespace paths after today&#39;s parent is gone.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="clone-the-twin">Clone the twin</h3>

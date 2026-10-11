@@ -80,7 +80,7 @@ the datacenter to the backpack.</p>
 
 </section><h2 id="1-architecture-overview">1. Architecture overview</h2>
 <figure class="diagram"><pre class="mermaid">flowchart TD
-    APP[&quot;tools/main, tools/server, your app&quot;]
+    APP[&quot;tools/cli, tools/server, your app&quot;]
 
     subgraph api[&quot;C API — include/llama.h&quot;]
         L1[&quot;llama_model_load_from_file&quot;]
@@ -157,7 +157,7 @@ through.</li>
 in the repo it reads top to bottom.</p>
 <figure class="diagram"><pre class="mermaid">sequenceDiagram
     autonumber
-    participant M as tools/main loop
+    participant M as tools/cli loop
     participant D as llama_context::decode
     participant P as process_ubatch
     participant B as build_graph (models/llama.cpp)
@@ -416,7 +416,7 @@ backend choice and cross-device copies are inserted.</li>
 then one trait-table dispatch in <code>ggml.c:675+</code>.</li>
 <li><code>src/llama-kv-cache.cpp:916 find_slot</code> — slot assignment as
 admission control; then <code>src/llama-sampler.cpp:895 llama_sampler_sample</code> and the chain in <code>:966 llama_sampler_chain_add</code>.</li>
-<li><code>tools/main/main.cpp</code> — the loop that ties it together: decode
+<li><code>tools/cli/main.cpp</code> — the loop that ties it together: decode
 → sample → print → append; everything you read, in 15 lines.</li>
 </ol>
 <p>You have now traced one token from a batch call through a

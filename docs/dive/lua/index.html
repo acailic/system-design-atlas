@@ -224,7 +224,7 @@ is a pointer swap, not a copy.</p>
 </li>
 <li><p><strong>Interned strings + the <code>stringtable</code>.</strong>
 <strong>What:</strong> every string is a <code>TString</code> hash-consed into a global
-hash table (<code>lstring.c:96</code> <code>luaS_new</code>, <code>:133 luaS_init</code>).
+hash table (<code>lstring.c:269</code> <code>luaS_new</code>, <code>:133 luaS_init</code>).
 <strong>Why:</strong> string comparison becomes pointer equality (the hot path
 in every dynamic language), table keys get cheap hashing
 (<code>hashstr</code>, <code>ltable.c:115</code>), and interning gives the GC a single

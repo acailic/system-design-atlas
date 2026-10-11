@@ -205,7 +205,7 @@ no registers, no leaked frames, one tidy `lua_State`.
 
 - **Interned strings + the `stringtable`.**
   **What:** every string is a `TString` hash-consed into a global
-  hash table (`lstring.c:96` `luaS_new`, `:133 luaS_init`).
+  hash table (`lstring.c:269` `luaS_new`, `:133 luaS_init`).
   **Why:** string comparison becomes pointer equality (the hot path
   in every dynamic language), table keys get cheap hashing
   (`hashstr`, `ltable.c:115`), and interning gives the GC a single

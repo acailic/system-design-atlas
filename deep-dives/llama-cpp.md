@@ -58,7 +58,7 @@ the datacenter to the backpack.
 
 ```mermaid
 flowchart TD
-    APP["tools/main, tools/server, your app"]
+    APP["tools/cli, tools/server, your app"]
 
     subgraph api["C API — include/llama.h"]
         L1["llama_model_load_from_file"]
@@ -137,7 +137,7 @@ in the repo it reads top to bottom.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant M as tools/main loop
+    participant M as tools/cli loop
     participant D as llama_context::decode
     participant P as process_ubatch
     participant B as build_graph (models/llama.cpp)
@@ -400,7 +400,7 @@ itself was mutated to produce the token.
     admission control; then `src/llama-sampler.cpp:895
     llama_sampler_sample` and the chain in `:966
     llama_sampler_chain_add`.
-12. `tools/main/main.cpp` — the loop that ties it together: decode
+12. `tools/cli/main.cpp` — the loop that ties it together: decode
     → sample → print → append; everything you read, in 15 lines.
 
 You have now traced one token from a batch call through a

@@ -259,8 +259,8 @@ pointer; <code>protocol.c:131</code> shows http/https sharing one
 implementation with different flags.
 <strong>Why:</strong> the engine&#39;s branches key off <em>flags</em>, not scheme names —
 so &quot;add a new TLS-wrapped protocol&quot; is a table entry plus flag
-reuse, the registered-component pattern <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/ffmpeg.md">FFmpeg</a> also
-runs (and curl runs it in ~200 lines).</p>
+reuse, the registered-component pattern FFmpeg also runs (and curl
+runs it in ~200 lines).</p>
 </li>
 <li><p><strong>The client-writer chain (<code>cw-*</code>).</strong>
 <strong>What:</strong> response bytes flow through <code>cw-out</code> (terminal delivery
