@@ -42,6 +42,11 @@ CONTRIBUTING.md). Deep-dives quote from upstream code only as commentary:
   | Moby | Apache-2.0 | permissive; short attributed quotes fine |
   | etcd | Apache-2.0 | permissive; short attributed quotes fine |
   | VS Code | MIT | permissive; repo code only — product binaries are Microsoft-licensed |
+  | Memcached | BSD-3-Clause | permissive; short attributed quotes fine |
+  | Apache httpd | Apache-2.0 | permissive; short attributed quotes fine |
+  | Apache ZooKeeper | Apache-2.0 | permissive; short attributed quotes fine |
+  | NATS | Apache-2.0 | permissive; short attributed quotes fine |
+  | libuv | MIT | permissive; short attributed quotes fine |
 
 - When in doubt, paraphrase in prose and cite `file:function` as a pointer
   instead of quoting. A pointer is always license-clean.

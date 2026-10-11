@@ -83,10 +83,15 @@ Deep-dives (the exemplars — more added over time):
 - [VS Code](deep-dives/vscode.md) — extension host isolation, RPC object graph, LSP/DAP seams
 - [etcd](deep-dives/etcd.md) — Raft as deterministic FSM, MVCC revisions, ReadIndex reads
 - [Elasticsearch](deep-dives/elasticsearch.md) — NRT write path, cluster state diffs, scatter-gather search
+- [Memcached](deep-dives/memcached.md) — slab allocator, segmented LRU, smart clients over smart server
+- [Apache httpd](deep-dives/httpd.md) — hook-based module platform, filters, pools, swappable MPMs
+- [ZooKeeper](deep-dives/zookeeper.md) — ZAB consensus, ordered znode tree, sessions + one-shot watches
+- [NATS](deep-dives/nats.md) — subject trie routing, minimal text protocol, opt-in JetStream durability
+- [libuv](deep-dives/libuv.md) — portable event loop: phases, watcher queues, thread pool + async doorbell
 
-The catalog tracks 21 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Linux kernel, Memcached, Apache
-httpd, ZooKeeper, RocksDB, Prometheus-class classics and more —
+The catalog tracks 16 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — Linux kernel, RocksDB, Node.js, Lua,
+V8, Prometheus-class classics and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors. Linux and Chromium are cataloged for
 targeted reading rather than deep-dives by design (see their entries).

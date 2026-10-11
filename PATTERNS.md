@@ -44,7 +44,10 @@ selectable modes behind the pager; [PostgreSQL](deep-dives/postgresql.md)
 stops being a technique and becomes the product; [etcd](deep-dives/etcd.md)
 — raft entries and snapshots framed in a WAL the server replays on
 restart; [Elasticsearch](deep-dives/elasticsearch.md) — the translog
-is the WAL that decouples "searchable" (refresh) from "durable" (flush).
+is the WAL that decouples "searchable" (refresh) from "durable" (flush);
+[ZooKeeper](deep-dives/zookeeper.md) — FileTxnLog appends every
+proposal and fsyncs before the follower acks, so election is just
+"highest log wins."
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -81,7 +84,10 @@ incident, not an outage.
 workers die and respawn; [PostgreSQL](deep-dives/postgresql.md) — the
 postmaster forks backends, one connection per process;
 [Redis](deep-dives/redis.md) — persistence by fork: the child is an
-expendable snapshotter over copy-on-write memory.
+expendable snapshotter over copy-on-write memory;
+[Apache httpd](deep-dives/httpd.md) — the MPM parent supervises score-
+board-tracked children and respawns them while a graceful restart
+drains the old generation.
 
 **Why it recurs:** crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.
@@ -99,8 +105,11 @@ callbacks; concurrency without shared-memory parallelism.
 **Seen in:** [Redis](deep-dives/redis.md) — `ae` loop, plus the
 evolution of IO threads around a still-serial command core;
 [nginx](deep-dives/nginx.md) — one loop per worker with state
-machines instead of threads. (The catalog's libuv/node entries
-generalize it to any runtime.)
+machines instead of threads;
+[Memcached](deep-dives/memcached.md) — one libevent loop per worker
+thread, connections dispatched round-robin at accept;
+[libuv](deep-dives/libuv.md) — the pattern distilled into a portable
+library: phases, watcher queues, and a poller backend per OS.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -120,7 +129,10 @@ time-budgeted active expiry; [LevelDB](deep-dives/leveldb.md) —
 leveled compaction with slowdown/stop triggers;
 [PostgreSQL](deep-dives/postgresql.md) — vacuum as a background GC
 with autovacuum tuning; [Kubernetes](deep-dives/kubernetes.md) —
-resync periods as a safety net under the event stream.
+resync periods as a safety net under the event stream;
+[Memcached](deep-dives/memcached.md) — hash-table expansion by a
+background thread moving buckets under the same stripe locks the
+request path uses.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -137,7 +149,9 @@ converge; events are hints, truth is compared, not remembered.
 **Seen in:** [Kubernetes](deep-dives/kubernetes.md) — the entire
 control plane; [Moby](deep-dives/moby.md) — Config/HostConfig/State
 is the same spec/status split at container granularity (and restart
-policies are a reconcile loop over exit states).
+policies are a reconcile loop over exit states);
+[NATS](deep-dives/nats.md) — JetStream converges stream placement
+toward `desiredRaftGroup` state when servers fail or are added.
 
 **Why it recurs:** distributed systems miss events; idempotent
 convergence from any state survives what edge-triggered designs
@@ -155,7 +169,9 @@ abstraction; ports are implementations of it.
 **Seen in:** [SQLite](deep-dives/sqlite.md) — VFS is why it runs from
 phones to airliners; [LevelDB](deep-dives/leveldb.md) — `Env` as the
 whole OS surface; [nginx](deep-dives/nginx.md) — event-module vtables
-(epoll/kqueue/select behind one macro).
+(epoll/kqueue/select behind one macro);
+[libuv](deep-dives/libuv.md) — the whole product is this pattern: one
+loop core, one `uv__io_poll` per platform.
 
 **Why it recurs:** portability is architectural, not a build flag; the
 interface is where testing doubles (in-memory VFS, memdb) come from.
@@ -196,7 +212,10 @@ VFS, virtual tables, loadable extensions; [Kubernetes](deep-dives/kubernetes.md)
 — the C API whose safety shaped (and constrained) everything,
 including the GIL; [Moby](deep-dives/moby.md) — plugin protocols and
 OCI-standardized boundaries; [VS Code](deep-dives/vscode.md) — the
-stable/proposed two-tier API plus LSP/DAP as protocol-level seams.
+stable/proposed two-tier API plus LSP/DAP as protocol-level seams;
+[Apache httpd](deep-dives/httpd.md) — hooks, filters, and even the
+process model (MPM) are extension surfaces, which is why one binary
+served a decade of web-ecosystem roles.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -241,6 +260,34 @@ rot first.
 
 **Reach for it when:** the surface is large and regular. For small
 surfaces it is ceremony; past a few dozen operations it is survival.
+
+## 13. Dumb core, smart edges
+
+**Shape:** the server/daemon stays a simple mechanism (a hash-map
+daemon, an append-only log) and pushes sharding, routing, failover,
+and retry into client libraries that every ecosystem implements
+independently.
+
+**Seen in:** [Memcached](deep-dives/memcached.md) — zero cluster
+code in the server; consistent hashing (Ketama) and failover live in
+clients, so the server is just a slab-allocated hash map;
+[Kafka](deep-dives/kafka.md) — the broker is a dumb partitioned log;
+producers and consumer groups own routing, batching, and rebalancing;
+[Redis](deep-dives/redis.md) — the cluster era kept the same split,
+with MOVED/ASK redirects resolved client-side.
+
+**Why it recurs:** a dumb core is trivially fast, auditable, and
+never needs a consensus protocol — provided the data can be rebuilt
+or reread from somewhere else (a cache's source DB, a log's
+retention).
+
+**Reach for it when:** the system's data is derivable and
+edge-intelligence is deployable (fat clients everywhere). The cost is
+ecosystem-wide: behavior becomes client-library version skew, and
+operations that need a global view (rebalancing without client
+updates, multi-key transactions) become impossible or bolted on
+later — which is exactly the cliff both Memcached and early Kafka
+hit, and what ZooKeeper/etcd exist to catch on the coordination side.
 
 ---
 
