@@ -40,7 +40,7 @@ filters. This deep-dive teaches how that hook-and-filter architecture
 scaled an ecosystem (one binary served CGI farms, PHP hosts, and
 proxies), what the per-request cost of runtime-extensibility is, and
 how the Multi-Processing Module seam lets prefork, event, and the new
-motorz (io_uring) MPMs live behind one server API.</p>
+motorz MPM live behind one server API.</p>
 <p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/httpd/nginx.md">nginx</a> dive to see the two answers to
 &quot;what is a web server&quot;: a pipeline of modules over pools, versus a
 state machine in a worker process.</p>
@@ -74,7 +74,7 @@ server stays small <em>because</em> it refuses to do anything itself.</p>
     subgraph mpm[&quot;MPM — swappable process/thread model&quot;]
         P1[&quot;prefork: N processes,&lt;br/&gt;one connection each (prefork.c:412)&quot;]
         P2[&quot;event: listener + worker threads +&lt;br/&gt;timer skiplist (event.c:1947)&quot;]
-        P3[&quot;motorz: io_uring-driven (motorz.c)&quot;]
+        P3[&quot;motorz: APR poll-callback + APR thread pool (motorz.c)&quot;]
     end
 
     subgraph core[&quot;httpd core (server/)&quot;]
@@ -120,9 +120,10 @@ compiled modules at config time via <code>apr_dso_sym</code> (line 276) — the
 <li><strong>The MPM</strong> is the one hook set that decides process/thread layout
 (<code>server/mpm/</code>): at this pinned commit trunk ships <code>prefork</code>,
 <code>event</code>, <code>motorz</code>, <code>simple</code>, <code>winnt</code>, <code>mpmt_os2</code>, <code>netware</code>, <code>worker</code>
-— the io_uring MPM <code>motorz</code> arrived, and <code>event</code> has superseded
-<code>worker</code> as the default threaded MPM, keeping its threading but
-adding an async listener for keep-alive connections.</li>
+— the cross-platform MPM <code>motorz</code> arrived (APR poll callbacks with
+built-in timers over a simple APR thread pool), and <code>event</code> has
+superseded <code>worker</code> as the default threaded MPM, keeping its
+threading but adding an async listener for keep-alive connections.</li>
 </ul>
 <div class="walkthrough">
 <h2 id="walkthrough-one-get-accept-to-writev">Walkthrough: one GET, accept to writev</h2>
@@ -272,8 +273,10 @@ kills one child, one connection. Event
 everything (line 1947) and pushes work to <code>worker_thread</code>s (line
 2460); keep-alive connections that are just <em>waiting</em> are parked and
 polled instead of occupying a thread — the C10K answer, retrofitted
-under the same server API. <code>motorz</code> (<code>server/mpm/motorz/motorz.c</code>)
-is the trunk experiment doing it over io_uring.</li>
+under the same server API. <code>motorz</code> (<code>server/mpm/motorz/motorz.c</code>,
+per its <code>MOTORZ.README</code>) is the trunk&#39;s bid for a single MPM on every
+platform: Prefork&#39;s process framework with the Simple MPM&#39;s
+poll-callback event structure, feeding a simple APR thread pool.</li>
 <li><strong>Crash containment is the process model.</strong> A segfault kills a child;
 the parent (via scoreboard + <code>ap_reclaim_child_processes</code>) respawns
 it. Graceful restart sends children a &quot;finish current requests then
