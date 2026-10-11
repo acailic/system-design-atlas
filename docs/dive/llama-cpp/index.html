@@ -416,8 +416,9 @@ backend choice and cross-device copies are inserted.</li>
 then one trait-table dispatch in <code>ggml.c:675+</code>.</li>
 <li><code>src/llama-kv-cache.cpp:916 find_slot</code> — slot assignment as
 admission control; then <code>src/llama-sampler.cpp:895 llama_sampler_sample</code> and the chain in <code>:966 llama_sampler_chain_add</code>.</li>
-<li><code>tools/cli/main.cpp</code> — the loop that ties it together: decode
-→ sample → print → append; everything you read, in 15 lines.</li>
+<li><code>tools/cli/cli.cpp:33 llama_cli</code> (main.cpp is a 5-line shim) and
+<code>tools/cli/cli-context.cpp:413 cli_context::run</code> — the loop that
+ties it together: decode → sample → print → append.</li>
 </ol>
 <p>You have now traced one token from a batch call through a
 freshly-built (or reused) tensor graph, a cross-device schedule, a

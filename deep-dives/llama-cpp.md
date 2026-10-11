@@ -400,8 +400,9 @@ itself was mutated to produce the token.
     admission control; then `src/llama-sampler.cpp:895
     llama_sampler_sample` and the chain in `:966
     llama_sampler_chain_add`.
-12. `tools/cli/main.cpp` — the loop that ties it together: decode
-    → sample → print → append; everything you read, in 15 lines.
+12. `tools/cli/cli.cpp:33 llama_cli` (main.cpp is a 5-line shim) and
+    `tools/cli/cli-context.cpp:413 cli_context::run` — the loop that
+    ties it together: decode → sample → print → append.
 
 You have now traced one token from a batch call through a
 freshly-built (or reused) tensor graph, a cross-device schedule, a
