@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZooKeeper: consensus wrapped in a tiny ordered filesystem — System Design Atlas</title>
+<meta name="description" content="ZooKeeper is the coordination kernel the entire Hadoop-era stack was built on, and its design thesis is that a consensus protocol becomes usable when you hide it inside a data structure ever">
+<meta property="og:title" content="ZooKeeper: consensus wrapped in a tiny ordered filesystem — System Design Atlas">
+<meta property="og:description" content="ZooKeeper is the coordination kernel the entire Hadoop-era stack was built on, and its design thesis is that a consensus protocol becomes usable when you hide it inside a data structure ever">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-create-client-to-datatree">Walkthrough: one create, client to DataTree</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>ZooKeeper: consensus wrapped in a tiny ordered filesystem</h1>
+    <div class="meta-chips"><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/apache/zookeeper" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>48f7cb00e2d48d4563e45bebcd0f4665c30772a2</code> · 2026-10-05 · <a href="https://github.com/apache/zookeeper" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">ZooKeeper is the coordination kernel the entire Hadoop-era stack was
+built on, and its design thesis is that <strong>a consensus protocol becomes
+usable when you hide it inside a data structure everyone already
+understands</strong>: a small hierarchical namespace of znodes, replicated on
+every server via atomic broadcast (ZAB), with ephemeral nodes and
+one-shot watches layered on top as client-side conventions. The write
+path is one leader, totally ordered, fsync-per-proposal; the read path
+is any server, answered locally, no quorum. This deep-dive teaches that
+split, the request-processor pipeline that makes it real, and the
+trade-offs (strict ordering over throughput, one-shot watches over
+persistent streams, local reads over linearizable ones) that later
+systems — etcd, Consul — inherited or corrected.</p>
+<p>Read it after <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a>: the same problem (a small, strongly
+consistent, watchable store), solved a decade earlier with a bespoke
+protocol (ZAB instead of Raft) and a tree instead of a flat keyspace.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A notebook copied identically across several offices.</strong> Every office
+(an ensemble server) keeps the exact same notebook of pages
+(znodes: <code>/app1/leader</code>, <code>/jobs/17/status</code>). Writes always go to head
+office (the leader): the head office numbers each change
+(<code>zxid</code> — epoch in the high 32 bits, counter in the low), mails a copy
+(proposal) to every branch, and only when a majority of branches write
+the page in their own notebook does everyone stamp it &quot;official&quot;
+(commit). Reads, though, you can ask any office — the answer comes from
+that office&#39;s notebook instantly, without a company-wide meeting
+(reads are local; writes are quorum). You can also ask an office to
+buzz you the moment a page changes (a watch) — the buzz fires <em>once</em>,
+then you must ask again. Some pages are written in erasable pencil
+(ephemeral znodes): if the member who created them stops paying rent
+(the session times out), the pages erase themselves — which is how the
+company knows who is still alive without anyone watching everyone.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> one serialized write path makes
+every update atomic and ordered for free, and pushing liveness to
+client-side conventions (sessions + ephemerals + watches) keeps the
+server from becoming a failure detector itself.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CL[&quot;clients&quot;]
+
+    subgraph ensemble[&quot;ensemble: one leader + followers + observers&quot;]
+        subgraph leader[&quot;LeaderZooKeeperServer&quot;]
+            LCH[&quot;LeaderRequestProcessor&lt;br/&gt;→ PrepRequestProcessor&quot;]
+            PP[&quot;ProposalRequestProcessor&lt;br/&gt;Leader.propose (1295)&quot;]
+            CP[&quot;CommitProcessor&quot;]
+            FIN1[&quot;ToBeApplied → FinalRequestProcessor&quot;]
+        end
+        subgraph follower[&quot;FollowerZooKeeperServer&quot;]
+            FRP[&quot;FollowerRequestProcessor&lt;br/&gt;reads: executed locally&lt;br/&gt;writes: forwarded to leader&quot;]
+            CP2[&quot;CommitProcessor&quot;]
+            FIN2[&quot;FinalRequestProcessor&quot;]
+            SAP[&quot;SyncRequestProcessor&lt;br/&gt;→ SendAckRequestProcessor&quot;]
+        end
+        DT1[&quot;DataTree + txn log (leader)&quot;]
+        DT2[&quot;DataTree + txn log (follower)&quot;]
+    end
+
+    CL --&gt;|&quot;write&quot;| FRP --&gt;|&quot;forward&quot;| LCH
+    CL --&gt;|&quot;read&quot;| FRP
+    LCH --&gt; PP --&gt;|&quot;PROPOSAL → followers&quot;| SAP
+    SAP --&gt;|&quot;ACK&quot;| PP
+    PP --&gt;|&quot;quorum reached → COMMIT&quot;| CP
+    CP --&gt; FIN1 --&gt; DT1
+    CP2 --&gt; FIN2 --&gt; DT2
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Roles.</strong> Every server is a <code>QuorumPeer</code>
+(<code>server/quorum/QuorumPeer.java:579</code> — states <code>LOOKING / FOLLOWING / LEADING / OBSERVING</code>). The leader owns the single write pipeline;
+followers forward writes and answer reads locally; observers replicate
+but never vote (scaling the read path without changing quorum math).</li>
+<li><strong>The request pipeline is a chain of one-threaded processors</strong> — the
+architecture&#39;s central idea:<ul>
+<li>Leader: <code>LeaderZooKeeperServer.setupRequestProcessors</code> —
+<code>LeaderRequestProcessor → PrepRequestProcessor → ProposalRequestProcessor → CommitProcessor → ToBeApplied → FinalRequestProcessor</code>.</li>
+<li>Follower: <code>FollowerZooKeeperServer.setupRequestProcessors</code> —
+<code>FollowerRequestProcessor → CommitProcessor → FinalRequestProcessor</code>,
+plus a side <code>SyncRequestProcessor → SendAckRequestProcessor</code> that
+logs and acks incoming proposals.</li>
+<li>Standalone: <code>ZooKeeperServer.java:855</code> — <code>PrepRequestProcessor → SyncRequestProcessor → FinalRequestProcessor</code> (same chain, minus
+the network).</li>
+</ul>
+</li>
+<li><strong>The spine</strong> of a write at the leader: <code>ZooKeeperServer.processPacket</code>
+(<code>ZooKeeperServer.java:1731</code>) → <code>submitRequest</code> (1229) → Prep
+(turns a request into a txn record) → <code>Leader.propose</code>
+(<code>Leader.java:1295</code>) → followers <code>SyncRequestProcessor</code> log + ACK →
+<code>Leader.processAck</code> (<code>Leader.java:1054</code>) → <code>tryToCommit</code> → COMMIT
+broadcast → <code>CommitProcessor</code> releases → <code>FinalRequestProcessor</code>
+applies to <code>DataTree</code> and answers the client.</li>
+<li><strong>Persistence</strong>: every proposal is an append to <code>FileTxnLog</code>
+(<code>server/persistence/FileTxnLog.java:393</code> <code>commit</code>, fsync at 410),
+snapshots of the DataTree via <code>FileSnap</code>. Recovery = load snapshot +
+replay log; leader election picks the server with the highest
+committed zxid to lead.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-create-client-to-datatree">Walkthrough: one create, client to DataTree</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client (any follower)
+    participant FR as FollowerRequestProcessor
+    participant L as Leader.propose (1295)
+    participant FL as Followers&#39; SyncRequestProcessor
+    participant CA as Leader.processAck (1054)
+    participant FI as FinalRequestProcessor (147)
+    C-&gt;&gt;FR: create(&quot;/app1/leader&quot;, data, EPHEMERAL)
+    FR-&gt;&gt;FR: PrepRequestProcessor → txn record (zxid assigned)
+    FR-&gt;&gt;L: forward write to leader
+    L-&gt;&gt;L: zxid = (epoch&lt;&lt;32) | ++counter
+    L-&gt;&gt;FL: PROPOSAL packet
+    FL-&gt;&gt;FL: append to FileTxnLog + fsync
+    FL--&gt;&gt;CA: ACK
+    CA-&gt;&gt;CA: quorum of acks → tryToCommit
+    CA-&gt;&gt;FL: COMMIT broadcast
+    CA-&gt;&gt;FI: CommitProcessor releases request
+    FI-&gt;&gt;FI: DataTree.processTxn → create znode
+    FI-&gt;&gt;FI: trigger watches on parent&#39;s children
+    FI--&gt;&gt;C: response: created path
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-packet-lands-on-whichever-server-the-client-talks-to">The packet lands on whichever server the client talks to</h3>
+<p><code>processPacket</code> (<code>ZooKeeperServer.java:1731</code>) parses the request header
+and builds a <code>Request</code> — the unit that flows through the whole
+pipeline — then <code>submitRequest</code> (line 1229) hands it to the throttler
+and the first processor.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="reads-stay-home-writes-travel">Reads stay home, writes travel</h3>
+<p>On a follower,
+<code>FollowerRequestProcessor.run</code> (<code>FollowerRequestProcessor.java</code>) walks
+its queue: for <code>create/delete/setData/setACL/…</code> it calls
+<code>zks.getFollower().request(request)</code> — forward to the leader — while
+<code>get/exists/getChildren</code> simply fall through the local chain to
+<code>FinalRequestProcessor</code>. The comment in the code says why writes queue
+locally first: &quot;We want to queue the request to be processed before we
+submit the request to the leader so that we are ready to receive the
+response.&quot;</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="prep-turns-intent-into-a-transaction">Prep turns intent into a transaction</h3>
+<p><code>PrepRequestProcessor</code>
+(<code>PrepRequestProcessor.java:93</code>, <code>pRequest2Txn</code> at 314) validates path,
+ACLs, and session state, and produces a <code>TxnHeader</code> + record (e.g.
+<code>CreateTxn</code>) — the operation is now a serializable fact, not a wish.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-leader-proposes-with-a-number">The leader proposes with a number</h3>
+<p><code>Leader.propose</code>
+(<code>Leader.java:1295</code>) assigns the zxid (monotonic counter under the
+current epoch — see <code>ZxidUtils.makeZxid</code>,
+<code>server/util/ZxidUtils.java:21</code>), puts the proposal in
+<code>outstandingProposals</code>, and broadcasts a PROPOSAL packet to every
+LearnerHandler. Note the rollover guard: at 0xffffffff counter bits it
+forces re-election rather than wrap.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="followers-make-it-durable-before-they-agree">Followers make it durable before they agree</h3>
+<p>Each
+follower&#39;s <code>SyncRequestProcessor</code> appends the proposal to its
+<code>FileTxnLog</code> — <code>commit()</code> (<code>FileTxnLog.java:393</code>) batches writes and
+<code>channel.force(false)</code> (line 410) fsyncs (skippable only via
+<code>zookeeper.forceSync=no</code>) — then <code>SendAckRequestProcessor</code> sends ACK.
+An ack means &quot;on disk,&quot; not &quot;applied.&quot;</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="a-quorum-commits">A quorum commits</h3>
+<p><code>Leader.processAck</code> (<code>Leader.java:1054</code>)
+adds the ack to the proposal and calls <code>tryToCommit</code>: when the
+quorum-verifier is satisfied, the leader broadcasts COMMIT, moves the
+proposal to <code>toBeApplied</code>, and the <code>CommitProcessor</code> (which held the
+client request) releases it in order.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="apply-and-answer">Apply and answer</h3>
+<p><code>FinalRequestProcessor.processRequest</code>
+(<code>FinalRequestProcessor.java:147</code>) runs <code>DataTree.processTxn</code>
+(<code>DataTree.java</code> — create path at <code>createNode</code>, watch firing at line
+531), touches the session, builds the reply, and returns it to the
+client — on whichever server the client is connected to.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-znode-exists-everywhere">The znode exists everywhere</h3>
+<p>The same zxid is in every
+surviving server&#39;s log and DataTree; a client watching the parent got
+one <code>NodeChildrenChanged</code> event; if the creating session dies, the
+node will vanish when the leader expires the session and replays that
+rule as a delete transaction.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="datatree-datanode-the-namespace-server-datanode-java-40-server-datatree-java">DataTree + DataNode — the namespace (<code>server/DataNode.java:40</code>, <code>server/DataTree.java</code>)</h3>
+<p>A <code>DataNode</code> is <code>byte[] data</code> + <code>StatPersisted stat</code> + a <code>Set&lt;String&gt;</code>
+of child <em>names</em> (not paths — the tree is edges-in-memory, children
+stored by last token) + <code>Long acl</code> into a shared ACL cache. The
+<code>DataTree</code> holds <code>ConcurrentHashMap&lt;String, DataNode&gt; nodes</code>, an
+<code>ephemerals</code> map (session → znode set) for expiry, and the two watch
+managers. Why a tree of small byte arrays and not a document store:
+coordination state is tiny (<code>/leader</code>, <code>/locks/17</code>, config blobs);
+keeping values opaque makes the server generic, and makes the <em>tree
+structure itself</em> the API (children lists are a query primitive).</p>
+<h3 id="zxid-epoch-32-counter-server-util-zxidutils-java-21">zxid — epoch « 32 | counter (<code>server/util/ZxidUtils.java:21</code>)</h3>
+<p>One 64-bit number that totally orders all history: the epoch half
+increments at every leader change (so a stale leader&#39;s proposals
+compare <em>lower</em> than the new leader&#39;s), the counter half increments
+per proposal. Election, log comparison, and commit ordering all reduce
+to integer comparison — the same trick Raft uses with (term, index),
+pulled into a single comparable long.</p>
+<h3 id="watchmanager-two-maps-and-one-shot-semantics-server-watch-watchmanager-java-135">WatchManager — two maps and one-shot semantics (<code>server/watch/WatchManager.java:135</code>)</h3>
+<p>Watches live in two indexes: <code>watchTable</code> (path → watchers) for firing
+and <code>watch2Paths</code> (watcher → paths) so a dead connection can be
+reaped. <code>triggerWatch</code> (line 135) fires and <em>removes</em> the watcher in
+one synchronized pass — the one-shot contract is enforced by the data
+structure, not by client discipline. Why one-shot: a persistent watch
+would require acked, resumable event streams (what etcd&#39;s watch with
+revisions eventually built); one-shot events over a client session
+were the 2008-feasible answer, and they force the safe pattern —
+re-read state, then re-watch — instead of trusting a stale event.</p>
+<h3 id="sessiontracker-with-bucketed-expiry-server-sessiontrackerimpl-java-45-server-expiryqueue-java-35">SessionTracker with bucketed expiry (<code>server/SessionTrackerImpl.java:45</code>, <code>server/ExpiryQueue.java:35</code>)</h3>
+<p>Sessions are tracked with rounded expiry deadlines:
+<code>ExpiryQueue.update</code> (<code>ExpiryQueue.java:84</code>) rounds &quot;now + timeout&quot; to
+the next bucket boundary, so thousands of sessions with individually
+random timeouts collapse into a manageable set of expiry buckets; the
+tracker thread (<code>SessionTrackerImpl.run</code>, line 158) sleeps to the next
+bucket and expires the whole batch. The rounding is paid for by
+clients (timeouts are minimums, not exact). Ephemeral cleanup and
+connection death are joined at the hip: <code>killSession</code>
+(<code>DataTree.java:1140</code>) deletes ephemerals as ordinary transactions, so
+even liveness changes go through the ordered log.</p>
+<h3 id="filetxnlog-with-preallocation-server-persistence-filetxnlog-java">FileTxnLog with preallocation (<code>server/persistence/FileTxnLog.java</code>)</h3>
+<p>Append-only transaction log with preallocated padded space
+(<code>padFile</code>, line 309, filling the file with zeros ahead of the write
+head) so appends stay sequential, group commit (<code>commit</code> at 393, with
+<code>toFlush</code> batching in <code>SyncRequestProcessor.java:85</code>), and fsync
+before ack (line 410). Same WAL discipline as the etcd dive — the log
+is the truth, the DataTree is a materialized view.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One serialized write path.</strong> All mutations funnel through the
+leader&#39;s proposal queue; ordering is the protocol&#39;s guarantee, so
+there is no write-write concurrency to manage — only pipeline
+concurrency (prep can run ahead of commit). Each processor is a
+thread with a blocking queue; the <code>CommitProcessor</code> is the join point
+where agreed order and local execution meet, holding client requests
+until their zxid commits.</li>
+<li><strong>Election as state machine.</strong> <code>QuorumPeer.run</code>
+(<code>QuorumPeer.java</code>, <code>LOOKING/FOLLOWING/LEADING/OBSERVING</code> at lines
+579-582) drives <code>FastLeaderElection</code> (<code>quorum/FastLeaderElection.java</code>):
+votes compare (epoch, zxid, sid); the winner is the highest logged
+state, and the new epoch (<code>Leader.getEpochToPropose</code>, <code>Leader.java:1469</code>)
+makes all old proposals forever smaller than all new ones.</li>
+<li><strong>Recovery sync per follower.</strong> On connect, the leader&#39;s
+<code>LearnerHandler</code> compares the follower&#39;s last zxid against its own
+and sends DIFF (replay missing proposals), TRUNC (drop a divergent
+tail from a dead leader&#39;s uncommitted proposal), or SNAP (a full
+snapshot) — <code>LearnerHandler.java</code> cases at lines 424-593. After
+NEWLEADER acks and <code>waitForEpochAck</code> (<code>Leader.java:1515</code>) unblocks,
+<code>startForwarding</code> (line 1367) turns on live proposals.</li>
+<li><strong>Crash of the leader mid-commit</strong> is safe by construction: a
+proposal with a quorum of acks is in a quorum of logs, so election
+(highest zxid wins) guarantees it survives; a proposal without
+quorum dies in the TRUNC. The classic ZAB invariant — committed
+prefix, never a hole — falls out of fsync-before-ack plus
+highest-zxid election.</li>
+<li><strong>Overload behavior</strong>: the request throttler (<code>requestThrottler</code> in
+<code>submitRequest</code>, <code>ZooKeeperServer.java:1260</code>) bounds queued requests;
+sessions shed load naturally (timeouts), and <code>BlueThrottle</code>
+(<code>server/BlueThrottle.java</code>) can drop connection storms. There is no
+backpressure protocol to clients beyond errors and session expiry —
+one more reason the docs beg you not to use ZooKeeper as a queue.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The API is the znode operations</strong>, not a generic KV store:
+<code>create/getChildren/setData/exists/delete/getACL/setACL</code>, multi
+(transactional batch), sync, reconfig. Sessions are first-class —
+every connection has one, and ephemerals + watches are defined in
+terms of it. This is API design by <em>what the coordination use cases
+need</em> (leader election, locking, group membership, config), and it is
+why the recipes (in <code>zookeeper-recipes/</code>) are short.</li>
+<li><strong>Observers</strong> (<code>server/quorum/Observer*.java</code>) are the scaling seam:
+add read-serving replicas without touching quorum size. <strong>The admin
+surface</strong> moved from four-letter words (<code>stat</code>, <code>srvr</code> — still in
+<code>server/command/</code>) to an HTTP admin server; <strong>authentication</strong> is
+pluggable per-server (Digest, SASL) and per-znode ACLs are stored in
+the DataTree&#39;s acl cache.</li>
+<li><strong>The extension wart</strong>: everything is fixed. You cannot add a new
+operation, a new watch semantic, or a new consistency mode without
+forking the protocol — the JUTE-generated records
+(<code>zookeeper-jute/</code>) fix the wire format. Compare etcd, where the
+watch API, lease API, and KV API sit behind gRPC endpoints that grew
+independently; ZooKeeper&#39;s 2008 wire protocol is a single frozen
+struct family.</li>
+<li><strong>The read consistency wart is documented, not hidden</strong>: reads are
+<em>linearizable only per server</em> (a client may read stale data after a
+failover). The escape hatch is the <code>sync()</code> call — literally &quot;flush
+my server up to the leader&quot; — which on followers goes through the
+full proposal path (<code>pendingSyncs</code> in
+<code>FollowerRequestProcessor.java</code>).</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-total-order-through-one-leader-over-parallel-writes">Trade-off 1: total order through one leader over parallel writes</h3>
+<ul>
+<li><strong>Tension:</strong> every client wants atomic, ordered updates; disks and
+networks want parallelism.</li>
+<li><strong>Choice:</strong> one leader, one counter, fsync per proposal batch, quorum
+acks, in-order commit.</li>
+<li><strong>Evidence:</strong> <code>Leader.propose</code> (<code>Leader.java:1295</code>) assigns zxids
+sequentially and inserts into <code>outstandingProposals</code>;
+<code>processAck</code>/<code>tryToCommit</code> (1054) commit strictly in zxid order;
+<code>FileTxnLog.commit</code> fsyncs before the follower&#39;s
+<code>SendAckRequestProcessor</code> acks.</li>
+<li><strong>Given up:</strong> write throughput bounded by one leader&#39;s log fsync and
+network fan-out — the documented reason ZooKeeper tops out at tens of
+thousands of writes per second and why the docs forbid using it as a
+data store.</li>
+<li><strong>Verdict:</strong> right for coordination (small, hot, correctness-critical
+state — the workload where ordering <em>is</em> the product). Wrong the
+moment writes are a firehose; that is Kafka-land, where the log is
+sharded per partition and each partition is its own serialized
+leader — the same trade, made per-shard instead of globally.</li>
+</ul>
+<h3 id="trade-off-2-one-shot-watches-over-persistent-subscriptions">Trade-off 2: one-shot watches over persistent subscriptions</h3>
+<ul>
+<li><strong>Tension:</strong> clients need change notification; the server must not
+become an event-delivery system with per-client queues and acks.</li>
+<li><strong>Choice:</strong> a watch fires exactly once, then is gone; the client
+re-reads and re-watches.</li>
+<li><strong>Evidence:</strong> <code>WatchManager.triggerWatch</code>
+(<code>server/watch/WatchManager.java:135</code>) removes the watcher from both
+maps as it collects the fire set, inside the same synchronized block
+that builds the event.</li>
+<li><strong>Given up:</strong> no event history, no missed-update detection, and the
+classic bug pattern (read state → set watch has a gap; the one-shot
+re-watch protocol is client-side and easy to get wrong). etcd&#39;s
+revision-stamped watch streams are the direct fix for this gap.</li>
+<li><strong>Verdict:</strong> right when state is small and re-reading is cheap —
+coordination state again. Wrong when events are frequent or the
+watched payload is large; then you need a log with offsets, not a
+doorbell.</li>
+</ul>
+<h3 id="trade-off-3-locally-served-reads-over-quorum-verified-reads">Trade-off 3: locally-served reads over quorum-verified reads</h3>
+<ul>
+<li><strong>Tension:</strong> a coordination service is read-dominated (every
+leader-election loop polls); quorum reads would double its latency
+and halve its capacity.</li>
+<li><strong>Choice:</strong> any server answers reads from its own DataTree; only
+<code>sync()</code> forces the follower to catch up to the leader first.</li>
+<li><strong>Evidence:</strong> <code>FollowerRequestProcessor.run</code> — read opcodes fall
+through the local <code>CommitProcessor → FinalRequestProcessor</code> chain,
+while write opcodes branch to <code>zks.getFollower().request(request)</code>;
+the <code>sync</code> opcode is the one &quot;read&quot; that joins the write path
+(<code>pendingSyncs</code>).</li>
+<li><strong>Given up:</strong> linearizable reads across failover — after a leader
+change, a client talking to a slow follower can observe older state
+than it just wrote elsewhere (bounded by one election; documented as
+&quot;session guarantees,&quot; not linearizability).</li>
+<li><strong>Verdict:</strong> right for leases, locks, and group membership where
+the fencing number (zxid/version) — not the read freshness — carries
+correctness. Wrong when clients treat the store as a source of truth
+for decisions made <em>on read value alone</em>; that design needs etcd&#39;s
+ReadIndex or Serializable-vs-Linearizable choice made explicit per
+call.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>server/quorum/QuorumPeer.java:579</code> — the four states and the
+<code>run()</code> loop that transitions between them; the whole system is one
+instance of this state machine per process.</li>
+<li><code>server/ZooKeeperServer.java:1731</code> <code>processPacket</code> — where client
+bytes become <code>Request</code>s; then <code>submitRequest</code> (1229) and the
+throttler.</li>
+<li><code>server/ZooKeeperServer.java:855</code> <code>setupRequestProcessors</code> — the
+standalone chain (Prep → Sync → Final); memorize this shape before
+the quorum variants.</li>
+<li><code>server/quorum/LeaderZooKeeperServer.java</code> and
+<code>FollowerZooKeeperServer.java</code>, both <code>setupRequestProcessors</code> —
+the same chain, extended: leader adds Proposal/ToBeApplied between
+Prep and Commit; follower adds the forwarding rule and the ack
+side-chain. This diff <em>is</em> the architecture.</li>
+<li><code>server/quorum/FollowerRequestProcessor.java:64</code> <code>run</code> — the
+read/write split in one switch statement; note <code>pendingSyncs</code> for
+<code>sync</code>.</li>
+<li><code>server/quorum/Leader.java:1295</code> <code>propose</code> — zxid assignment,
+<code>outstandingProposals</code>, the xid-rollover guard; then
+<code>processAck</code> (1054) and the <code>tryToCommit</code> call inside it.</li>
+<li><code>server/persistence/FileTxnLog.java:393</code> <code>commit</code> — append, group
+flush, <code>channel.force</code> at 410; then <code>FileSnap</code>/<code>FileTxnSnapLog</code> for
+the snapshot side.</li>
+<li><code>server/DataTree.java</code> — <code>processTxn</code> (867) and <code>createNode</code> (410,
+watch trigger at 531), <code>killSession</code> (1140) for ephemeral semantics as
+ordinary transactions.</li>
+<li><code>server/watch/WatchManager.java:135</code> <code>triggerWatch</code> — the two-map,
+fire-and-remove design in one synchronized method.</li>
+<li><code>server/SessionTrackerImpl.java:45</code> + <code>server/ExpiryQueue.java:84</code>
+<code>update</code> — bucketed expiry rounding; then <code>run</code> (158) for the
+batching loop.</li>
+<li><code>server/quorum/Leader.java:1469</code> <code>getEpochToPropose</code>, 1515
+<code>waitForEpochAck</code>, and <code>server/quorum/LearnerHandler.java</code> lines
+424-593 — election → epoch agreement → DIFF/TRUNC/SNAP sync →
+<code>startForwarding</code> (1367): the crash-recovery story end to end.</li>
+<li><code>server/quorum/FastLeaderElection.java</code> — vote exchange and the
+(epoch, zxid, sid) comparison; compare with etcd&#39;s raft vote
+request to see election as protocol data vs. protocol logic.</li>
+</ol>
+<p>You have now traced a <code>create</code> from a follower&#39;s socket, to the
+leader&#39;s counter, to a quorum&#39;s disks, back to the DataTree and the
+watch that fired — and the recovery story that makes the whole thing
+survive the leader dying at step 6.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Hide a consensus protocol inside a familiar data structure</strong>: a
+filesystem API made ZAB usable to people who never read the paper —
+the interface, not the algorithm, drove adoption.</li>
+<li><strong>One comparable number for history</strong> (zxid = epoch « 32 | counter,
+<code>ZxidUtils.makeZxid</code>): election, ordering, and staleness checks
+become integer comparisons everywhere in the code.</li>
+<li><strong>Make the ack mean &quot;on disk&quot;</strong> (<code>FileTxnLog.commit</code> fsync before
+<code>SendAckRequestProcessor</code>): durability claims attach to a specific,
+checkable moment, not to vibes.</li>
+<li><strong>Pipeline correctness through single-threaded stages with queues</strong>
+(the RequestProcessor chain): each invariant (validation, ordering,
+application) gets its own thread and its own place to be enforced.</li>
+<li><strong>Round expiry into buckets</strong> (<code>ExpiryQueue.update</code>): thousands of
+timers collapse into a handful of wakeups — session management at O(1)
+amortized.</li>
+<li><strong>Encode liveness as data</strong> (ephemerals + sessions): the system
+detects failure with its existing machinery (expiry transactions
+through the same log) instead of a parallel failure-detector
+subsystem.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong>. Java reading fluency plus distributed
+systems vocabulary; the hard parts are protocol invariants, not the
+code.</li>
+<li>Budget: ~8 hours for the reading path; the election/sync path
+(stops 11-12) deserves a second pass with the ZAB papers open.</li>
+<li>Prerequisites: what a WAL gives you (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a> dive
+builds the same background with Raft); quorum arithmetic (2f+1);
+sessions/leases as a concept. The original ZooKeeper paper (Hunt et
+al., 2008 — see below) is a genuine prerequisite, not decoration.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>P. Hunt, M. Konar, F. P. Junqueira, B. Reed, &quot;ZooKeeper: Wait-free
+coordination for Internet-scale systems&quot; (USENIX ATC 2010).</li>
+<li>F. P. Junqueira, B. Reed, M. Serafini, &quot;Zab: High-performance broadcast
+for primary-backup systems&quot; (DSN 2011) — the protocol this code
+implements.</li>
+<li>Apache ZooKeeper documentation — <a href="https://zookeeper.apache.org/doc/">https://zookeeper.apache.org/doc/</a> —
+especially the &quot;ZooKeeper Internals&quot; and &quot;Guarantees&quot; pages (the
+read-consistency caveats are documented there, honestly).</li>
+<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a> deep-dive in this atlas — the same store, one
+protocol generation later.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../httpd/"><span class="dir">← Previous dive</span>Apache httpd: the web server as a hook-running extension platform</a>
+  <a href="../nats/" style="text-align:right"><span class="dir">Next dive →</span>NATS: a subject trie with a wire protocol small enough to memorize</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 16 of 18 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

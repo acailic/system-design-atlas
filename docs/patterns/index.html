@@ -22,7 +22,7 @@
 </nav>
 <main id="main">
 <div class="page article-layout">
-<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
+<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
 <div>
   <header class="article-header"><h1>Patterns index: design lessons that recur</h1>
   <p class="lead">The deep-dives teach systems; this index teaches <strong>design</strong>. Each pattern appears in two or more canonical codebases — the recurrence is the signal.</p></header>
@@ -61,7 +61,10 @@ selectable modes behind the pager; <a href="../dive/postgresql/">PostgreSQL</a>
 stops being a technique and becomes the product; <a href="../dive/etcd/">etcd</a>
 — raft entries and snapshots framed in a WAL the server replays on
 restart; <a href="../dive/elasticsearch/">Elasticsearch</a> — the translog
-is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&quot; (flush).</p>
+is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&quot; (flush);
+<a href="../dive/zookeeper/">ZooKeeper</a> — FileTxnLog appends every
+proposal and fsyncs before the follower acks, so election is just
+&quot;highest log wins.&quot;</p>
 <p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
 mechanical replay.</p>
@@ -88,7 +91,10 @@ incident, not an outage.</p>
 workers die and respawn; <a href="../dive/postgresql/">PostgreSQL</a> — the
 postmaster forks backends, one connection per process;
 <a href="../dive/redis/">Redis</a> — persistence by fork: the child is an
-expendable snapshotter over copy-on-write memory.</p>
+expendable snapshotter over copy-on-write memory;
+<a href="../dive/httpd/">Apache httpd</a> — the MPM parent supervises score-
+board-tracked children and respawns them while a graceful restart
+drains the old generation.</p>
 <p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.</p>
 <p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
@@ -101,8 +107,11 @@ callbacks; concurrency without shared-memory parallelism.</p>
 <p><strong>Seen in:</strong> <a href="../dive/redis/">Redis</a> — <code>ae</code> loop, plus the
 evolution of IO threads around a still-serial command core;
 <a href="../dive/nginx/">nginx</a> — one loop per worker with state
-machines instead of threads. (The catalog&#39;s libuv/node entries
-generalize it to any runtime.)</p>
+machines instead of threads;
+<a href="../dive/memcached/">Memcached</a> — one libevent loop per worker
+thread, connections dispatched round-robin at accept;
+<a href="../dive/libuv/">libuv</a> — the pattern distilled into a portable
+library: phases, watcher queues, and a poller backend per OS.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -117,7 +126,10 @@ time-budgeted active expiry; <a href="../dive/leveldb/">LevelDB</a> —
 leveled compaction with slowdown/stop triggers;
 <a href="../dive/postgresql/">PostgreSQL</a> — vacuum as a background GC
 with autovacuum tuning; <a href="../dive/kubernetes/">Kubernetes</a> —
-resync periods as a safety net under the event stream.</p>
+resync periods as a safety net under the event stream;
+<a href="../dive/memcached/">Memcached</a> — hash-table expansion by a
+background thread moving buckets under the same stripe locks the
+request path uses.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -129,7 +141,9 @@ converge; events are hints, truth is compared, not remembered.</p>
 <p><strong>Seen in:</strong> <a href="../dive/kubernetes/">Kubernetes</a> — the entire
 control plane; <a href="../dive/moby/">Moby</a> — Config/HostConfig/State
 is the same spec/status split at container granularity (and restart
-policies are a reconcile loop over exit states).</p>
+policies are a reconcile loop over exit states);
+<a href="../dive/nats/">NATS</a> — JetStream converges stream placement
+toward <code>desiredRaftGroup</code> state when servers fail or are added.</p>
 <p><strong>Why it recurs:</strong> distributed systems miss events; idempotent
 convergence from any state survives what edge-triggered designs
 cannot.</p>
@@ -142,7 +156,9 @@ abstraction; ports are implementations of it.</p>
 <p><strong>Seen in:</strong> <a href="../dive/sqlite/">SQLite</a> — VFS is why it runs from
 phones to airliners; <a href="../dive/leveldb/">LevelDB</a> — <code>Env</code> as the
 whole OS surface; <a href="../dive/nginx/">nginx</a> — event-module vtables
-(epoll/kqueue/select behind one macro).</p>
+(epoll/kqueue/select behind one macro);
+<a href="../dive/libuv/">libuv</a> — the whole product is this pattern: one
+loop core, one <code>uv__io_poll</code> per platform.</p>
 <p><strong>Why it recurs:</strong> portability is architectural, not a build flag; the
 interface is where testing doubles (in-memory VFS, memdb) come from.</p>
 <p><strong>Reach for it when:</strong> the system must outlive your current platform
@@ -173,7 +189,10 @@ VFS, virtual tables, loadable extensions; <a href="../dive/kubernetes/">Kubernet
 — the C API whose safety shaped (and constrained) everything,
 including the GIL; <a href="../dive/moby/">Moby</a> — plugin protocols and
 OCI-standardized boundaries; <a href="../dive/vscode/">VS Code</a> — the
-stable/proposed two-tier API plus LSP/DAP as protocol-level seams.</p>
+stable/proposed two-tier API plus LSP/DAP as protocol-level seams;
+<a href="../dive/httpd/">Apache httpd</a> — hooks, filters, and even the
+process model (MPM) are extension surfaces, which is why one binary
+served a decade of web-ecosystem roles.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -206,6 +225,29 @@ implementation, documentation, and tooling — the places large systems
 rot first.</p>
 <p><strong>Reach for it when:</strong> the surface is large and regular. For small
 surfaces it is ceremony; past a few dozen operations it is survival.</p>
+<h2 id="13-dumb-core-smart-edges">13. Dumb core, smart edges</h2>
+<p><strong>Shape:</strong> the server/daemon stays a simple mechanism (a hash-map
+daemon, an append-only log) and pushes sharding, routing, failover,
+and retry into client libraries that every ecosystem implements
+independently.</p>
+<p><strong>Seen in:</strong> <a href="../dive/memcached/">Memcached</a> — zero cluster
+code in the server; consistent hashing (Ketama) and failover live in
+clients, so the server is just a slab-allocated hash map;
+<a href="../dive/kafka/">Kafka</a> — the broker is a dumb partitioned log;
+producers and consumer groups own routing, batching, and rebalancing;
+<a href="../dive/redis/">Redis</a> — the cluster era kept the same split,
+with MOVED/ASK redirects resolved client-side.</p>
+<p><strong>Why it recurs:</strong> a dumb core is trivially fast, auditable, and
+never needs a consensus protocol — provided the data can be rebuilt
+or reread from somewhere else (a cache&#39;s source DB, a log&#39;s
+retention).</p>
+<p><strong>Reach for it when:</strong> the system&#39;s data is derivable and
+edge-intelligence is deployable (fat clients everywhere). The cost is
+ecosystem-wide: behavior becomes client-library version skew, and
+operations that need a global view (rebalancing without client
+updates, multi-key transactions) become impossible or bolted on
+later — which is exactly the cliff both Memcached and early Kafka
+hit, and what ZooKeeper/etcd exist to catch on the coordination side.</p>
 <hr>
 <h2 id="how-to-use-this-index-while-learning">How to use this index while learning</h2>
 <ol>

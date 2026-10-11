@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NATS: a subject trie with a wire protocol small enough to memorize — System Design Atlas</title>
+<meta name="description" content="NATS is a messaging server whose entire design is subtraction: a wire protocol of a handful of text verbs (INFO/CONNECT/PUB/SUB/UNSUB/PING), subject strings with two wildcards, and a server ">
+<meta property="og:title" content="NATS: a subject trie with a wire protocol small enough to memorize — System Design Atlas">
+<meta property="og:description" content="NATS is a messaging server whose entire design is subtraction: a wire protocol of a handful of text verbs (INFO/CONNECT/PUB/SUB/UNSUB/PING), subject strings with two wildcards, and a server ">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-pub-socket-to-subscribers">Walkthrough: one PUB, socket to subscribers</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>NATS: a subject trie with a wire protocol small enough to memorize</h1>
+    <div class="meta-chips"><span class="chip domain">queue-log</span><span class="chip domain">networking</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/nats-io/nats-server" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>64dda80fdd87b41b2afcdc5faf5d846db6c189b0</code> · 2026-10-09 · <a href="https://github.com/nats-io/nats-server" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">NATS is a messaging server whose entire design is subtraction: a wire
+protocol of a handful of text verbs (INFO/CONNECT/PUB/SUB/UNSUB/PING),
+subject strings with two wildcards, and a server that is — at its core
+— <strong>a subject-matching trie plus per-connection read/write goroutines
+that copy bytes from one socket buffer to another</strong>. No per-message
+persistence, no acks, no broker-side queues by default: fire-and-forget
+delivery (at-most-once), with durability available as an opt-in layer
+(JetStream: Raft-replicated streams) for the messages that need it.
+This deep-dive teaches how far protocol minimalism plus one well-chosen
+data structure gets you — millions of messages per second in plain Go —
+and how NATS makes delivery semantics a <em>per-feature</em> decision instead
+of a system-wide one.</p>
+<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kafka.md">Kafka</a> dive: the same problem space,
+inverted. Kafka&#39;s broker is a dumb append-only log with heavy clients;
+NATS&#39;s broker is a smart in-memory router with featherweight clients —
+and JetStream is what it takes to bolt the log back on when &quot;at most
+once&quot; stops being acceptable.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A switchboard for mail addressed by topic.</strong> Anyone can shout &quot;letter
+for <code>orders.new.eu</code>!&quot; (PUB) and hand it to the operator; anyone can say
+&quot;I want everything about <code>orders.*.eu</code>&quot; or &quot;everything under <code>orders.&gt;</code>&quot;
+(SUB with wildcards). The operator keeps a card catalog — a tree of
+drawers, one level per word between dots — so finding who gets a letter
+means walking four or five drawers, never the whole catalog. Letters are
+handed over instantly and then forgotten (at-most-once: if you weren&#39;t
+at your desk, the letter is gone). If your request needs a <em>certified</em>
+copy, there&#39;s a side office (JetStream) that logs every certified
+letter in a ledger replicated across three offices before saying
+&quot;accepted&quot; — the same trick the regular switchboard deliberately
+refuses to do. And if one desk in a workgroup (queue group) is busy,
+the letter goes to the next desk round-robin, so ten copies of a worker
+share one mailbox.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when the common case is &quot;tell
+everyone interested, right now,&quot; the fastest correct design is a
+router, not a database — and making durability an <em>option</em> keeps the
+common case fast for everyone.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    C1[&quot;client A — PUB orders.new.eu&quot;]
+    C2[&quot;client B — SUB orders.*.eu, queue=workers&quot;]
+    C3[&quot;client C — SUB orders.&gt;&quot;]
+
+    subgraph server[&quot;nats-server&quot;]
+        AL[&quot;AcceptLoop (server.go:2810)&lt;br/&gt;→ createClient (3282)&quot;]
+        subgraph clientA[&quot;per connection: 2 goroutines (server.go:3606)&quot;]
+            RL[&quot;readLoop (client.go:1498)&lt;br/&gt;→ parse (parser.go:137)&quot;]
+            WL[&quot;writeLoop (client.go:1407)&lt;br/&gt;flushes outbound buffer&quot;]
+        end
+        PM[&quot;processPub (client.go:3002)&lt;br/&gt;→ processInboundClientMsg (4429)&quot;]
+        SL[&quot;account sublist trie&lt;br/&gt;Match (sublist.go:537)&quot;]
+        PMR[&quot;processMsgResults — fan-out,&lt;br/&gt;queue groups round-robin&quot;]
+        DM[&quot;deliverMsg (client.go:3835)&lt;br/&gt;append to subscriber outbound buffer&quot;]
+        SYS[&quot;$SYS internal client (events.go)&quot;]
+    end
+
+    JS[&quot;JetStream (opt-in): meta Raft +&lt;br/&gt;per-stream Raft groups (raft.go)&quot;]
+
+    C1 --&gt; AL
+    C2 --&gt; AL
+    C3 --&gt; AL
+    AL --&gt; RL
+    RL --&gt; PM --&gt; SL --&gt; PMR --&gt; DM --&gt; WL
+    WL --&gt; C2
+    WL --&gt; C3
+    SYS --- SL
+    JS -.-&gt;|&quot;opt-in durability&quot;| PM
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Connection setup</strong>: <code>AcceptLoop</code> (<code>server/server.go:2810</code>) accepts,
+<code>createClient</code> (line 3282) allocates a <code>client</code>, and exactly two
+goroutines start per connection (line 3606): <code>readLoop</code> and
+<code>writeLoop</code> (<code>server/client.go:1498</code>, <code>1407</code>). Everything else is
+shared mutable state guarded by <code>c.mu</code>.</li>
+<li><strong>The spine of a PUB</strong>: readLoop reads bytes → <code>parse</code>
+(<code>server/parser.go:137</code>, a hand-rolled byte state machine) dispatches
+the op → <code>processPub</code> (<code>client.go:3002</code>) validates subject/size →
+once the payload is in, <code>processInboundMsg</code> →
+<code>processInboundClientMsg</code> (<code>client.go:4429</code>) checks permissions and
+accounts → <code>acc.sl.Match(subject)</code> (<code>sublist.go:537</code>) →
+<code>processMsgResults</code> fans out → <code>deliverMsg</code> (<code>client.go:3835</code>)
+appends <code>MSG &lt;subj&gt; &lt;sid&gt; [reply]\r\n&lt;payload&gt;\r\n</code> to each
+subscriber&#39;s outbound buffer → writeLoop flushes when signaled.</li>
+<li><strong>Accounts</strong> partition the subject space: each <code>Account</code> owns its own
+sublist and exports/imports subjects between accounts
+(<code>server/accounts.go</code>) — multi-tenancy as first-class structure, so
+<code>foo.bar</code> in account X and account Y never collide.</li>
+<li><strong>Clustering</strong> (routes, gateways, leaf nodes — <code>server/route.go</code>,
+<code>gateway.go</code>, <code>leafnode.go</code>) spreads subscriptions so each server can
+route locally when it has interest and forward to peers when it
+doesn&#39;t.</li>
+<li><strong>JetStream</strong> (<code>server/jetstream.go:430</code> <code>enableJetStream</code>) layers
+persistence on the same subject fabric: a meta Raft group for stream
+configuration, one Raft group per replicated stream
+(<code>server/raft.go</code>), and message stores (<code>filestore.go</code>,
+<code>memstore.go</code>).</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-pub-socket-to-subscribers">Walkthrough: one PUB, socket to subscribers</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant P as Publisher
+    participant RL as readLoop + parse
+    participant PM as processInboundClientMsg
+    participant SL as sublist Match
+    participant DM as deliverMsg
+    participant WL as subscriber writeLoop
+    P-&gt;&gt;RL: &quot;PUB orders.new.eu 5\r\nhello\r\n&quot;
+    RL-&gt;&gt;RL: parser state machine OP_START → OP_P → payload
+    RL-&gt;&gt;PM: processPub → permission + account checks
+    PM-&gt;&gt;SL: acc.sl.Match(&quot;orders.new.eu&quot;)
+    SL--&gt;&gt;PM: psubs + qsubs (trie walk, cached)
+    PM-&gt;&gt;DM: for each match (one per queue group)
+    DM-&gt;&gt;DM: append MSG frame to sub&#39;s outbound buffer
+    DM-&gt;&gt;WL: flush signal (cond var)
+    WL--&gt;&gt;P: (publisher&#39;s own OK/pong handled separately)
+    Note over DM,WL: fire-and-forget: no ack, no storage, no retry
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="two-goroutines-own-the-connection">Two goroutines own the connection</h3>
+<p>On connect,
+<code>createClient</code> (<code>server.go:3282</code>) started <code>readLoop</code> and <code>writeLoop</code>
+(<code>server.go:3606-3609</code>). The read side parses; the write side sleeps on
+a condition variable until there is data (<code>client.go:1407</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="parse-without-allocating">Parse without allocating</h3>
+<p><code>parse</code> (<code>server/parser.go:137</code>)
+is a per-byte state machine (<code>OP_START</code> → <code>OP_P</code> → …): it tokenizes
+<code>PUB orders.new.eu 5</code> into byte slices of the read buffer — no string
+copies, no reflection. Each op ends with the parser handing a zero-copy
+argument slice to its handler and resetting to <code>OP_START</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="validate-the-publish">Validate the publish</h3>
+<p><code>processPub</code> (<code>client.go:3002</code>)
+unrolls its own argument splitter onto a stack array
+(<code>[MAX_PUB_ARGS][]byte</code>), records subject, optional reply, and size
+into <code>c.pa</code> (the parser&#39;s &quot;publish args&quot; slot), and enforces
+<code>max_payload</code> (a per-connection atomic).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="route-through-the-account">Route through the account</h3>
+<p>When the payload bytes land,
+<code>processInboundClientMsg</code> (<code>client.go:4429</code>) checks publish
+permissions, reserved-subject rules (<code>$NRG.</code> etc.), and then — the
+line the whole server exists for — calls <code>acc.sl.Match(subject)</code> to
+find interest.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-trie-answers">The trie answers</h3>
+<p>The sublist (<code>server/sublist.go</code>) is a
+radix-ish walk over subject tokens: <code>match</code> (line 564) descends
+<code>root</code>&#39;s levels following literal tokens, the partial-wildcard <code>*</code>
+node, and the full-wildcard <code>&gt;</code> tail, accumulating matches; a bounded
+per-account result cache (<code>slCacheMax = 1024</code>, line 49) short-circuits
+hot subjects. Queue-group subscriptions are collected as <code>qsubs</code>
+alongside plain <code>psubs</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="fan-out-round-robin-inside-queue-groups">Fan out, round-robin inside queue groups</h3>
+<p><code>processMsgResults</code> walks the match: plain subscribers each get the
+message; for each queue group one member is picked round-robin
+(<code>rr</code>) and the others are skipped — load balancing as a data-structure
+property of the trie result.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="append-and-signal">Append and signal</h3>
+<p><code>deliverMsg</code> (<code>client.go:3835</code>) locks
+the subscriber&#39;s <code>c.mu</code>, appends the <code>MSG</code> protocol line plus payload
+to its outbound buffer, updates stats, and signals a flush. If the
+subscriber can&#39;t keep up and its pending bytes exceed the limit, the
+<em>connection is closed</em> — the slow-consumer policy (<code>isSlowConsumer</code>
+flag, <code>client.go:155</code>): NATS protects the server, never queues for the
+laggard.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="subscribers-see-the-message-in-microseconds">Subscribers see the message in microseconds</h3>
+<p>No disk was
+touched, no ack was requested; if a subscriber was absent, the message
+is simply gone — the contract the client picked by <em>not</em> using
+JetStream.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-parser-state-machine-server-parser-go-137">The parser state machine (<code>server/parser.go:137</code>)</h3>
+<p><code>parse</code> walks the read buffer one byte at a time through states
+(<code>OP_START</code>, <code>OP_P</code>, <code>OP_INFO</code>, …) set up per first letter of each op,
+producing zero-copy argument slices. Why not a general text-protocol
+framework: the parser is the hot path — at millions of msgs/sec, one
+allocation per message is the difference between GC pressure and none.
+This is the same discipline as memcached&#39;s hand tokenizer, but pushed
+into a formally stateful machine so arbitrary chunking of the TCP
+stream works.</p>
+<h3 id="the-sublist-trie-server-sublist-go-100-level-91-node">The sublist trie (<code>server/sublist.go:100</code> <code>level</code>, <code>:91</code> <code>node</code>)</h3>
+<pre><code class="language-go">type level struct {
+    nodes    map[string]*node
+    pwc, fwc *node      // &#39;*&#39; partial and &#39;&gt;&#39; full wildcard
+}
+type node struct {
+    next  *level
+    psubs map[*subscription]struct{}
+    qsubs map[string]map[*subscription]struct{}   // queue groups
+    plist []*subscription
+}
+</code></pre>
+<p>Subscriptions are indexed token-by-token (<code>orders</code> → <code>new</code> → <code>eu</code>),
+with wildcard children at every level; <code>Match</code> (537/543) descends with
+backtracking only across wildcard branches, and a <code>sync.RWMutex</code> plus
+a <code>genid</code> counter invalidates the result cache on any subscription
+change (the <code>genidAddr</code> check in <code>processInboundClientMsg</code> is the
+cache-buster). Why a trie over a linear scan of subscriptions: matching
+cost is bounded by subject depth (typically &lt; 10 tokens) instead of
+subscription count (can be millions); why maps per level instead of a
+sorted array: subscription churn is constant in dynamic systems, and
+<code>map[string]*node</code> gives O(1) child lookup with cheap insert/delete.</p>
+<h3 id="the-per-connection-outbound-buffer-flush-signaling-client-go">The per-connection outbound buffer + flush signaling (<code>client.go</code>)</h3>
+<p>Each client has one outbound byte buffer guarded by <code>c.mu</code>, a
+condition variable (<code>sg</code>) the writeLoop waits on, and pending-flush
+counters (<code>fsp</code>, <code>out.pb</code>) — see <code>writeLoop</code> (1407) and the
+<code>flushSignal</code> paths around lines 1989-1995. Deliveries append; one
+syscall per flush drains many messages. Why shared-buffer-plus-signaler
+over per-message channel sends: channels would allocate and queue
+per message; here a publish fan-out to 10k subscribers is 10k memcpys
+and one wakeup, with slow consumers cut off by byte count, not
+detected by backpressure.</p>
+<h3 id="queue-groups-node-qsubs-processmsgresults">Queue groups (<code>node.qsubs</code>, <code>processMsgResults</code>)</h3>
+<p>Group membership lives inside the trie nodes (<code>qsubs</code> keyed by group
+name); a matching message triggers exactly one round-robin delivery
+per group. Why inside the trie: the load-balancing decision must cost
+the same as routing itself — NATS&#39;s &quot; competing consumers&quot; feature is
+not a scheduler bolted on top, it is a field of the match result.</p>
+<h3 id="raft-node-over-nats-subjects-server-raft-go-162-type-raft">Raft node over NATS subjects (<code>server/raft.go:162</code> <code>type raft</code>)</h3>
+<p>JetStream&#39;s consensus is implemented <em>in the server itself</em>, using
+NATS subjects as the transport: append-entry and vote requests are
+messages on internal subjects (<code>$NRG.</code> — the prefix
+<code>processInboundClientMsg</code> reserves), with <code>sendAppendEntry</code> /
+<code>handleAppendEntry</code> pairs (<code>server/raft.go</code>). Why in-process: a Raft
+that talks its own cluster&#39;s wire protocol to itself has zero extra
+deployment surface — and demonstrates the design&#39;s recursion: the
+durable layer is built from the same messaging primitive it
+strengthens.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph conn[&quot;per connection&quot;]
+        R[&quot;readLoop goroutine&lt;br/&gt;(parse + route)&quot;]
+        W[&quot;writeLoop goroutine&lt;br/&gt;(flush outbound)&quot;]
+        BUF[&quot;outbound buffer (c.mu)&quot;]
+        R --&gt; BUF --&gt; W
+    end
+    subgraph srv[&quot;server-wide&quot;]
+        SLP[&quot;per-account sublist (RWMutex + genid)&quot;]
+        SYS[&quot;$SYS internal client&quot;]
+        JS[&quot;JetStream Raft groups&quot;]
+    end
+    R --&gt; SLP
+    SLP --&gt;|&quot;fan-out&quot;| BUF2[&quot;other connections&#39; buffers&quot;]
+    SYS --&gt; SLP
+    JS --- SLP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> everything (Go&#39;s scheduler), but each
+connection&#39;s state is serialized by <code>c.mu</code>, and the match structure
+by an RWMutex with generation-based cache invalidation. A publish on
+one connection appends to many other connections&#39; buffers — briefly
+taking each subscriber&#39;s lock in turn (<code>deliverMsg</code>).</li>
+<li><strong>Slow consumer: cut, don&#39;t queue.</strong> Pending bytes over the max, or
+a write deadline exceeded, and the connection is flagged
+<code>isSlowConsumer</code> (<code>client.go:155-194</code>) and closed. There is no
+unbounded broker-side queue anywhere in the core — the anti-pattern
+Kafka&#39;s producer buffer represents is deliberately absent.</li>
+<li><strong>Crash = total memory loss, by design.</strong> Core NATS holds no state
+that survives: clients auto-reconnect (the protocol&#39;s PING/PONG and
+<code>INFO</code> exchange make reconnection trivial) and resubscribe. The
+<em>system</em> stays up because the server is stateless, not because it
+recovers.</li>
+<li><strong>JetStream is the failure story for the messages that need one</strong>:
+Raft replication across replicas before acknowledging a publish
+(<code>server/raft.go</code> commit paths), file-based message blocks
+(<code>server/filestore.go</code>) with per-stream state; the meta layer
+(itself a Raft group) assigns streams to servers and converges
+toward the <em>desired</em> placement (<code>desiredRaftGroup</code>,
+<code>server/jetstream_cluster.go:206</code>) — a reconcile loop, at a smaller
+scale, of the kind the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kubernetes.md">Kubernetes</a> dive covers.</li>
+<li><strong>Graceful shutdown</strong> drains connections (<code>shutdown</code>/<code>drain</code>
+modes in the protocol): subscriptions are unsubscribed with
+flushes so in-flight deliveries complete before close.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The protocol is the API</strong> — and it fits on a postcard:
+<code>CONNECT {json}</code>, <code>PUB &lt;subj&gt; [reply] &lt;size&gt;</code>, <code>SUB &lt;subj&gt; [queue] &lt;sid&gt;</code>, <code>UNSUB &lt;sid&gt; [max]</code>, <code>MSG &lt;subj&gt; &lt;sid&gt; [reply] &lt;size&gt;</code>
+(server→client), <code>PING/PONG</code>, <code>INFO {json}</code>. Any language with a
+socket speaks it in an afternoon — dozens of client libraries exist,
+several written from the spec by third parties.</li>
+<li><strong>The seams are subject-shaped.</strong> Request-reply is a convention
+(<code>reply</code> inbox subjects like <code>_INBOX.xxxx</code>); service discovery,
+latency tracking, and events are subjects under <code>$SYS</code>/<code>$JS</code> served
+by an <em>internal client</em> (<code>s.sys</code>, <code>server.go:1887</code>) that is
+indistinguishable from a network client — observability uses the
+public API rather than a privileged side door. Accounts + exports/
+imports extend the same idea to multi-tenancy.</li>
+<li><strong>Polyglot frontends</strong>: the same core serves MQTT and WebSocket
+clients (<code>server/websocket.go</code>, the <code>mqttParse</code> branch in
+<code>parser.go:143</code>) — protocol adapters that end in the same <code>client</code>
+routing internals.</li>
+<li><strong>The wart</strong>: semantics are chosen per feature, so the <em>default is
+lossy</em>. A team that doesn&#39;t internalize &quot;core NATS is at-most-once&quot;
+ships a system that drops messages under disconnects and only finds
+out in production. The fix is discipline (JetStream for anything
+that matters) — the docs&#39; own framing — but the footgun is real,
+and it is the price of the default&#39;s speed.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-at-most-once-routing-core-with-opt-in-durable-layering">Trade-off 1: at-most-once routing core with opt-in durable layering</h3>
+<ul>
+<li><strong>Tension:</strong> most messages want &quot;fast, now&quot;; some messages must
+survive anything.</li>
+<li><strong>Choice:</strong> the core does zero durable work — no disk, no acks,
+no replication — and JetStream (Raft + file store) is a layer you
+opt into per stream.</li>
+<li><strong>Evidence:</strong> <code>deliverMsg</code> (<code>client.go:3835</code>) ends at a buffer
+append — search it for any persistence call; contrast
+<code>server/raft.go</code>, where the same messaging primitive gets
+append-entry, quorum, and commit semantics for JetStream streams.</li>
+<li><strong>Given up:</strong> core guarantees. Disconnect = loss; there is no
+replay, no ack, no dedup unless you bought the JetStream tier (and
+then you pay its latency: fsync + quorum before ack).</li>
+<li><strong>Verdict:</strong> right when the <em>system</em> is the durability unit (metrics
+that also exist in the source system, presence, cache invalidation)
+and overwhelmingly common messaging is fire-and-forget. Wrong for
+order/payment events on the core tier — the exact workload where
+Kafka&#39;s &quot;the log is the product&quot; is the correct inversion.</li>
+</ul>
+<h3 id="trade-off-2-slow-consumer-cutoff-over-backpressure">Trade-off 2: slow-consumer cutoff over backpressure</h3>
+<ul>
+<li><strong>Tension:</strong> a subscriber slower than its publishers will either
+exhaust server memory or stall the publishers.</li>
+<li><strong>Choice:</strong> bounded buffers plus disconnect. <code>deliverMsg</code> counts
+pending bytes; exceeding <code>max_pending</code> (or a write deadline) flips
+<code>isSlowConsumer</code> (<code>client.go:155</code>, <code>SlowConsumerPendingBytes</code> at<ol start="194">
+<li>and closes the connection.</li>
+</ol>
+</li>
+<li><strong>Evidence:</strong> the flags and counters threaded through
+<code>client.go:1405-2000</code> — <code>out.pb</code> accounting in the flush path
+(lines 1786-1995) and the write-deadline handling in <code>writeLoop</code>.</li>
+<li><strong>Given up:</strong> the laggard&#39;s liveness (it must reconnect and
+resync), and any illusion of end-to-end flow control; upstream
+publishers never learn their consumer fell behind.</li>
+<li><strong>Verdict:</strong> right for a router whose promise is latency for the
+many over completeness for the one — the same call memcached makes
+with evictions. Wrong when every subscriber is entitled to every
+message; then you need a per-subscriber cursor over a retained log
+(Kafka consumer offsets), which is a different architecture, not a
+tuning knob.</li>
+</ul>
+<h3 id="trade-off-3-hand-parser-subject-trie-over-generic-protocol-machinery">Trade-off 3: hand parser + subject trie over generic protocol machinery</h3>
+<ul>
+<li><strong>Tension:</strong> be the fastest message fabric possible, in a language
+with a GC.</li>
+<li><strong>Choice:</strong> a zero-allocation byte state machine for the protocol
+and a token trie for routing; argument slices reference the read
+buffer directly (<code>c.pa</code>), and result structures are reused.</li>
+<li><strong>Evidence:</strong> <code>parser.go:137</code> <code>parse</code> with its <code>OP_*</code> states and
+<code>c.drop/c.as/c.state</code> resets; <code>processPub</code>&#39;s stack-array arg splitter
+(<code>client.go:3002</code>); the trie&#39;s <code>match</code> (sublist.go:564) and its
+bounded cache (line 49).</li>
+<li><strong>Given up:</strong> the readable-protocol layering of generic frameworks;
+every protocol change touches the machine by hand; and subject
+matching is <em>approximate-load-bearing</em> — pathological wildcard
+patterns (<code>a.*.b.*.c</code>) multiply branches the trie can&#39;t compress.</li>
+<li><strong>Verdict:</strong> right when the protocol is small and frozen — NATS&#39;s
+verb set has been stable for a decade, so the machine never grows.
+Wrong the moment the protocol accretes features; that&#39;s when you
+want Redis-style generated command tables or a real schema, not a
+bigger switch statement.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>server/server.go:2810</code> <code>AcceptLoop</code> → <code>createClient</code> (3282) →
+lines 3606-3609 — the two-goroutine-per-connection model; note
+what is <em>not</em> there (no thread pool, no event loop machinery).</li>
+<li><code>server/parser.go:137</code> <code>parse</code> — read the state constants (line 59)
+and one full op cycle (<code>OP_START</code> → <code>OP_P</code> at line 401 →
+<code>processPub</code> call at 453); appreciate that the TCP stream can split
+anywhere.</li>
+<li><code>server/client.go:3002</code> <code>processPub</code> — argument splitting on a
+stack array, <code>c.pa</code> population, <code>max_payload</code> enforcement.</li>
+<li><code>server/client.go:1498</code> <code>readLoop</code> — buffer management, the
+<code>readLoop</code> stall reporting, and the call into <code>parse</code> (1611).</li>
+<li><code>server/client.go:4429</code> <code>processInboundClientMsg</code> — permission
+checks, account resolution, then the <code>acc.sl.Match</code> call (~4544)
+and <code>processMsgResults</code> — the routing decision in one screen.</li>
+<li><code>server/sublist.go</code> — <code>level</code>/<code>node</code> (100/91), <code>Insert</code> (373),
+<code>Match</code> (537) and <code>match</code> (564) with the wildcard branches, then
+the cache constants (49) and the genid invalidation story.</li>
+<li><code>server/client.go:3835</code> <code>deliverMsg</code> — lock discipline, the
+outbound append, queue-group and echo checks; then
+<code>client.go:1407</code> <code>writeLoop</code> and the flush-signal fields (<code>sg</code>,
+<code>fsp</code>) it waits on.</li>
+<li><code>server/client.go:155-194</code> — the slow-consumer flags and the
+<code>SlowConsumerPendingBytes</code> / <code>SlowConsumerWriteDeadline</code> reasons;
+trace where a violation closes the connection.</li>
+<li><code>server/server.go:1887</code> — the <code>$SYS</code> internal client; follow one
+event (<code>sendInternalAccountMsg</code>, <code>server/events.go:708</code>) to see
+observability ride the same fabric.</li>
+<li><code>server/accounts.go</code> — subject spaces per account and the
+export/import model; connect it back to the <code>$NRG.</code> reservation
+you saw in <code>processInboundClientMsg</code>.</li>
+<li><code>server/jetstream.go:430</code> <code>enableJetStream</code>, then
+<code>server/raft.go:162</code> (<code>type raft</code>) and its append-entry handling
+(<code>n.subscribe(n.asubj, n.handleAppendEntry)</code> at line 2758) — the durability layer as a
+subject-transported Raft; finish with the <code>desiredRaftGroup</code>
+reconcile types in <code>server/jetstream_cluster.go:206</code>.</li>
+</ol>
+<p>You have now traced one PUB from a socket through a parser state
+machine, a trie match, and fan-out into other sockets — plus the layer
+that adds Raft when the same message must survive a datacenter fault.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make delivery semantics a per-feature decision, not a system
+identity</strong>: core at-most-once, opt-in durable tiers — one system
+serves both latency and survival workloads (<code>deliverMsg</code> vs
+<code>server/raft.go</code>).</li>
+<li><strong>A trie over tokens beats a scan over subscriptions</strong> whenever your
+routing keys are hierarchical and wildcards are few (<code>sublist.go</code>) —
+and load balancing can live <em>inside</em> the match result (queue groups).</li>
+<li><strong>Parse into borrowed slices of the read buffer</strong> (<code>parser.go</code>):
+zero-copy argument handling is the biggest single win available to a
+text protocol server.</li>
+<li><strong>Protect the many by cutting the one</strong>: bounded per-connection
+buffers with slow-consumer disconnects beats unbounded queueing in
+every system whose promise is latency (<code>client.go:194</code>).</li>
+<li><strong>Serve your own internals through your public API</strong>: the <code>$SYS</code>
+internal client means NATS dogfoods NATS for events and monitoring —
+no privileged back door to drift from the real protocol.</li>
+<li><strong>Build durable subsystems from the messaging primitive you already
+have</strong> (Raft over NATS subjects): recursive reuse shrinks both the
+deployment surface and the number of wire formats you must keep
+alive.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong>. Idiomatic Go, one clever data structure,
+no kernel-level tricks.</li>
+<li>Budget: ~4 hours for the reading path; a weekend adds JetStream
+internals (the raft.go + filestore.go pair are a second deep-dive&#39;s
+worth).</li>
+<li>Prerequisites: goroutines and channels at a working level; tries;
+what Raft gives you (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/etcd.md">etcd</a> dive is the best primer in
+this atlas); the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kafka.md">Kafka</a> dive for the contrasting broker
+philosophy.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>NATS documentation — <a href="https://docs.nats.io/">https://docs.nats.io/</a> — the protocol page is
+the spec, and it is genuinely one page.</li>
+<li>D. Richards, &quot;NATS - A Cloud Native Messaging System&quot; (ACM Queue /
+CACM 2022) — the design rationale from the authors.</li>
+<li>JetStream documentation — <a href="https://docs.nats.io/nats-concepts/jetstream">https://docs.nats.io/nats-concepts/jetstream</a> —
+for the durability tier&#39;s semantics (acks, retention, limits).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../zookeeper/"><span class="dir">← Previous dive</span>ZooKeeper: consensus wrapped in a tiny ordered filesystem</a>
+  <a href="../libuv/" style="text-align:right"><span class="dir">Next dive →</span>libuv: the event loop distilled into a portable, embeddable library</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 17 of 18 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -70,7 +70,7 @@ projects:
     license: BSD-3-Clause
     domains: [cache]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 4 }
     why: >
       The original "scale the database with a cache layer" tool that won
@@ -188,7 +188,7 @@ projects:
     license: Apache-2.0
     domains: [web-server]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       The server that dominated the early web and stayed dominant for
@@ -300,7 +300,7 @@ projects:
     license: Apache-2.0
     domains: [queue-log, networking]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 3, clarity: 5, teachability: 4, domain_fit: 3 }
     why: >
       A messaging server whose entire protocol is a handful of text lines
@@ -357,7 +357,7 @@ projects:
     license: MIT
     domains: [runtime, networking]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
     why: >
       The portable event loop, distilled: poll/epoll/kqueue/IOCP behind one
@@ -583,7 +583,7 @@ projects:
     license: Apache-2.0
     domains: [distributed, database]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       The coordination kernel beneath the entire Hadoop-era stack: it won

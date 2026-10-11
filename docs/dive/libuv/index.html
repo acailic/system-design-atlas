@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>libuv: the event loop distilled into a portable, embeddable library — System Design Atlas</title>
+<meta name="description" content="libuv is the event loop Node.js was built on, and its design thesis is distillation : take the event loop pattern — poll readiness, dispatch callbacks — and reduce it to a vocabulary of two ">
+<meta property="og:title" content="libuv: the event loop distilled into a portable, embeddable library — System Design Atlas">
+<meta property="og:description" content="libuv is the event loop Node.js was built on, and its design thesis is distillation : take the event loop pattern — poll readiness, dispatch callbacks — and reduce it to a vocabulary of two ">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-timer-one-socket-read-one-threadpool-file-read">Walkthrough: one timer, one socket read, one threadpool file read</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>libuv: the event loop distilled into a portable, embeddable library</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip domain">networking</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/libuv/libuv" rel="noopener">MIT</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>4080d7d965fdf291f37ec72677fc5a2ace8fa361</code> · 2026-10-10 · <a href="https://github.com/libuv/libuv" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">libuv is the event loop Node.js was built on, and its design thesis is
+<strong>distillation</strong>: take the event loop pattern — poll readiness, dispatch
+callbacks — and reduce it to a vocabulary of two object kinds (handles
+and requests) plus one cross-thread escape hatch (the async handle),
+so that the same ~500-line core runs on epoll, kqueue, event ports,
+IOCP, and less famous pollers unchanged. The loop is not a framework
+that owns your program; it is a <em>data structure</em> you embed. This
+deep-dive teaches the loop&#39;s phase structure (<code>uv_run</code>), the
+watcher/pending queue machinery under every platform backend, and the
+two designs that make single-threaded async workable in practice:
+mutex-plus-eventfd handoff for other threads, and a starvation-guarded
+thread pool for blocking work.</p>
+<p>Read it after <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> (a bespoke loop) and
+<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/nginx.md">nginx</a> (a loop per worker process): libuv is what those
+machines look like when the goal is <em>portability as the product</em> —
+it is also the missing diagram behind every &quot;Node.js event loop&quot;
+blog post, in the code.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A receptionist who never watches anything for long.</strong> The
+receptionist (the event loop) keeps a wall of numbered mailboxes — one
+per thing she watches (a socket, a timer) — and a big board that
+lights up a mailbox when it has news (the poller: epoll on Linux,
+kqueue on Macs). She works in rounds: first she checks the alarm clock
+list (the timer heap — earliest alarm first), then anything colleagues
+left on her desk while she was away (the pending queue), then she takes
+one nap on the board&#39;s buzzer until <em>some</em> mailbox lights or the next
+alarm is due (<code>uv__io_poll</code>), handles what lit up, runs the
+end-of-round chores (check handles, closing handles), and starts over.
+Some jobs need a delivery van (a blocking syscall like reading a big
+file): she hands those to the assistants in the back room (the thread
+pool), but the assistants never talk to her directly — they finish,
+drop the result in her inbox, and ring a <em>special doorbell</em>
+(<code>uv_async_send</code> → an eventfd write) that lights a mailbox on the
+board, so she finds out during her normal round.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> one serial round-robin keeps
+every callback&#39;s reasoning single-threaded, while the doorbell trick
+lets the outside world wake the loop without ever sharing a lock with
+the callbacks themselves.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph loop[&quot;uv_loop_t (one per embedder thread)&quot;]
+        subgraph phases[&quot;uv_run (src/unix/core.c:429) round&quot;]
+            T[&quot;uv__run_timers — binary min-heap&quot;]
+            P[&quot;uv__run_pending&quot;]
+            I[&quot;uv__run_idle / uv__run_prepare&quot;]
+            C[&quot;uv__run_check / uv__run_closing_handles&quot;]
+        end
+        WQ[&quot;loop-&gt;wq — completions from the pool&quot;]
+        PQ[&quot;pending_queue&quot;]
+        WCH[&quot;watcher_queue → backend registrations&quot;]
+    end
+
+    subgraph backend[&quot;poll backend — one file per OS&quot;]
+        EP[&quot;linux.c: uv__io_poll (epoll)&quot;]
+        KQ[&quot;kqueue.c: uv__io_poll (kqueue)&quot;]
+        PP[&quot;posix-poll.c: uv__io_poll (poll)&quot;]
+        WIN[&quot;src/win/: IOCP translation&quot;]
+    end
+
+    subgraph pool[&quot;threadpool (src/threadpool.c) — global&quot;]
+        W1[&quot;worker threads&quot;]
+        SQ[&quot;wq + slow_io_pending_wq&lt;br/&gt;slow-IO starvation guard&quot;]
+    end
+
+    API[&quot;handles: tcp/udp/pipe/tty/timer/async/prepare/check/idle/poll/process&lt;br/&gt;requests: connect/write/fs/getaddrinfo/work&quot;]
+
+    T --&gt; P --&gt; I --&gt; EP --&gt; C
+    W1 --&gt;|&quot;uv_async_send(loop-&gt;wq_async)&quot;| WQ
+    WQ --&gt;|&quot;uv__work_done&quot;| API
+    EP --- WCH
+    KQ --- WCH
+    PP --- WCH
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The loop is a struct, not a singleton.</strong> <code>uv_loop_init</code> gives you a
+<code>uv_loop_t</code> with its own queues, timer heap, backend fd, and ref
+counts (<code>include/uv.h:1957</code> <code>struct uv_loop_s</code>). Embedding means
+owning the struct — Node runs one; embedders run several.</li>
+<li><strong>The spine of every event</strong>: a handle registers interest
+(<code>uv__io_start</code>, <code>src/unix/core.c:955</code> — adds the watcher to
+<code>loop-&gt;watcher_queue</code>, indexed by fd in <code>loop-&gt;watchers[]</code>) → next
+<code>uv__io_poll</code> flushes pending registration changes to the backend
+and blocks in epoll/kevent → readiness invokes the watcher&#39;s callback
+→ completion work that must defer lands in <code>pending_queue</code>
+(<code>uv__io_feed</code>, <code>core.c:1062</code>) and runs as <code>POLLOUT</code> callbacks in
+<code>uv__run_pending</code>.</li>
+<li><strong>Backends are files, not classes</strong>: <code>src/unix/linux.c:1418</code>
+(<code>uv__io_poll</code> over epoll), <code>src/unix/kqueue.c:165</code>,
+<code>src/unix/posix-poll.c:134</code>, <code>src/win/</code> implementing the same
+internal contract over IOCP — the platform seam is one function
+signature plus a convention.</li>
+<li><strong>Handles vs requests</strong>: handles are long-lived (a TCP socket, a
+timer) and ref-counted; requests are one-shot operations with a
+completion callback (a <code>write</code>, an <code>fs</code> stat, a DNS lookup). The
+distinction drives lifetime: <code>uv_close</code> retires handles at the end
+of the round (<code>uv__run_closing_handles</code>), while requests retire when
+their callback fires.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-timer-one-socket-read-one-threadpool-file-read">Walkthrough: one timer, one socket read, one threadpool file read</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant E as Embedder
+    participant R as uv_run round (core.c:429)
+    participant POLL as uv__io_poll (linux.c:1418)
+    participant TP as threadpool worker (threadpool.c:57)
+    participant AS as async doorbell
+    E-&gt;&gt;R: uv_timer_start(cb), uv_read_start(tcp), uv_fs_open
+    R-&gt;&gt;R: uv__run_timers: earliest heap entry due?
+    R-&gt;&gt;POLL: watcher_queue flushed → epoll_ctl, epoll_wait
+    POLL--&gt;&gt;R: tcp readable → uv__stream_io → uv__read
+    R-&gt;&gt;R: alloc_buf + read_cb (zero-copy into your buffer)
+    TP-&gt;&gt;TP: uv__work_submit: open syscall runs off-thread
+    TP-&gt;&gt;AS: push result to loop-&gt;wq, uv_async_send (eventfd write)
+    AS--&gt;&gt;POLL: eventfd readable → wq_async callback
+    R-&gt;&gt;R: uv__work_done drains loop-&gt;wq → your fs_cb
+    R-&gt;&gt;R: check/closing handles, timers again — round ends
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="register-interest-lazily">Register interest, lazily</h3>
+<p>The embedder starts a timer
+(leaf in a binary min-heap, <code>src/timer.c</code>), subscribes to socket
+reads (<code>uv_read_start</code> → <code>uv__io_start</code>, <code>core.c:955</code>, queuing the
+stream&#39;s watcher with <code>POLLIN</code>), and calls <code>uv_fs_open</code> — which
+packages a <code>uv_fs_t</code> request and calls <code>uv__work_submit</code>
+(<code>src/threadpool.c:276</code>) instead of doing the syscall.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-round-begins-with-due-timers">The round begins with due timers</h3>
+<p><code>uv_run</code>
+(<code>src/unix/core.c:429</code>) calls <code>uv__run_timers</code> first (a
+backwards-compatibility order for <code>UV_RUN_DEFAULT</code>), which pops heap
+entries whose timeout ≤ <code>loop-&gt;time</code> into a ready list and fires their
+callbacks.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="pending-work-then-the-poll">Pending work, then the poll</h3>
+<p><code>uv__run_pending</code> drains
+completions parked by <code>uv__io_feed</code> (<code>core.c:1062</code>); idle/prepare
+handles run if present — embedders use prepare/check as &quot;before and
+after poll&quot; hooks. Then <code>uv__backend_timeout</code> (<code>core.c:403</code>) computes
+the poll timeout from the next timer (or 0 if anything is pending),
+and <code>uv__io_poll</code> (<code>linux.c:1418</code>) flushes the <code>watcher_queue</code> into
+epoll, then blocks in <code>epoll_wait</code> for up to that timeout.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="readiness-becomes-your-callback">Readiness becomes your callback</h3>
+<p>The socket is readable;
+epoll returns; the stream watcher&#39;s <code>uv__stream_io</code> calls <code>uv__read</code>
+(<code>src/unix/stream.c:1033</code>), which invokes <em>your</em> <code>alloc_cb</code> for a
+buffer, <code>read(2)</code>s into it, and calls <em>your</em> <code>read_cb</code> with the slice
+— zero copies beyond the one you controlled.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-pool-finishes-the-file-open">The pool finishes the file open</h3>
+<p>A worker thread
+(<code>threadpool.c:57</code> <code>worker</code>) took the <code>uv_fs_t</code> off the global <code>wq</code>,
+ran the blocking <code>open</code> outside the loop, then — the crucial handoff —
+locked <code>loop-&gt;wq_mutex</code>, appended the request to the <em>loop&#39;s</em> queue,
+and called <code>uv_async_send(&amp;loop-&gt;wq_async)</code> (<code>threadpool.c</code> inside
+<code>worker</code>), which wrote 1 to the loop&#39;s eventfd (<code>src/unix/async.c</code>,
+<code>uv__async_send</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-doorbell-rings-through-the-front-door">The doorbell rings through the front door</h3>
+<p>The eventfd is
+itself registered with the poller, so the <em>next</em> poll returns it
+readable; the <code>wq_async</code> handle&#39;s callback <code>uv__work_done</code>
+(<code>threadpool.c:319</code>) swaps out <code>loop-&gt;wq</code> under the mutex and invokes
+each request&#39;s <code>done</code> — your <code>fs_cb</code> runs on the loop thread, with
+loop state safely single-threaded.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="close-out-the-round">Close out the round</h3>
+<p><code>uv__run_check</code> runs check handles,
+<code>uv__run_closing_handles</code> (<code>core.c:370</code>) finishes handles marked by
+<code>uv_close</code> (calling their <code>close_cb</code>), timers get one more pass, and
+<code>uv__loop_alive</code> (<code>core.c:395</code>) decides whether another round happens:
+only if active handles, active requests, pending work, or closing
+handles remain — an unref&#39;d timer or async does not keep the process
+alive.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="three-sources-of-events-one-serial-loop">Three sources of events, one serial loop</h3>
+<p>A timer, a
+socket, and a threadpool completion all became callbacks on the same
+thread in one round — no application-level locks anywhere.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="uv-io-t-the-watcher-include-uv-unix-h-90">uv__io_t — the watcher (<code>include/uv/unix.h:90</code>)</h3>
+<pre><code class="language-c">struct uv__io_s {
+  uintptr_t bits;                  /* callback pointer, bit-packed */
+  struct uv__queue pending_queue;
+  struct uv__queue watcher_queue;
+  unsigned int pevents;   /* pending mask — applied at next poll */
+  unsigned int events;    /* current mask — what the backend has */
+  int fd;
+};
+</code></pre>
+<p>One struct per pollable thing, embedded (not pointed to) inside tcp,
+pipe, tty, and signal handles. The two-queue design is the pattern to
+steal: <code>watcher_queue</code> membership means &quot;my event mask changed, tell
+the backend at the next poll&quot; (so <code>uv__io_start</code> is O(1) — it queues
+and returns, and <code>uv__io_poll</code> batches the <code>epoll_ctl</code> calls);
+<code>pending_queue</code> membership means &quot;fire my callback before the next
+poll&quot; (how cross-thread and error completions defer safely). The
+callback stored as bit-packed <code>bits</code> keeps the watcher one cache line
+of hot state.</p>
+<h3 id="the-intrusive-queue-src-queue-h">The intrusive queue (<code>src/queue.h</code>)</h3>
+<p>A sentinel-based doubly-linked intrusive list used for <em>every</em>
+collection in the loop: watcher queue, pending queue, handle queues,
+the threadpool&#39;s <code>wq</code>. Why intrusive over container-of-pointers: no
+allocations ever (queues link through the objects themselves), O(1)
+remove given the node, and <code>uv__queue_data</code> (container_of) recovers the
+owner — the same reason the Linux kernel uses them.</p>
+<h3 id="the-timer-min-heap-src-timer-c-src-heap-inl-h">The timer min-heap (<code>src/timer.c</code>, <code>src/heap-inl.h</code>)</h3>
+<p>Timers live in a binary min-heap ordered by <code>timeout</code> (ties broken by
+insertion id — <code>timer_less_than</code>, <code>src/timer.c:37</code>); <code>uv__run_timers</code>
+pops only the due prefix, and re-inserts repeating timers
+(<code>uv_timer_again</code>). Why a heap over a sorted list: start/stop is
+O(log n) with no shifting; why over a timing wheel: the use case
+(millions of mostly-idle timers with wide spans) fits a heap, and a
+wheel&#39;s fixed tick granularity would leak into user-visible timing.</p>
+<h3 id="the-loop-s-fd-table-loop-watchers-maybe-resize">The loop&#39;s fd table (<code>loop-&gt;watchers[]</code>, <code>maybe_resize</code>)</h3>
+<p>Watchers are indexed by fd in a growable array (<code>core.c:955</code> —
+<code>loop-&gt;watchers[w-&gt;fd] = w</code>). Why an array over a hash map: fds are
+dense small integers on every Unix, and the array makes &quot;which
+watcher owns this fd&quot; a load, not a lookup. (Windows pays a reverse
+mapping because handles aren&#39;t small integers — the cost of the
+portability seam showing through.)</p>
+<h3 id="the-threadpool-s-queues-src-threadpool-c">The threadpool&#39;s queues (<code>src/threadpool.c</code>)</h3>
+<p>A global <code>wq</code> guarded by one mutex+condvar, <em>plus</em> a separate
+<code>slow_io_pending_wq</code> with the <code>run_slow_work_message</code> sentinel
+(<code>worker</code>, line 57): slow I/O (fsync-class) work may occupy at most
+<code>(nthreads+1)/2</code> workers (<code>slow_work_thread_threshold</code>, line 50), so
+a disk-flood cannot starve every DNS lookup. Why process-global: one
+pool serves all loops in the process (Node has one loop; embedders
+still share), sized by <code>UV_THREADPOOL_SIZE</code> at startup.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One thread runs callbacks; nobody else touches loop state.</strong> Every
+cross-thread path funnels through the same shape: producer locks the
+loop&#39;s <code>wq_mutex</code> only long enough to append and <code>uv_async_send</code>
+(eventfd write on Linux, <code>EVFILT_USER</code> on kqueue, a pipe elsewhere —
+<code>src/unix/async.c</code>). The loop wakes, drains, runs <code>done</code> callbacks.
+This is the pattern the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> dive shows in reverse
+(I/O threads handing clients <em>back</em> to a serial core).</li>
+<li><strong>Blocking work is quarantined by kind</strong>: CPU-bound and fs operations
+go to the pool with explicit slow-IO budgets; anything async-capable
+(sockets, DNS via the pool, signals via a self-pipe) stays on the
+loop. The embedder&#39;s contract is &quot;no blocking in callbacks&quot; — the
+library cannot enforce it, which is Node&#39;s entire performance
+culture in one sentence.</li>
+<li><strong>Failure is error propagation, not recovery.</strong> Syscall failures come
+back as <code>int</code> UV_* codes on requests and handles; a failed read
+delivers an <code>EOF</code>/error to the callback, never a panic. Handle
+teardown is the delicate part: <code>uv_close</code> (<code>core.c:161</code>) marks the
+handle, its <code>close_cb</code> fires only in <code>uv__run_closing_handles</code>
+after in-flight requests drain — closing is a <em>protocol</em>, not a
+free, which is the price of safe cancellation in a callback world.</li>
+<li><strong>Loop lifetime is ref counting.</strong> <code>uv__loop_alive</code> (<code>core.c:395</code>)
+counts active handles and requests; <code>uv_unref</code> lets a handle exist
+without keeping the process alive (how Node keeps timers that don&#39;t
+prevent exit). Run out of refs and <code>uv_run</code> returns — graceful exit
+is &quot;nothing is left to do,&quot; and the flags dance in
+<code>src/uv-common.h:306-321</code> is where it is paid.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public API is the object vocabulary</strong>: ~15 handle types
+(<code>uv_tcp_t</code>, <code>uv_udp_t</code>, <code>uv_pipe_t</code>, <code>uv_tty_t</code>, <code>uv_timer_t</code>,
+<code>uv_prepare_t</code>, <code>uv_check_t</code>, <code>uv_idle_t</code>, <code>uv_async_t</code>,
+<code>uv_poll_t</code>, <code>uv_process_t</code>, <code>uv_signal_t</code>, <code>uv_fs_event_t</code>,
+<code>uv_fs_poll_t</code>, <code>uv_stream_t</code> as the shared base) and ~10 request
+types. Handle structs embed <code>uv_handle_t</code> fields via macros
+(<code>UV_HANDLE_FIELDS</code>), which is how C does inheritance — and the
+reason ABI layout is versioned carefully (<code>include/uv.h</code>).</li>
+<li><strong>The seams for embedders are deliberate</strong>: <code>uv_prepare_t</code> /
+<code>uv_check_t</code> expose before-poll and after-poll phases so foreign
+event loops can interleave (this is how Qt, Luvit-era loops, and
+Node&#39;s own integration work); <code>uv_poll_t</code> lets you inject <em>any</em> fd
+into the loop; <code>uv_async_t</code> is the thread-boundary primitive every
+embedding needs.</li>
+<li><strong>The thread pool is a fixed-size contract</strong> (<code>UV_THREADPOOL_SIZE</code>,
+capped at 1024 by <code>MAX_THREADPOOL_SIZE</code>): no priorities, no
+cancellations mid-syscall (<code>uv_cancel</code> only works while queued).
+Simple, and honest about OS limits — you cannot cancel an in-flight
+<code>fsync</code>.</li>
+<li><strong>The honest warts</strong>: the API&#39;s C-inheritance macros make handles
+awkward to wrap in other languages (every binding re-implements the
+layout care); error handling is return-code-only with no context;
+and the &quot;loop is a struct&quot; design means no built-in scheduler
+fairness — a malicious callback chain starves everything, which
+Node&#39;s ecosystem periodically rediscovers.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-portable-loop-core-over-per-platform-optimal-designs">Trade-off 1: one portable loop core over per-platform optimal designs</h3>
+<ul>
+<li><strong>Tension:</strong> Node needed the same semantics on Windows (IOCP —
+completion-based) and Unix (readiness-based), in 2011.</li>
+<li><strong>Choice:</strong> normalize everything to &quot;readiness + callbacks&quot; in the
+core; on Windows, fake readiness by issuing overlapped reads eagerly
+and buffering (<code>src/win/</code>); on Unix, pick the best poller per
+platform behind <code>uv__io_poll</code>.</li>
+<li><strong>Evidence:</strong> <code>src/unix/core.c:429</code> <code>uv_run</code> contains zero platform
+<code>#ifdef</code>s — the phase logic is shared; per-platform code is exactly
+one function per file (<code>linux.c:1418</code>, <code>kqueue.c:165</code>,
+<code>posix-poll.c:134</code>; the Windows counterpart <code>uv__poll</code> in
+<code>src/win/core.c:424</code> blocks in <code>GetQueuedCompletionStatusEx</code> instead);
+the watcher&#39;s two-queue design
+(<code>uv__io_start</code> / <code>uv__io_feed</code>) exists so the core can defer all
+backend registration to poll time.</li>
+<li><strong>Given up:</strong> the extra buffering on Windows (an IOCP-native design
+would avoid the readiness emulation), and some performance that a
+hand-rolled epoll-only loop (à la Redis&#39;s <code>ae</code>) keeps by skipping the
+general machinery.</li>
+<li><strong>Verdict:</strong> right when portability <em>is</em> the product — libuv&#39;s value
+is that millions of lines of Node code run unmodified on five
+platforms. Wrong for a single-platform server squeezing the last
+10%; write <code>ae</code> instead.</li>
+</ul>
+<h3 id="trade-off-2-mutex-plus-async-handoff-over-lock-free-cross-thread-designs">Trade-off 2: mutex-plus-async handoff over lock-free cross-thread designs</h3>
+<ul>
+<li><strong>Tension:</strong> other threads (pool workers, embedder threads) must
+hand results to the loop without data races, and the loop must not
+spin waiting for them.</li>
+<li><strong>Choice:</strong> producers append to a loop-owned queue under a plain
+mutex, then write an eventfd — the write is the wakeup, and <em>all</em>
+callbacks run on the loop thread.</li>
+<li><strong>Evidence:</strong> the tail of <code>worker</code> (<code>threadpool.c</code>) —
+<code>uv__queue_insert_tail(&amp;w-&gt;loop-&gt;wq, ...)</code>, <code>uv_async_send</code>,
+<code>uv_mutex_unlock</code>, in that order; the drain side <code>uv__work_done</code>
+(<code>threadpool.c:319</code>) swaps the queue under the same mutex and runs
+callbacks; <code>uv__async_send</code> (<code>src/unix/async.c</code>) is the whole
+wake-up mechanism, including the eventfd EAGAIN drain.</li>
+<li><strong>Given up:</strong> cross-thread latency (one loop round of delay, and a
+syscall per wakeup) and any ability to run callbacks off-loop —
+a lock-free queue with concurrent callbacks would be faster in
+microbenchmarks and wildly harder to keep correct under the API&#39;s
+single-threaded promise.</li>
+<li><strong>Verdict:</strong> right whenever the callback contract is single-threaded
+— which is the entire value of an event loop to its embedder. Wrong
+for throughput-focused pipe stages, where you accept locks in
+callbacks instead (memcached&#39;s worker design) and drop the loop.</li>
+</ul>
+<h3 id="trade-off-3-ref-counted-loop-lifetime-over-explicit-lifecycle-management">Trade-off 3: ref-counted loop lifetime over explicit lifecycle management</h3>
+<ul>
+<li><strong>Tension:</strong> &quot;when does the loop stop?&quot; needs an answer that embedders
+cannot get wrong.</li>
+<li><strong>Choice:</strong> the loop runs while active handles/requests exist;
+handles may <code>unref</code> themselves out of the count; exit is simply
+&quot;nothing left.&quot;</li>
+<li><strong>Evidence:</strong> <code>uv__loop_alive</code> (<code>core.c:395</code>) — four conditions,
+no configuration; <code>uv__backend_timeout</code> (<code>core.c:403</code>) refusing to
+sleep when work is pending; the ref-flag macros
+(<code>src/uv-common.h:306-321</code>) implementing add/remove on the active
+count.</li>
+<li><strong>Given up:</strong> precise control — a lingering ref&#39;d async or a
+half-drained request keeps the process alive mysteriously (&quot;why
+won&#39;t Node exit?&quot; is this trade&#39;s support cost), and debugging means
+walking your own handle graph.</li>
+<li><strong>Verdict:</strong> right for embedded runtimes where &quot;exit when idle&quot; must
+be the default-correct behavior. Wrong for servers with explicit
+shutdown choreography — which is why those embedders learn
+<code>uv_unref</code> discipline early, or manage their own liveness above the
+loop.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>include/uv.h:1957</code> <code>struct uv_loop_s</code> — read the fields as a map
+of the design: queues, timer heap, <code>watchers</code>, <code>backend_fd</code>,
+<code>wq</code> + <code>wq_async</code>, <code>active_handles</code>. Every section of this dive is
+one field.</li>
+<li><code>src/unix/core.c:429</code> <code>uv_run</code> — the round, start to finish;
+match each call to a phase and to the walkthrough above. Note the
+pending-queue drain capped at 8 iterations after poll — a
+starvation guard in the core itself.</li>
+<li><code>src/unix/core.c:955</code> <code>uv__io_start</code> and <code>:1062</code> <code>uv__io_feed</code> —
+the two queues&#39; entry points; then <code>uv__run_pending</code> for how the
+pending side fires (as <code>POLLOUT</code>).</li>
+<li><code>src/unix/linux.c:1418</code> <code>uv__io_poll</code> — the flush of
+<code>watcher_queue</code> into <code>epoll_ctl</code>, the <code>epoll_wait</code> block, the
+dispatch loop with its batching counter (<code>count = 48</code>); compare
+<code>src/unix/kqueue.c:165</code> to see how little changes per platform.</li>
+<li><code>src/timer.c</code> — <code>uv_timer_start</code> inserting into the heap,
+<code>timer_less_than</code> (line 37), <code>uv__run_timers</code>, and
+<code>uv__next_timeout</code> (line 143) feeding <code>uv__backend_timeout</code>
+(<code>core.c:403</code>).</li>
+<li><code>src/unix/stream.c:1033</code> <code>uv__read</code> and <code>:1505</code> <code>uv__read_start</code> —
+the alloc-callback protocol that keeps data copies user-owned;
+notice <code>uv__io_feed</code> on the error path.</li>
+<li><code>src/unix/async.c</code> — <code>uv_async_init</code>, <code>uv_async_send</code>, and
+<code>uv__async_send</code>: the eventfd write (and its EAGAIN handling) that
+is the loop&#39;s entire cross-thread surface; then find where the
+async watcher is registered like any other poller fd.</li>
+<li><code>src/threadpool.c</code> — <code>post</code> (143), <code>worker</code> (57) with the
+slow-IO threshold dance, <code>uv__work_submit</code> (276), <code>uv__work_done</code>
+(319). Read <code>worker</code> twice: once for the queue mechanics, once for
+the starvation guard comments.</li>
+<li><code>src/queue.h</code> — the intrusive queue, whole file; it is the
+vocabulary every other file speaks.</li>
+<li><code>src/unix/core.c:395</code> <code>uv__loop_alive</code>, <code>:370</code>
+<code>uv__run_closing_handles</code>, and <code>:161</code> <code>uv_close</code> — lifetime and
+the closing protocol; then <code>src/uv-common.h:306-321</code> for the ref
+counting the lifetime depends on.</li>
+<li><code>include/uv/unix.h:90</code> <code>struct uv__io_s</code> next to a handle like
+<code>uv_tcp_t</code> — see how the watcher is embedded and why the
+two-queue design lets one struct serve both registration and
+deferral.</li>
+</ol>
+<p>You have now traced a timer, a socket read, and a threadpool
+completion through one loop round — and seen the three mechanisms
+(phases, watcher queues, the async doorbell) that every event loop
+built on libuv inherits.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Separate &quot;what changed&quot; from &quot;fire me now&quot;</strong> (the watcher&#39;s
+<code>watcher_queue</code> vs <code>pending_queue</code>): deferring backend registration
+to poll time makes event-mask updates O(1) and batchable — the
+quiet trick under <code>uv__io_start</code>.</li>
+<li><strong>Cross-thread = mutex + a pollable doorbell</strong> (<code>uv_async_send</code>):
+never let another thread run your callbacks; make it wake the loop
+and let the loop do everything (<code>threadpool.c</code> tail).</li>
+<li><strong>Budget your worst citizens explicitly</strong>: the threadpool&#39;s
+half-the-workers cap for slow I/O is three lines that prevent an
+entire failure mode (<code>slow_work_thread_threshold</code>).</li>
+<li><strong>Make lifetime ref counting, not choreography</strong> (<code>uv__loop_alive</code><ul>
+<li><code>unref</code>): &quot;exit when idle&quot; as a default-correct invariant beats
+&quot;exit when someone remembers to&quot; every time.</li>
+</ul>
+</li>
+<li><strong>Phases are an embedding API</strong> (<code>prepare</code>/<code>check</code>): exposing
+before-poll and after-poll hooks is what lets your loop live inside
+someone else&#39;s program without owning the main thread.</li>
+<li><strong>Intrusive queues for zero-allocation hot paths</strong> (<code>src/queue.h</code>):
+when every operation is a list operation, container allocation is
+the tax you stop paying.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong>. Clean small C; the challenge is holding
+the phase machinery in your head, not parsing syntax.</li>
+<li>Budget: ~3-4 hours for the reading path; libuv is famous for being
+readable in a weekend — <code>core.c</code>, <code>stream.c</code>, <code>threadpool.c</code>, and
+<code>async.c</code> are the whole story.</li>
+<li>Prerequisites: <code>select</code>/<code>poll</code>/<code>epoll</code> at a working level (man
+pages suffice); condition variables; the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> dive&#39;s
+event-loop section for a minimalist sibling of this design.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>libuv documentation — <a href="https://docs.libuv.org/">https://docs.libuv.org/</a> — the design overview
+page restates the phase model this dive walks.</li>
+<li>N. Marathe, <em>An Introduction to libuv</em> — the community book that
+first mapped the API to the phases.</li>
+<li>The <code>src/unix/core.c</code> and <code>src/threadpool.c</code> header comments — among
+the best &quot;why&quot; comments in the systems C canon.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../nats/"><span class="dir">← Previous dive</span>NATS: a subject trie with a wire protocol small enough to memorize</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 18 of 18 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

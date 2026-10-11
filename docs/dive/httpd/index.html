@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apache httpd: the web server as a hook-running extension platform — System Design Atlas</title>
+<meta name="description" content="Apache httpd dominated the early web and stayed dominant for decades, and its thesis is the inverse of nginx's minimalism: the server is an extension platform, not a fast path . Everything —">
+<meta property="og:title" content="Apache httpd: the web server as a hook-running extension platform — System Design Atlas">
+<meta property="og:description" content="Apache httpd dominated the early web and stayed dominant for decades, and its thesis is the inverse of nginx's minimalism: the server is an extension platform, not a fast path . Everything —">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-get-accept-to-writev">Walkthrough: one GET, accept to writev</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Apache httpd: the web server as a hook-running extension platform</h1>
+    <div class="meta-chips"><span class="chip domain">web-server</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/apache/httpd" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>f6b14daf428c3c4ea5fe153486797c081a821548</code> · 2026-10-10, trunk · <a href="https://github.com/apache/httpd" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Apache httpd dominated the early web and stayed dominant for decades,
+and its thesis is the inverse of nginx&#39;s minimalism: <strong>the server is an
+extension platform, not a fast path</strong>. Everything — URL-to-file mapping,
+authentication, response generation, even the connection concurrency
+model — is a registered hook (<code>ap_hook_*</code>) that any module can slot
+into, and data flows between hooks as bucket brigades through stacked
+filters. This deep-dive teaches how that hook-and-filter architecture
+scaled an ecosystem (one binary served CGI farms, PHP hosts, and
+proxies), what the per-request cost of runtime-extensibility is, and
+how the Multi-Processing Module seam lets prefork, event, and the new
+motorz (io_uring) MPMs live behind one server API.</p>
+<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/httpd/nginx.md">nginx</a> dive to see the two answers to
+&quot;what is a web server&quot;: a pipeline of modules over pools, versus a
+state machine in a worker process.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A restaurant where the conveyor belt is the restaurant.</strong> In Apache&#39;s
+kitchen there is no head chef doing everything — there is a conveyor
+belt (the filter chain: buckets of soup/bytes pass from station to
+station) and a big rulebook of <em>stations</em> (the hooks): one for
+understanding the order, one for checking the guest list, one for
+cooking, one for garnishing, one for the bill. Anyone can rent a station
+(modules register hooks with <code>ap_hook_*</code>), and the restaurant itself
+just runs the belt and calls stations in order — even &quot;who carries the
+plates to the table&quot; is a rented station (the MPM: prefork hires one
+waiter per table; event hires a team with a dispatcher watching the
+dining room). The magic rule: every plate served on a paper mat that is
+thrown away when the guest leaves (a memory pool per request — nothing
+is ever washed and reused, the mess vanishes with the table).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> if every job is a hook, then one
+compiled binary can become anything a module author imagines — the
+server stays small <em>because</em> it refuses to do anything itself.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph apr[&quot;APR (separate repo, pinned separately)&quot;]
+        POOLS[&quot;apr_pool_t — bump allocator + cleanup list&lt;br/&gt;(apr_pools.c:823 apr_palloc)&quot;]
+        BUCKETS[&quot;bucket brigades — apr_bucket_t chains&quot;]
+    end
+
+    subgraph mpm[&quot;MPM — swappable process/thread model&quot;]
+        P1[&quot;prefork: N processes,&lt;br/&gt;one connection each (prefork.c:412)&quot;]
+        P2[&quot;event: listener + worker threads +&lt;br/&gt;timer skiplist (event.c:1947)&quot;]
+        P3[&quot;motorz: io_uring-driven (motorz.c)&quot;]
+    end
+
+    subgraph core[&quot;httpd core (server/)&quot;]
+        CONN[&quot;ap_process_connection (connection.c:244)&lt;br/&gt;→ ap_run_process_connection hook&quot;]
+        HTTPC[&quot;http_core: ap_process_http_async_connection&lt;br/&gt;(http_core.c:139) → ap_read_request&quot;]
+        REQ[&quot;ap_process_async_request (http_request.c:406)&lt;br/&gt;→ ap_process_request_internal walk (request.c:192)&quot;]
+        INV[&quot;ap_invoke_handler (config.c:389)&quot;]
+        FILTERS[&quot;filter stacks in/out&lt;br/&gt;ap_pass_brigade (util_filter.c:756)&quot;]
+        COREOUT[&quot;ap_core_output_filter (core_filters.c:359)&lt;br/&gt;→ writev to socket&quot;]
+    end
+
+    subgraph mods[&quot;modules (modules/)&quot;]
+        M1[&quot;config-time: directives,&lt;br/&gt;per-dir config merge&quot;]
+        M2[&quot;request-time: hooks&quot;]
+        M3[&quot;filters registered per request&quot;]
+    end
+
+    MPM_C[&quot;clients&quot;] --&gt; mpm --&gt; CONN --&gt; HTTPC --&gt; REQ --&gt; INV
+    INV --&gt; M2
+    M2 --&gt; FILTERS --&gt; COREOUT --&gt; MPM_C
+    mods --&gt; core
+    apr --&gt; core
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>APR</strong> (Apache Portable Runtime) is the environment seam: pools,
+buckets, threads, and OS calls behind one C API. The pool allocator
+(<code>memory/unix/apr_pools.c:823</code>, in the separately-pinned APR clone) is
+a bump allocator whose &quot;free&quot; is a lifetime event.</li>
+<li><strong>httpd core</strong> (<code>server/</code>) is a hook dispatcher plus config engine.
+The request spine: <code>ap_process_connection</code> (<code>server/connection.c:244</code>)
+→ <code>ap_run_process_connection</code> (hook, implemented by
+<code>modules/http/http_core.c:139</code> for plain HTTP) → <code>ap_read_request</code>
+(<code>server/protocol.c:1306</code>) → <code>ap_process_async_request</code>
+(<code>modules/http/http_request.c:406</code>) → <code>ap_process_request_internal</code>
+(<code>server/request.c:192</code>, the phase walk) → <code>ap_invoke_handler</code>
+(<code>server/config.c:389</code>) → output filter stack →
+<code>ap_core_output_filter</code> (<code>server/core_filters.c:359</code>) → writev.</li>
+<li><strong>Modules</strong> register hooks at startup (<code>register_hooks</code>, e.g.
+<code>modules/http/http_core.c:355</code>) and directives that build per-server
+and per-directory config. <code>mod_so</code> (<code>modules/core/mod_so.c</code>) loads
+compiled modules at config time via <code>apr_dso_sym</code> (line 276) — the
+<code>LoadModule</code> line in every httpd.conf.</li>
+<li><strong>The MPM</strong> is the one hook set that decides process/thread layout
+(<code>server/mpm/</code>): at this pinned commit trunk ships <code>prefork</code>,
+<code>event</code>, <code>motorz</code>, <code>simple</code>, <code>winnt</code>, <code>mpmt_os2</code>, <code>netware</code> — the
+classic <code>worker</code> MPM is gone, superseded by <code>event</code>, which keeps its
+threading but adds an async listener for keep-alive connections.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-get-accept-to-writev">Walkthrough: one GET, accept to writev</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant M as MPM (event: listener_thread)
+    participant W as worker thread
+    participant R as ap_read_request (protocol.c:1306)
+    participant P as request walk (request.c:192)
+    participant H as ap_invoke_handler (config.c:389)
+    participant F as filters → core_output_filter
+    C-&gt;&gt;M: TCP connect (keep-alive conn)
+    M-&gt;&gt;W: ap_queue_push_socket → ap_queue_pop_something
+    W-&gt;&gt;R: ap_process_http_async_connection → ap_read_request
+    R-&gt;&gt;R: request line + headers into r-&gt;pool
+    W-&gt;&gt;P: ap_process_request_internal
+    P-&gt;&gt;P: ap_directory_walk merges per-dir config (+ .htaccess)
+    P-&gt;&gt;P: translate → map_to_storage → authn/authz hooks
+    W-&gt;&gt;H: ap_invoke_handler → ap_run_handler (module hook)
+    H-&gt;&gt;F: handler writes brigade → ap_pass_brigade
+    F--&gt;&gt;C: coalesced writev; connection parked for next request
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-mpm-hands-the-connection-to-the-machinery">The MPM hands the connection to the machinery</h3>
+<p>In <code>event</code>,
+the single <code>listener_thread</code> (<code>server/mpm/event/event.c:1947</code>) polls
+listening sockets plus parked connections, and pushes ready ones onto
+the fd queue; a <code>worker_thread</code> (line 2460) pops one and calls
+<code>ap_process_connection</code> (<code>server/connection.c:244</code>), which immediately
+delegates to the <code>process_connection</code> hook — the MPM does not know what
+HTTP is.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-connection-becomes-a-request">The connection becomes a request</h3>
+<p>The core HTTP module&#39;s
+<code>ap_process_http_async_connection</code> (<code>modules/http/http_core.c:139</code>)
+drives the state machine and calls <code>ap_read_request</code>
+(<code>server/protocol.c:1306</code>): request line, headers, all allocated from
+the request pool <code>r-&gt;pool</code> — nothing will be individually freed.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-policy-gauntlet-walks">The policy gauntlet walks</h3>
+<p><code>ap_process_async_request</code>
+(<code>modules/http/http_request.c:406</code>) runs <code>ap_process_request_internal</code>
+(<code>server/request.c:192</code>): URI normalization, <code>translate_name</code> and
+<code>map_to_storage</code> hooks decide the file, then <code>ap_directory_walk</code> (line
+680) merges per-directory config down the path — opening <code>.htaccess</code>
+files per directory via <code>ap_parse_htaccess</code> (<code>server/config.c:2000</code>)
+when <code>AllowOverride</code> permits — then authn/authz hooks run.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="a-handler-is-invoked-not-called">A handler is invoked, not called</h3>
+<p><code>ap_invoke_handler</code>
+(<code>server/config.c:389</code>) gives modules one <code>insert_filter</code> chance, then
+<code>ap_run_handler</code> walks the registered handlers until one returns
+something other than <code>DECLINED</code>. For <code>GET /index.html</code> the core
+default handler streams the file as bucket brigades into the output
+filter stack.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="brigades-flow-downhill">Brigades flow downhill</h3>
+<p>Each filter (<code>mod_deflate</code>,
+chunking, HTTP headers) transforms a brigade and calls
+<code>ap_pass_brigade</code> (<code>server/util_filter.c:756</code>) to hand it to the next;
+the stack ends in <code>ap_core_output_filter</code> (<code>server/core_filters.c:359</code>),
+which coalesces buckets and <code>writev</code>s to the socket (its
+<code>writev_nonblocking</code>, line 649).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-request-dies-the-memory-vanishes-with-it">The request dies, the memory vanishes with it</h3>
+<p>The
+response completes; the request pool is cleared/destroyed (its cleanup
+callbacks close files, unlock mutexes), and the connection either parks
+in the event MPM&#39;s timer queue for the next keep-alive request or
+lingering-closes.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-client-has-its-bytes">The client has its bytes</h3>
+<p>One request walked MPM →
+connection hooks → request walk → module handler → filter stack →
+writev, touching six extension seams — and <em>none of those seams was
+written by the server core</em>.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-hook-array-extension-as-sorted-callback-lists-server-config-c-85-175">The hook array — extension as sorted callback lists (<code>server/config.c:85-175</code>)</h3>
+<p><code>AP_IMPLEMENT_HOOK_RUN_ALL(int, pre_config, ...)</code> and friends expand to
+a per-hook-type array of <code>{function, order}</code> entries, sorted by module
+and declared precedence (<code>APR_HOOK_FIRST/MIDDLE/LAST</code>), with generated
+<code>ap_run_*</code> and <code>ap_hook_*</code> functions. The server core itself registers
+almost nothing (see <code>modules/http/http_core.c:355</code> — even &quot;speak HTTP&quot;
+is a module). Why arrays-of-callbacks over direct calls: the binary
+must serve content types and protocols that did not exist when it was
+compiled; the cost is one indirect call plus ordering ambiguity per
+phase.</p>
+<h3 id="per-directory-config-vectors-merge-functions-server-config-c-285">Per-directory config vectors + merge functions (<code>server/config.c:285</code>)</h3>
+<p>Every module gets one config slot per directory context — an array of
+pointers (<code>ap_conf_vector_t</code>) — and <code>ap_merge_per_dir_configs</code>
+(<code>server/config.c:285</code>) merges two vectors by calling each module&#39;s
+<code>merger_func</code> (cached in <code>merger_func_cache</code>). <code>ap_directory_walk</code>
+(<code>server/request.c:680</code>) applies <code>&lt;Directory&gt;</code> sections down the path
+and <code>.htaccess</code> contents (<code>ap_parse_htaccess</code>, <code>server/config.c:2000</code>)
+on top, per request, with a walk cache (<code>prep_walk_cache</code>) to avoid
+re-stats on subrequests. This is <em>the</em> feature that made shared hosting
+work: users configure the server without touching its config.</p>
+<h3 id="bucket-brigades-streaming-without-buffering-server-util-filter-c-756">Bucket brigades — streaming without buffering (<code>server/util_filter.c:756</code>)</h3>
+<p>A brigade is a doubly-linked list of <code>apr_bucket</code>s (memory, file, mmap,
+pipe, flush, EOS — each with its own read/copy/setaside vtable). Filters
+consume and produce brigades; a file download is a handful of
+file-backed buckets with offsets, not bytes in RAM; <code>ap_pass_brigade</code>
+(line 756) is the single &quot;next, please&quot; call. Why: handlers must be
+composable over unbounded bodies; the brigade is the unit of flow
+control between them, and EOS is the end-of-stream signal every filter
+sees.</p>
+<h3 id="apr-pools-allocation-by-lifetime-apr-memory-unix-apr-pools-c-823">APR pools — allocation by lifetime (<code>apr/memory/unix/apr_pools.c:823</code>)</h3>
+<p><code>apr_palloc</code> bumps a pointer inside the pool&#39;s active node, keeping
+partially-free nodes ordered by max free space (the <code>free_index</code> dance
+in <code>apr_pools.c:823-880</code>); <code>apr_pool_clear</code> (line 933) resets the
+allocator and runs registered cleanups; <code>apr_pool_destroy</code> (line 985)
+frees. The hierarchy — <code>pconf</code> (config lifetime, survives graceful
+restart) → <code>pchild</code> (process) → <code>ptrans</code> (&quot;transaction&quot;, tagged at
+<code>prefork.c:464</code>) → <code>r-&gt;pool</code> (request) — means no per-object <code>free</code>
+exists on the request path at all. Why over malloc/free: leak-proofing
+a world of a thousand modules, at the price of peak memory
+(under-estimated pools grow) and no eager reclamation inside a request.</p>
+<h3 id="the-scoreboard-cross-process-state-server-scoreboard-c-44">The scoreboard — cross-process state (<code>server/scoreboard.c:44</code>)</h3>
+<p><code>ap_scoreboard_image</code> is a shared-memory table of per-slot
+<code>worker_score</code>s (what each process/thread is doing, per-request timing
+when <code>ExtendedStatus</code> is on). It is how the parent MPM decides to spawn
+or retire children (<code>perform_idle_server_maintenance</code>,
+<code>server/mpm/event/event.c:3240</code>) and how <code>mod_status</code> renders a live picture —
+supervision as data structure, not protocol.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph parent[&quot;parent process (retained state, generations)&quot;]
+        SUP[&quot;supervises children, graceful restart&lt;br/&gt;ap_mpm_pod / ap_graceful_shutdown_timeout (mpm_common.c:182)&quot;]
+        SB[&quot;scoreboard in shared memory (scoreboard.c:44)&quot;]
+    end
+    subgraph pf[&quot;prefork child (prefork.c:412)&quot;]
+        PF1[&quot;accept mutex (SAFE_ACCEPT)&lt;br/&gt;one connection at a time&lt;br/&gt;ptrans pool per connection&quot;]
+    end
+    subgraph ev[&quot;event child&quot;]
+        EV1[&quot;listener_thread (event.c:1947):&lt;br/&gt;poll listen + parked conns,&lt;br/&gt;timer skiplist, fd queue&quot;]
+        EV2[&quot;worker threads (event.c:2460):&lt;br/&gt;pop queue, run request machinery,&lt;br/&gt;park keep-alives back&quot;]
+    end
+    SUP --&gt; PF1
+    SUP --&gt; EV2
+    EV1 --&gt;|queue| EV2
+    PF1 --&gt; SB
+    EV2 --&gt; SB
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The MPM is the concurrency answer, chosen at build time.</strong> Prefork
+(<code>server/mpm/prefork/prefork.c:412</code> <code>child_main</code>): each child
+serialize-accepts with a mutex (<code>SAFE_ACCEPT(accept_mutex_on())</code>,
+line 591) and handles one connection at a time — a crashing module
+kills one child, one connection. Event
+(<code>server/mpm/event/event.c</code>): one <code>listener_thread</code> per child polls
+everything (line 1947) and pushes work to <code>worker_thread</code>s (line
+2460); keep-alive connections that are just <em>waiting</em> are parked and
+polled instead of occupying a thread — the C10K answer, retrofitted
+under the same server API. <code>motorz</code> (<code>server/mpm/motorz/motorz.c</code>)
+is the trunk experiment doing it over io_uring.</li>
+<li><strong>Crash containment is the process model.</strong> A segfault kills a child;
+the parent (via scoreboard + <code>ap_reclaim_child_processes</code>) respawns
+it. Graceful restart sends children a &quot;finish current requests then
+exit&quot; signal through the pipe-of-death and starts a new <em>generation</em>
+with the re-parsed config — old processes drain while new ones
+already accept (bounded by <code>ap_graceful_shutdown_timeout</code>,
+<code>server/mpm_common.c:182</code>).</li>
+<li><strong>Per-request failure is pool failure.</strong> Any module can abort a
+request by returning an error from a hook; cleanup happens by pool
+destruction, so half-written requests do not leak per-object state.
+The lingering-close path (<code>ap_lingering_close</code>) drains the socket so
+a client never sees RST mid-response.</li>
+<li><strong>Backpressure</strong> lives in the filters: <code>ap_core_output_filter</code>
+buffers bounded amounts and returns <code>AP_EAGAIN</code> up the stack when the
+client stalls — in event MPM that parks the connection instead of
+blocking a worker; in prefork it simply blocks that child.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The module is the unit of extension</strong>: a <code>module</code> struct
+(<code>STANDARD20_MODULE_STUFF</code>, <code>include/http_config.h:489</code>) with a
+directive table (per-dir/per-server config creators + merger) and a
+<code>register_hooks</code> that calls <code>ap_hook_translate_name</code>,
+<code>ap_hook_handler</code>, <code>ap_hook_access_checker</code>, … Loadable at config
+time through <code>mod_so</code>&#39;s <code>LoadModule</code> → <code>apr_dso_sym</code>
+(<code>modules/core/mod_so.c:276</code>). The same server binary plus different
+<code>LoadModule</code> sets is a static file server, a PHP host (<code>mod_proxy</code> +
+php-fpm), or a TLS-terminating reverse proxy.</li>
+<li><strong>Filters are the streaming seam</strong>: <code>ap_register_output_filter</code>
+(<code>server/util_filter.c:290</code>) with a type (<code>AP_FTYPE_PROTOCOL</code>,
+<code>AP_FTYPE_CONTENT_SET</code>, …) fixes the stacking order; a module inserts
+its filter per request from the <code>insert_filter</code> hook. This is how
+<code>mod_deflate</code> or <code>mod_headers</code> compose with any handler.</li>
+<li><strong>The MPM seam</strong> makes even the process model replaceable
+(<code>server/mpm/</code>), selected by <code>--with-mpm</code> at build time — the
+decision nginx hard-codes (master + workers) exposed as a plug-in
+contract. <code>ap_mpm_query(AP_MPMQ_IS_ASYNC, ...)</code> lets modules adapt.</li>
+<li><strong>The honest warts</strong>: (1) hook <em>ordering</em> is module-relative
+(FIRST/MIDDLE/LAST), so two modules fighting for a phase need
+<code>mod_so</code>-era <code>LoadModule</code> order tricks — there is no total order
+contract; (2) <code>.htaccess</code> costs filesystem stats on every request
+(<code>ap_directory_walk</code> → <code>ap_parse_htaccess</code>), which is exactly why
+nginx refuses the feature and why every httpd tuning guide says
+<code>AllowOverride None</code>; (3) pool lifetimes are global policy, so a
+module wanting fine-grained memory discipline has to fight the
+runtime.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-extensibility-as-the-product-over-a-fixed-fast-path">Trade-off 1: extensibility as the product over a fixed fast path</h3>
+<ul>
+<li><strong>Tension:</strong> be everything to every deployment (CGI, PHP, proxy,
+auth schemes) without forking the server per use.</li>
+<li><strong>Choice:</strong> every phase is a hook array; content flows as brigades
+through stacked filters; config is data merged per directory at
+request time.</li>
+<li><strong>Evidence:</strong> the walk in <code>ap_process_request_internal</code>
+(<code>server/request.c:192</code>) is hook call after hook call;
+<code>ap_invoke_handler</code> (<code>server/config.c:389</code>) doesn&#39;t even have a
+built-in &quot;serve a file&quot; — <code>ap_run_handler</code> delegates, and the core
+default file handler is just another registrant
+(<code>server/core.c:6152</code>, <code>APR_HOOK_REALLY_LAST</code>);
+<code>modules/http/http_core.c:355</code> registers HTTP itself via hooks.</li>
+<li><strong>Given up:</strong> the fast path. Every request pays hook dispatch,
+per-dir config merging, and brigade indirection that nginx&#39;s
+single-purpose state machine skips; the RPS gap between the two
+servers on static files is this trade measured in benchmark units.</li>
+<li><strong>Verdict:</strong> right when third parties must extend the server without
+recompiling it (the shared-hosting and enterprise eras — this is why
+httpd won them). Wrong when the workload is one fixed thing at
+maximum efficiency — which is exactly the niche nginx took.</li>
+</ul>
+<h3 id="trade-off-2-pools-over-individual-allocation">Trade-off 2: pools over individual allocation</h3>
+<ul>
+<li><strong>Tension:</strong> a thousand modules, millions of requests, zero leak
+review authority.</li>
+<li><strong>Choice:</strong> allocation by lifetime (<code>r-&gt;pool</code> per request, <code>ptrans</code>
+per connection, <code>pconf</code> per config generation); cleanup as registered
+callbacks at pool destruction.</li>
+<li><strong>Evidence:</strong> <code>apr_palloc</code> (<code>apr/memory/unix/apr_pools.c:823</code>) never
+frees individually; <code>apr_pool_clear</code> (line 933) is the request-recycle
+primitive; the prefork child creates a <code>ptrans</code> &quot;transaction&quot; pool per
+connection (<code>server/mpm/prefork/prefork.c:464</code>).</li>
+<li><strong>Given up:</strong> eager reclamation (a 1GB response buffers up to its
+pool&#39;s lifetime if a filter holds it), peak-memory spikes on
+mis-sized pools, and any module that wants real streaming discipline
+must use <code>setaside</code> buckets and careful brigade hygiene.</li>
+<li><strong>Verdict:</strong> right for a plugin ecosystem where no one can audit
+frees; a leak becomes impossible <em>by construction</em>. Wrong for
+tight-memory embeddings — and it is no accident nginx, with no plugin
+API, chose pools too but scopes them to the request cycle only.</li>
+</ul>
+<h3 id="trade-off-3-per-directory-runtime-config-over-compiled-in-layout">Trade-off 3: per-directory runtime config over compiled-in layout</h3>
+<ul>
+<li><strong>Tension:</strong> let unprivileged users configure server behavior for
+their subtree (shared hosting) without reloading the server.</li>
+<li><strong>Choice:</strong> config layers merge per request — <code>&lt;Directory&gt;</code> walk,
+<code>&lt;Location&gt;</code> walk, then <code>.htaccess</code> files parsed off disk mid-request.</li>
+<li><strong>Evidence:</strong> <code>ap_directory_walk</code> (<code>server/request.c:680</code>) walking
+sections and calling <code>ap_merge_per_dir_configs</code>
+(<code>server/config.c:285</code>); <code>ap_parse_htaccess</code> (<code>server/config.c:2000</code>)
+opening and parsing user files on the hot path, with a per-request
+cache (<code>r-&gt;htaccess</code> chain) and the <code>r-&gt;taint |= AP_TAINT_HTACCESS</code>
+marker showing the security cost being tracked.</li>
+<li><strong>Given up:</strong> per-request filesystem stats and parse cost, plus a
+whole class of surprises (options a user re-enabled in a subdir) —
+the feature is both the reason shared hosting existed and the reason
+every performance guide disables it.</li>
+<li><strong>Verdict:</strong> right when your users are tenants you cannot trust with
+the main config; wrong when you own the whole server — then it is
+pure overhead, and the industry&#39;s move to nginx/Caddy configs with a
+reload is the verdict playing out.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>server/main.c</code> — startup: config tree parse → <code>pre_config</code> /
+<code>post_config</code> hooks → MPM&#39;s <code>ap_mpm_run</code>. Notice how early the core
+hands everything to hooks.</li>
+<li><code>include/http_config.h:461-489</code> — the <code>module</code> struct and
+<code>STANDARD20_MODULE_STUFF</code>; then <code>AP_DECLARE_MODULE</code> at 467 to see
+the DSO plumbing fields.</li>
+<li><code>server/config.c:85-175</code> — <code>AP_IMPLEMENT_HOOK_RUN_ALL/FIRST</code>
+expansions: the arrays, the sort, the generated <code>ap_run_*</code>. This is
+the whole extension mechanism in forty lines of macros.</li>
+<li><code>modules/http/http_core.c:139</code> <code>ap_process_http_async_connection</code> —
+HTTP itself as a module: read request, run
+<code>ap_process_async_request</code>, park or close the connection.</li>
+<li><code>server/protocol.c:1306</code> <code>ap_read_request</code> — request line + headers
+into <code>r-&gt;pool</code>; note <code>ap_get_mime_headers</code> and how nothing is freed
+individually.</li>
+<li><code>server/request.c:192</code> <code>ap_process_request_internal</code> — the phase
+walk: normalize → translate → <code>map_to_storage</code> → directory walk →
+authn/authz → <code>type_checker</code> → done. Read it once for one request,
+once for a subrequest (<code>ap_sub_req_lookup_uri</code> reuses the walk
+cache).</li>
+<li><code>server/request.c:680</code> <code>ap_directory_walk</code> + <code>server/config.c:2000</code>
+<code>ap_parse_htaccess</code> — the per-directory merge story, including the
+<code>.htaccess</code> cache chain on <code>r</code>.</li>
+<li><code>server/config.c:285</code> <code>ap_merge_per_dir_configs</code> — the vector merge
+with cached merger functions; config composition as an algebra.</li>
+<li><code>server/config.c:389</code> <code>ap_invoke_handler</code> — insert_filter, filter
+init, then <code>ap_run_handler</code> walking registrants until one commits.</li>
+<li><code>server/util_filter.c:756</code> <code>ap_pass_brigade</code> and
+<code>server/core_filters.c:359</code> <code>ap_core_output_filter</code> — brigades
+downhill to coalesced <code>writev</code>; this is where streaming meets the
+socket.</li>
+<li><code>apr/memory/unix/apr_pools.c:823</code> (<code>apr_palloc</code>) and 933
+(<code>apr_pool_clear</code>) — the allocator and its recycle primitive, from
+the separately-pinned APR clone.</li>
+<li><code>server/mpm/prefork/prefork.c:412</code> <code>child_main</code>, then
+<code>server/mpm/event/event.c:1947</code> <code>listener_thread</code> and 2460
+<code>worker_thread</code> — the two concurrency answers behind the same
+hooks; finish with <code>server/mpm_common.c:182</code> for graceful
+shutdown timeout plumbing.</li>
+</ol>
+<p>You have now traced one GET from accept to writev across six extension
+seams, and seen the process model swap (prefork ↔ event) without the
+request machinery noticing.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the platform the product, not any one behavior</strong>: when every
+phase is a hook, your ecosystem — not your code — answers future
+requirements (<code>server/config.c</code> hook macros).</li>
+<li><strong>Give extension points <em>data</em> to own and <em>merge rules</em> to compose</strong>
+(per-dir config vectors + <code>merger_func</code>s): modules stay orthogonal
+because composition is defined, not improvised.</li>
+<li><strong>Stream as a linked list of typed chunks</strong> (bucket brigades): file,
+memory, and generated content compose through one interface, and EOS
+is a first-class citizen.</li>
+<li><strong>Allocate by lifetime, not by object</strong> (APR pools): free an epoch,
+not a pointer — leak-proofness is structural, not disciplinary.</li>
+<li><strong>Put the concurrency model behind a seam</strong> (the MPM): you will need
+to change it someday (thread → async → io_uring) and the request
+machinery must not care.</li>
+<li><strong>Supervise via a shared data structure</strong> (the scoreboard): spawning,
+retiring, and observability read the same truth, so the parent, the
+children, and <code>mod_status</code> never disagree.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong>. Macro-heavy C, a two-repo codebase, and
+the architecture is in the conventions (hooks, pools, filters), not
+in any single file.</li>
+<li>Budget: ~8-10 hours for the reading path; the phases and filter
+stacks repay a second pass with a debugger attached.</li>
+<li>Prerequisites: C preprocessor fluency (the hook system is macros);
+what a DSO is; the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/httpd/nginx.md">nginx</a> dive for the contrasting model;
+basic POSIX process/thread semantics.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Apache HTTP Server documentation — <a href="https://httpd.apache.org/docs/">https://httpd.apache.org/docs/</a> —
+especially &quot;Modules&quot; and the MPM sections.</li>
+<li>N. Kew, <em>The Apache Modules Book: Application Development with
+Apache</em> (Prentice Hall, 2007) — the module/hook model explained by a
+modules author.</li>
+<li>The <code>CHANGES</code> file at the pinned commit — the removal of the <code>worker</code>
+MPM and the arrival of <code>motorz</code> read as a history of the process-model
+trade-offs.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../memcached/"><span class="dir">← Previous dive</span>Memcached: the cache that kept the server dumb</a>
+  <a href="../zookeeper/" style="text-align:right"><span class="dir">Next dive →</span>ZooKeeper: consensus wrapped in a tiny ordered filesystem</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 15 of 18 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

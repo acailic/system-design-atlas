@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memcached: the cache that kept the server dumb — System Design Atlas</title>
+<meta name="description" content="Memcached is a networked hash map, and its design thesis is that this is enough : the server allocates memory in fixed slab classes, evicts by (approximate) LRU, speaks a protocol you can ty">
+<meta property="og:title" content="Memcached: the cache that kept the server dumb — System Design Atlas">
+<meta property="og:description" content="Memcached is a networked hash map, and its design thesis is that this is enough : the server allocates memory in fixed slab classes, evicts by (approximate) LRU, speaks a protocol you can ty">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-set-and-one-get-socket-to-slab">Walkthrough: one SET and one GET, socket to slab</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Memcached: the cache that kept the server dumb</h1>
+    <div class="meta-chips"><span class="chip domain">cache</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/memcached/memcached" rel="noopener">BSD-3-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>2d51e364799bc9698bd4b11728ea978cea12da6e</code> · 2026-07-09 · <a href="https://github.com/memcached/memcached" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Memcached is a networked hash map, and its design thesis is that this is
+<em>enough</em>: the server allocates memory in fixed slab classes, evicts by
+(approximate) LRU, speaks a protocol you can type in netcat — and refuses
+every other job. No persistence, no replication, no clustering: sharding,
+failover, and consistent hashing all live in client libraries. This
+deep-dive teaches what that refusal buys (predictable latency, a tiny
+server that scaled the mid-2000s web) and where it hurts, by walking one
+<code>SET</code> and one <code>GET</code> through worker event loops, striped locks, and the
+slab allocator that never frees.</p>
+<p>Read it alongside <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/memcached/redis.md">Redis</a>: two opposite answers to the same
+problem. Memcached keeps the server minimal and pays in features; Redis
+builds the data structures in and pays in complexity.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A wall of mail slots in fixed sizes.</strong> Memcached is a post office wall
+where every slot is one of a few fixed sizes (slab classes): small,
+medium, large. When a letter arrives (a <code>SET</code>), the clerk picks the
+smallest slot it fits in — never a custom one — because carving slots to
+order leaves unusable gaps (fragmentation). Each counter line has its own
+clerk (a worker thread with its own event loop), and a sorter at the
+door (the main thread) hands new customers to clerks round-robin so no
+line is longer than another. When the wall is full, a janitor quietly
+throws away the oldest mail nobody asked about (approximate LRU eviction)
+instead of buying more wall. The building never promises to remember
+anything if the power goes out (no persistence) — if a branch burns
+down, customers just switch to another branch using a directory they
+each keep in their own pocket (consistent hashing in the <em>client</em>
+libraries). Nothing in the post office even knows the other branches
+exist.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> every hard distributed problem was
+pushed out of the server — into clients, or into &quot;the cache can be cold&quot;
+— so the server itself stays so simple it almost cannot fall over.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CL[&quot;clients — text / binary protocol over TCP&quot;]
+
+    subgraph main[&quot;main thread (memcached.c:main → event_base_loop 6212)&quot;]
+        ACC[&quot;listening sockets&lt;br/&gt;conn_listening state → accept&quot;]
+        DISP[&quot;dispatch_conn_new (thread.c:772)&lt;br/&gt;round-robin to a worker&quot;]
+    end
+
+    subgraph worker[&quot;worker thread N (thread.c:507 worker_libevent)&quot;]
+        LOOP[&quot;own libevent event_base&quot;]
+        DM[&quot;drive_machine state machine&lt;br/&gt;(memcached.c:2965)&quot;]
+        PARSE[&quot;try_read_command_ascii / _binary&lt;br/&gt;→ process_command_*&quot;]
+    end
+
+    subgraph store[&quot;shared storage, striped locks&quot;]
+        HT[&quot;primary_hashtable (assoc.c)&lt;br/&gt;hash chain per bucket&quot;]
+        SLAB[&quot;slab classes (slabs.c)&lt;br/&gt;1MB pages sliced into fixed chunks&quot;]
+        LRU[&quot;segmented LRU lists&lt;br/&gt;HOT / WARM / COLD per class (items.h)&quot;]
+    end
+
+    subgraph bg[&quot;background threads&quot;]
+        AM[&quot;assoc maintenance thread&lt;br/&gt;incremental hash expand&quot;]
+        CR[&quot;LRU crawler + maintainer&quot;]
+        REB[&quot;slab rebalancer (optional)&quot;]
+    end
+
+    CL --&gt; ACC --&gt; DISP --&gt; LOOP
+    LOOP --&gt; DM --&gt; PARSE
+    PARSE --&gt; HT
+    PARSE --&gt; SLAB
+    HT --- LRU
+    SLAB --- LRU
+    AM --&gt; HT
+    CR --&gt; LRU
+    REB --&gt; SLAB
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Main thread</strong> owns the listening sockets and nothing else. Its
+<code>drive_machine</code> in <code>conn_listening</code> state accepts, then hands the fd to
+a worker via <code>dispatch_conn_new</code> (<code>thread.c:772</code>) — a queue item plus a
+pipe write to wake that worker&#39;s event loop (<code>notify_worker</code>).</li>
+<li><strong>Worker threads</strong> (default count = cores) each run <code>worker_libevent</code>
+(<code>thread.c:507</code>): an <code>event_base_loop</code> around per-connection state
+machines (<code>drive_machine</code>, <code>memcached.c:2965</code>).</li>
+<li><strong>Storage</strong> is shared and protected by <em>striped</em> locks, not one global
+lock: <code>item_lock(hv)</code> maps a key&#39;s hash to one of a few thousand
+mutexes (<code>thread.c:117</code>); slab allocation takes the global <code>slabs_lock</code>
+briefly; each LRU segment has its own <code>lru_locks[]</code>.</li>
+<li><strong>Background threads</strong> do the amortized work: the assoc maintenance
+thread migrates buckets during hash expansion (<code>assoc.c:197</code>), the LRU
+crawler/maintainer ages items between segments, and an optional slab
+rebalancer moves pages between classes.</li>
+<li>The <strong>spine</strong> of a command: fd readable → <code>drive_machine</code> conn_read →
+<code>try_read_command_ascii</code> (<code>proto_text.c:357</code>) → <code>process_command_ascii</code>
+(<code>proto_text.c:1529</code>) → per-command handler → <code>assoc_*</code> / <code>do_item_*</code>
+under the item lock → reply queued, flushed by the event loop.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-set-and-one-get-socket-to-slab">Walkthrough: one SET and one GET, socket to slab</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant M as main thread (accept)
+    participant W as worker loop (drive_machine)
+    participant A as assoc hash table
+    participant S as slab allocator
+    participant L as LRU list
+    C-&gt;&gt;M: connect
+    M-&gt;&gt;W: dispatch_conn_new → conn_new
+    C-&gt;&gt;W: &quot;set user:42 0 0 5\r\nhello\r\n&quot;
+    W-&gt;&gt;W: try_read_command_ascii → process_command_ascii
+    W-&gt;&gt;S: do_item_alloc (slabs_clsid) → slab class chunk
+    W-&gt;&gt;W: conn_nread: swallow 5 value bytes into the item
+    W-&gt;&gt;A: assoc_insert under item_lock(hv)
+    W-&gt;&gt;L: link into HOT LRU for that class
+    W--&gt;&gt;C: &quot;STORED\r\n&quot;
+    Note over W,S: eviction only if the class needs a chunk
+    C-&gt;&gt;W: &quot;get user:42\r\n&quot;
+    W-&gt;&gt;A: assoc_find → do_item_get (lazy expiry check)
+    W--&gt;&gt;C: &quot;VALUE user:42 0 5\r\nhello\r\nEND\r\n&quot;
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-sorter-assigns-a-line">The sorter assigns a line</h3>
+<p>The client connects; the main
+thread&#39;s <code>drive_machine</code> accepts (<code>conn_listening</code> case,
+<code>memcached.c:2965</code>) and calls <code>dispatch_conn_new</code> (<code>thread.c:772</code>),
+which picks a worker round-robin and wakes it. The fd now belongs to
+that worker&#39;s event loop forever — no migration, no shared sockets.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="parse-the-verb">Parse the verb</h3>
+<p>Bytes arrive; the worker&#39;s loop calls
+<code>try_read_command_ascii</code> (<code>proto_text.c:357</code>), which finds the line
+ending and hands the line to <code>process_command_ascii</code>
+(<code>proto_text.c:1529</code>) — a hand tokenizer, not a grammar.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="allocate-before-you-promise">Allocate before you promise</h3>
+<p><code>process_update_command</code>
+(<code>proto_text.c:764</code>) sizes the item (header + key + flags suffix + value
+bytes), calls <code>do_item_alloc</code> (<code>items.c:249</code>), which maps the size to a
+slab class with <code>slabs_clsid</code> (<code>slabs.c:77</code>) and pulls a chunk from that
+class&#39;s freelist (<code>do_slabs_alloc</code>, <code>slabs.c:411</code>). If the class is
+empty, <code>do_item_alloc_pull</code> (<code>items.c:162</code>) evicts from the COLD tail
+to make room — the value isn&#39;t even read off the wire yet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="swallow-the-value">Swallow the value</h3>
+<p>The connection enters <code>conn_nread</code>
+state and <code>drive_machine</code> reads exactly the announced value length into
+the chunk the allocator handed out: header, key, and value end up in
+<em>one</em> contiguous allocation (<code>item</code> struct, <code>memcached.h:613</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="publish-under-the-stripe">Publish under the stripe</h3>
+<p><code>assoc_insert</code> (<code>assoc.c:153</code>)
+links the item into the hash bucket — under <code>item_lock(hv)</code>, the striped
+mutex chosen by the key&#39;s hash (<code>thread.c:117</code>) — and the item joins the
+HOT LRU list of its class. Only writers touching keys that hash to the
+same stripe wait for each other.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="reply-at-the-loop-s-edge">Reply at the loop&#39;s edge</h3>
+<p><code>STORED\r\n</code> is queued in the
+connection&#39;s response object and written when the socket is writable;
+the worker immediately moves on to other connections.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="a-get-walks-the-same-spine-minus-the-write">A GET walks the same spine, minus the write</h3>
+<p><code>process_get_command</code> (<code>proto_text.c:429</code>) iterates keys;
+<code>do_item_get</code> (<code>items.c:974</code>) finds the item and applies <em>lazy</em> expiry —
+an item whose <code>exptime</code> passed is unlinked on touch, not by a timer.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-client-sees-its-value-or-end">The client sees its value or END</h3>
+<p>Memory came from a
+fixed class, sharing was bounded by one stripe lock, and nothing was
+fsynced anywhere — a cache&#39;s contract is speed, and recovery is &quot;the
+clients refill it.&quot;</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="item-header-key-and-value-in-one-chunk-memcached-h-613">item — header, key, and value in one chunk (<code>memcached.h:613</code>)</h3>
+<pre><code class="language-c">typedef struct _stritem {
+    struct _stritem *next;      /* LRU links, protected by LRU locks */
+    struct _stritem *prev;
+    struct _stritem *h_next;    /* hash chain, protected by item lock */
+    rel_time_t      time;       /* least recent access */
+    rel_time_t      exptime;
+    int             nbytes;
+    ...
+} item;   /* followed by key, flags suffix, then the data bytes */
+</code></pre>
+<p>One allocation, three roles: LRU membership (<code>next/prev</code>), hash
+membership (<code>h_next</code>), and inline payload. A pointer-graph design
+(header object + separate value buffer) would need two frees, two
+allocations, and an indirection per <code>GET</code>; here one slab chunk is the
+whole item. The comment in <code>memcached.h</code> documents which lock protects
+which field — LRU fields vs hash fields vs refcount — the lock-striping
+design made visible.</p>
+<h3 id="slab-classes-fixed-size-chunks-that-are-never-freed-slabs-c-202">slab classes — fixed-size chunks that are never freed (<code>slabs.c:202</code>)</h3>
+<p><code>slabs_init</code> builds <code>slabclass[]</code> with sizes growing by a factor
+(default 1.25) from 80 bytes up; a 1MB page (<code>slab_page_size</code>) is cut
+into <code>perslab</code> equal chunks per class. <code>do_slabs_alloc</code> (<code>slabs.c:411</code>)
+serves from the class freelist (<code>p-&gt;slots</code>); &quot;freeing&quot; an item only
+returns it to that freelist — memory is <em>never</em> returned to the OS, and
+pages are only re-carved by the optional slab-reassign machinery. Why:
+general malloc fragments fatally under cache workloads (this is the
+allocator&#39;s origin story — the 2002 fork of a memory manager for
+LiveJournal); size classes turn fragmentation into bounded internal
+waste (on average under half a class step, and tunable with <code>-f</code>).</p>
+<h3 id="primary-hashtable-chained-with-incremental-expansion-assoc-c">primary_hashtable — chained, with incremental expansion (<code>assoc.c</code>)</h3>
+<p>An open-chaining table indexed by the key hash (<code>assoc_find</code>,
+<code>assoc.c:70</code>). When it fills, <code>assoc_expand</code> allocates a doubled table
+and a <em>background thread</em> moves <code>hash_bulk_move</code> buckets per iteration
+(<code>assoc_maintenance_thread</code>, <code>assoc.c:197</code>) — under item locks, in the
+same striping scheme the request path uses (the comment at <code>assoc.c:207</code>
+explains why one stripe lock suffices per bucket move). Why
+incremental: the same reasoning as Redis&#39;s incremental rehash — a
+multi-GB rehash on the request path would be a latency spike measured in
+seconds.</p>
+<h3 id="segmented-lru-hot-warm-cold-temp-per-class-items-h-1-4">segmented LRU — HOT, WARM, COLD, TEMP per class (<code>items.h:1-4</code>)</h3>
+<p>Not one list per class but four segments (<code>#define HOT_LRU 0</code> …
+<code>TEMP_LRU 192</code>), with a maintainer thread moving items between them and
+evicting only from COLD. <code>lru_pull_tail</code> (<code>items.c:1072</code>) is the
+eviction engine: take the tail under the LRU lock, trylock the item&#39;s
+stripe, skip what&#39;s busy, evict what&#39;s expired or coldest. Why segments:
+classic LRU lets a one-time scan flush the whole working set (&quot;list
+poisoning&quot;); splitting hot/warm/cold means a burst of junk lands in COLD
+and dies there, while repeatedly-read keys get bumped (the
+<code>lru_bump_buf</code> defers bumps off the request path entirely).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph main[&quot;main thread&quot;]
+        A[&quot;accept → round-robin dispatch&quot;]
+    end
+    subgraph w1[&quot;worker 1&quot;]
+        L1[&quot;event_base_loop + drive_machine&quot;]
+    end
+    subgraph w2[&quot;worker 2&quot;]
+        L2[&quot;event_base_loop + drive_machine&quot;]
+    end
+    subgraph shared[&quot;shared: hashtable + slabs + LRU&quot;]
+        IL[&quot;item_locks[hv &amp; mask]&lt;br/&gt;(thread.c:117)&quot;]
+        SL[&quot;slabs_lock&quot;]
+        LL[&quot;lru_locks[class + segment]&quot;]
+    end
+    subgraph bgthreads[&quot;background&quot;]
+        B1[&quot;assoc maintenance&quot;]
+        B2[&quot;LRU crawler / maintainer&quot;]
+        B3[&quot;slab rebalancer (opt-in)&quot;]
+    end
+    A --&gt; L1
+    A --&gt; L2
+    L1 --&gt; IL
+    L2 --&gt; IL
+    L1 --&gt; SL
+    L2 --&gt; LL
+    B1 --&gt; IL
+    B2 --&gt; LL
+    B3 --&gt; SL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> N worker loops, one per core by default,
+plus the background threads. <strong>What is serialized:</strong> access to a given
+<em>key</em> (stripe lock), a given slab class&#39;s freelist (<code>slabs_lock</code>), a
+given LRU segment. The rule is written down at <code>thread.c:109</code>:
+&quot;item_lock() must be held for an item before any modifications to
+either its data or the LRU links.&quot;</li>
+<li><strong>Races are chosen, not eliminated.</strong> <code>do_item_alloc_pull</code>
+(<code>items.c:162</code>) carries a comment that is the whole philosophy in
+three lines: the eviction path is <em>allowed</em> to occasionally OOM rather
+than coordinate — &quot;This is a race in order to simplify lru_pull_tail.&quot;
+An LRU you only approximate is one you never wait on.</li>
+<li><strong>Crash model: there is none.</strong> No WAL, no snapshot, no replay. A dead
+memcached is a cold cache; clients mark the shard dead in their
+consistent-hash ring and life goes on. (The modern escape hatches —
+<code>extstore</code> for SSD offload and a restart-mode memory file — are opt-in
+additions, not the design.)</li>
+<li><strong>Overload behavior:</strong> per-connection limits (<code>read_buf_mem_limit</code>),
+global memory limit enforced by eviction, <code>maxconns_fast</code> rejection at
+accept time, and the LRU crawler with a sleep budget so background
+scanning never steals the foreground&#39;s CPU.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The <strong>text protocol</strong> is the API: <code>get/set/add/gets/cas/delete/ incr/decr/touch</code>, plus the newer meta commands (<code>mg/me/ma/ms</code>,
+<code>proto_text.c</code>). It is line-oriented, unversioned, and speakable from
+netcat — which is why a hundred client libraries existed within a few
+years. The <strong>binary protocol</strong> (<code>proto_bin.c</code>) adds framing, opaque
+tokens, and a SASL path behind the same verbs; the server auto-negotiates
+on the first bytes (<code>conn_new</code> picks <code>try_read_command_negotiate</code>).</li>
+<li>The <strong>seams are internal, not a plugin API</strong>: <code>EXTSTORE</code> (an external
+storage device for cold items) and <code>PROXY</code> (a Lua-configured routing
+mode, <code>proxy/proxy_lua.c</code> + <code>proxy_luafgen.c</code>) are compile-time feature sets, not loadable
+modules. This is the honest cost of the minimal-server bet: where
+nginx has a module API, memcached has a Makefile flag.</li>
+<li>The extension surface that <em>mattered</em> is the client protocol + the
+client-side conventions built on it: consistent hashing (Ketama),
+add-or-get locking patterns, flags as a poor man&#39;s MIME type. The
+server stayed stable because it promised so little.</li>
+<li>The wart: because the text protocol grew by accretion, each verb
+reimplements argument parsing; <code>process_command_ascii</code>
+(<code>proto_text.c:1529</code>) is a long dispatch over near-duplicated token
+walks — compare Redis&#39;s generated command table for the same problem
+solved as data.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-fixed-slab-classes-over-general-purpose-malloc">Trade-off 1: fixed slab classes over general-purpose malloc</h3>
+<ul>
+<li><strong>Tension:</strong> hold millions of short-lived, similar-sized objects
+forever without fragmenting.</li>
+<li><strong>Choice:</strong> size classes with factor growth; chunks recycle inside
+their class; memory never goes back to the OS.</li>
+<li><strong>Evidence:</strong> <code>slabs_init</code> (<code>slabs.c:202</code>) builds the classes;
+<code>do_slabs_alloc</code> (<code>slabs.c:411</code>) serves chunks; <code>slabs_clsid</code>
+(<code>slabs.c:77</code>) rounds every request up to a class. The optional
+reassign thread (<code>start_slab_maintenance_thread</code> in <code>slabs.c</code>) exists
+only because pages <em>can&#39;t</em> move between classes by default — the
+cost of the choice, patched.</li>
+<li><strong>Given up:</strong> memory flexibility — a workload of 129-byte items in a
+128-byte class wastes ~50%; large values need chunked item chains
+(<code>item_chunk</code>, <code>items.c:208</code>), a whole subsystem malloc would have
+made unnecessary.</li>
+<li><strong>Verdict:</strong> right when value sizes cluster (sessions, rendered
+fragments, denormalized rows) — which is what a <em>cache</em> holds. Wrong
+for arbitrary-size documents, where Redis&#39;s SDS strings with their own
+allocator discipline are the better tool.</li>
+</ul>
+<h3 id="trade-off-2-approximate-lru-with-striped-locks-over-a-strict-global-list">Trade-off 2: approximate LRU with striped locks over a strict global list</h3>
+<ul>
+<li><strong>Tension:</strong> real LRU order is global state; updating it per access
+costs serialization on every <code>GET</code>.</li>
+<li><strong>Choice:</strong> per-class segmented lists, stripe locks by hash, deferred
+bump buffers, and eviction that <em>skips</em> locked items instead of
+waiting.</li>
+<li><strong>Evidence:</strong> <code>lru_pull_tail</code> (<code>items.c:1072</code>) walks the tail with
+<code>item_trylock</code> and simply <code>continue</code>s past contention; the race
+comment in <code>do_item_alloc_pull</code> (<code>items.c:166</code>) blesses occasional
+failure over coordination; <code>thread.c:109-117</code> draws the lock rules.</li>
+<li><strong>Given up:</strong> strict recency — a contended item can be evicted while
+&quot;hot&quot;, and stats are per-thread approximations (<code>THR_STATS_LOCK</code>
+only guards the per-thread counters).</li>
+<li><strong>Verdict:</strong> right because a cache&#39;s product is p99 latency, not
+exact staleness order — an approximate LRU that never blocks beats a
+precise one that does. Wrong when every object is expensive to
+recompute and false evictions are visible as load — then you want
+Redis&#39;s sampled + segmented scheme or an explicit admission policy
+(e.g. TinyLFU), not more precision inside the same shape.</li>
+</ul>
+<h3 id="trade-off-3-dumb-server-smart-clients-over-a-coordinated-cluster">Trade-off 3: dumb server, smart clients over a coordinated cluster</h3>
+<ul>
+<li><strong>Tension:</strong> scale a cache across many machines without making the
+server a distributed system.</li>
+<li><strong>Choice:</strong> the server has zero cluster code — no membership, no
+replication, no rebalancing protocol. Clients shard via consistent
+hashing and treat a dead node as a cache miss funnel to peers/DB.</li>
+<li><strong>Evidence:</strong> the command table in <code>proto_text.c</code> — the <em>entire</em>
+server surface is per-key verbs; there is no <code>CLUSTER</code>, no <code>REPLICA</code>,
+no forwarding state anywhere in <code>memcached.c</code>. The main thread&#39;s only
+routing decision is worker round-robin (<code>select_thread_round_robin</code>
+in <code>dispatch_conn_new</code>, <code>thread.c:772</code>).</li>
+<li><strong>Given up:</strong> server-side durability and rebalance-free elasticity;
+the ecosystem had to standardize hashing <em>outside</em> the repo (Ketama),
+which took years and client-by-client adoption.</li>
+<li><strong>Verdict:</strong> right for a <em>cache</em>, where the source of truth lives
+elsewhere and a cold start is survivable. The exact same choice is
+fatal for a <em>database</em> — which is the Kafka deep-dive&#39;s mirror-image
+lesson (&quot;dumb broker, smart clients&quot; works when the broker is a log
+everyone can reread, and fails when it isn&#39;t).</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>memcached.c:main</code> (line 4714) — settings parse, then the startup
+order: <code>memcached_thread_init</code> (workers) → assoc maintenance thread →
+LRU crawler → LRU maintainer → slab reassign → clock → listen →
+<code>event_base_loop(main_base, EVLOOP_ONCE)</code> at line 6212. Notice how
+<em>few</em> things the main thread does after setup.</li>
+<li><code>memcached.c:drive_machine</code> (line 2965) — the connection state
+machine: <code>conn_listening</code> accepts and dispatches; read the
+<code>conn_read → conn_parse_cmd → conn_nread</code> cycle once for a <code>SET</code> and
+once for a <code>GET</code>.</li>
+<li><code>thread.c:dispatch_conn_new</code> (line 772) + <code>worker_libevent</code>
+(line 507) — connection handoff by queue + pipe wakeup; each worker
+runs its own <code>event_base_loop</code>. This is the &quot;event loop per core&quot;
+shape nginx arrived at with processes.</li>
+<li><code>thread.c:109-134</code> — the lock-striping contract (<code>item_lock</code>,
+<code>item_trylock</code>) and the comment that defines who may touch what.</li>
+<li><code>proto_text.c:try_read_command_ascii</code> (line 357) →
+<code>process_command_ascii</code> (line 1529) → <code>process_update_command</code>
+(line 764) — parse, then allocate-before-read; the value bytes are
+swallowed later by <code>conn_nread</code>, directly into the slab chunk.</li>
+<li><code>slabs.c:slabs_init</code> (line 202) + <code>do_slabs_alloc</code> (line 411) — size
+classes, per-class freelists, the never-free discipline; then
+<code>slabs_clsid</code> (line 77) for the rounding rule.</li>
+<li><code>items.c:do_item_alloc</code> (line 249) → <code>do_item_alloc_pull</code>
+(line 162) — the retry loop that makes eviction a fallback for
+allocation failure, and the race comment that explains why.</li>
+<li><code>assoc.c</code> — <code>assoc_find</code> (70), <code>assoc_insert</code> (153),
+<code>assoc_expand</code> (123-126), and <code>assoc_maintenance_thread</code> (197) —
+the incremental rehash story, done by a thread instead of Redis&#39;s
+per-op steps.</li>
+<li><code>items.c:lru_pull_tail</code> (line 1072) — eviction: tail walk under LRU
+lock, trylock per item, expired-first; then
+<code>start_lru_maintainer_thread</code> (line 1649) for the segment moves.</li>
+<li><code>items.c:do_item_get</code> (line 974) — lazy expiry and the refcount
+handshake (<code>refcount_incr</code>) that lets one thread read an item
+another thread is evicting.</li>
+<li><code>memcached.h:613</code> — the <code>item</code> struct with its inline key+value and
+the lock annotations; compare with Redis&#39;s <code>robj</code> to see
+value-object design vs slab-native design.</li>
+</ol>
+<p>You have now traced a <code>SET</code> and a <code>GET</code> from socket to slab class and
+back, and seen the three refusals (no malloc, no strict LRU, no cluster)
+that make the whole design cohere.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Refuse the hard problem your system doesn&#39;t own.</strong> Memcached pushed
+durability and distribution to clients because a cache <em>may</em> forget —
+name the thing your system may forget, and design around that license.</li>
+<li><strong>Allocation by size class recycles without fragmenting</strong> — apply
+wherever millions of same-shaped objects live and die
+(<code>slabs.c:do_slabs_alloc</code>).</li>
+<li><strong>Stripe your locks by hash, not by structure</strong>: contention follows
+keys, so lock by key hash (<code>thread.c:item_lock</code>) and document the
+ownership of every field next to its declaration (<code>memcached.h:613</code>).</li>
+<li><strong>Amortize growth into a background thread with the same lock
+discipline as the foreground</strong> (<code>assoc_maintenance_thread</code>) — a
+pattern that scales from hash tables to any resizable structure.</li>
+<li><strong>Prefer an occasional miss over coordination</strong>: the race comments in
+<code>items.c</code> are the cleanest statements of &quot;good enough, cheaper&quot; you
+will read in systems code.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>moderate</strong>. Plain C, no macros beyond the event library.</li>
+<li>Budget: ~4 hours for the reading path; a weekend adds <code>thread.c</code>,
+<code>items.c</code>, and <code>slabs.c</code> cover to cover (~8k lines total, dense).</li>
+<li>Prerequisites: hash tables and freelists at a data-structures level;
+what an event loop is (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/memcached/redis.md">Redis</a> dive covers the shape);
+pthread mutex basics.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The memcached docs — <a href="https://memcached.org/">https://memcached.org/</a> — especially the tuning
+pages on slab growth factor and the LRU crawler.</li>
+<li>B. Fitzpatrick, &quot;Distributed Caching with Memcached&quot; (Linux Journal,<ol start="2004">
+<li>— the origin story, including why the allocator was written.</li>
+</ol>
+</li>
+<li>D. Karger et al., &quot;Consistent Hashing and Random Trees&quot; (1997) — the
+paper Ketama-style client hashing implements; read it to see the
+&quot;smart client&quot; half of the design.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../elasticsearch/"><span class="dir">← Previous dive</span>Elasticsearch: a search engine behind a friendly distributed façade</a>
+  <a href="../httpd/" style="text-align:right"><span class="dir">Next dive →</span>Apache httpd: the web server as a hook-running extension platform</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 14 of 18 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
