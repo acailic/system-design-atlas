@@ -273,7 +273,7 @@ flowchart LR
   *key* (stripe lock), a given slab class's freelist (`slabs_lock`), a
   given LRU segment. The rule is written down at `thread.c:109`:
   "item_lock() must be held for an item before any modifications to
-  either its data or the LRU links."
+  either its associated hash bucket, or the structure itself."
 - **Races are chosen, not eliminated.** `do_item_alloc_pull`
   (`items.c:162`) carries a comment that is the whole philosophy in
   three lines: the eviction path is *allowed* to occasionally OOM rather

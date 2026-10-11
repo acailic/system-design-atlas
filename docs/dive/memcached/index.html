@@ -278,7 +278,7 @@ plus the background threads. <strong>What is serialized:</strong> access to a gi
 <em>key</em> (stripe lock), a given slab class&#39;s freelist (<code>slabs_lock</code>), a
 given LRU segment. The rule is written down at <code>thread.c:109</code>:
 &quot;item_lock() must be held for an item before any modifications to
-either its data or the LRU links.&quot;</li>
+either its associated hash bucket, or the structure itself.&quot;</li>
 <li><strong>Races are chosen, not eliminated.</strong> <code>do_item_alloc_pull</code>
 (<code>items.c:162</code>) carries a comment that is the whole philosophy in
 three lines: the eviction path is <em>allowed</em> to occasionally OOM rather

@@ -98,9 +98,10 @@ flowchart TD
   `LoadModule` line in every httpd.conf.
 - **The MPM** is the one hook set that decides process/thread layout
   (`server/mpm/`): at this pinned commit trunk ships `prefork`,
-  `event`, `motorz`, `simple`, `winnt`, `mpmt_os2`, `netware` — the
-  classic `worker` MPM is gone, superseded by `event`, which keeps its
-  threading but adds an async listener for keep-alive connections.
+  `event`, `motorz`, `simple`, `winnt`, `mpmt_os2`, `netware`, `worker`
+  — the io_uring MPM `motorz` arrived, and `event` has superseded
+  `worker` as the default threaded MPM, keeping its threading but
+  adding an async listener for keep-alive connections.
 
 ## Walkthrough: one GET, accept to writev
 
@@ -462,6 +463,6 @@ request machinery noticing.
 - N. Kew, *The Apache Modules Book: Application Development with
   Apache* (Prentice Hall, 2007) — the module/hook model explained by a
   modules author.
-- The `CHANGES` file at the pinned commit — the removal of the `worker`
-  MPM and the arrival of `motorz` read as a history of the process-model
-  trade-offs.
+- The `CHANGES` file at the pinned commit — the arrival of `motorz` and
+  `event`'s supersession of `worker` as the threaded default read as a
+  history of the process-model trade-offs.

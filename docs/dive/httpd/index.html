@@ -119,9 +119,10 @@ compiled modules at config time via <code>apr_dso_sym</code> (line 276) — the
 <code>LoadModule</code> line in every httpd.conf.</li>
 <li><strong>The MPM</strong> is the one hook set that decides process/thread layout
 (<code>server/mpm/</code>): at this pinned commit trunk ships <code>prefork</code>,
-<code>event</code>, <code>motorz</code>, <code>simple</code>, <code>winnt</code>, <code>mpmt_os2</code>, <code>netware</code> — the
-classic <code>worker</code> MPM is gone, superseded by <code>event</code>, which keeps its
-threading but adds an async listener for keep-alive connections.</li>
+<code>event</code>, <code>motorz</code>, <code>simple</code>, <code>winnt</code>, <code>mpmt_os2</code>, <code>netware</code>, <code>worker</code>
+— the io_uring MPM <code>motorz</code> arrived, and <code>event</code> has superseded
+<code>worker</code> as the default threaded MPM, keeping its threading but
+adding an async listener for keep-alive connections.</li>
 </ul>
 <div class="walkthrough">
 <h2 id="walkthrough-one-get-accept-to-writev">Walkthrough: one GET, accept to writev</h2>
@@ -468,9 +469,9 @@ especially &quot;Modules&quot; and the MPM sections.</li>
 <li>N. Kew, <em>The Apache Modules Book: Application Development with
 Apache</em> (Prentice Hall, 2007) — the module/hook model explained by a
 modules author.</li>
-<li>The <code>CHANGES</code> file at the pinned commit — the removal of the <code>worker</code>
-MPM and the arrival of <code>motorz</code> read as a history of the process-model
-trade-offs.</li>
+<li>The <code>CHANGES</code> file at the pinned commit — the arrival of <code>motorz</code> and
+<code>event</code>&#39;s supersession of <code>worker</code> as the threaded default read as a
+history of the process-model trade-offs.</li>
 </ul>
 
   </article>

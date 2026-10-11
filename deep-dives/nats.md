@@ -239,7 +239,7 @@ detected by backpressure.
 Group membership lives inside the trie nodes (`qsubs` keyed by group
 name); a matching message triggers exactly one round-robin delivery
 per group. Why inside the trie: the load-balancing decision must cost
-the same as routing itself — NATS's " competing consumers" feature is
+the same as routing itself — NATS's "competing consumers" feature is
 not a scheduler bolted on top, it is a field of the match result.
 
 ### Raft node over NATS subjects (`server/raft.go:162` `type raft`)
