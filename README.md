@@ -88,10 +88,15 @@ Deep-dives (the exemplars — more added over time):
 - [ZooKeeper](deep-dives/zookeeper.md) — ZAB consensus, ordered znode tree, sessions + one-shot watches
 - [NATS](deep-dives/nats.md) — subject trie routing, minimal text protocol, opt-in JetStream durability
 - [libuv](deep-dives/libuv.md) — portable event loop: phases, watcher queues, thread pool + async doorbell
+- [runc](deep-dives/runc.md) — containers as syscalls: re-exec twin, sync-pipe bootstrap, pivot_root
+- [Lua](deep-dives/lua.md) — embeddable language core: one TValue, register VM, C-API virtual stack
+- [Envoy](deep-dives/envoy.md) — API-driven data plane: worker snapshots, filter chains, xDS hot config
+- [curl](deep-dives/curl.md) — transfer state machine that rents foreign event loops; layered cfilters
+- [llama.cpp](deep-dives/llama-cpp.md) — framework-free LLM inference: ggml tensor graphs, quantization-first, mmap weights
 
-The catalog tracks 16 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Linux kernel, RocksDB, Node.js, Lua,
-V8, Prometheus-class classics and more —
+The catalog tracks 11 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — the Linux kernel, RocksDB, Node.js,
+V8, Caddy/haproxy-class proxies, FFmpeg and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors. Linux and Chromium are cataloged for
 targeted reading rather than deep-dives by design (see their entries).

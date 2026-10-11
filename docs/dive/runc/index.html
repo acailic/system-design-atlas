@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>runc: a container is a config file plus a choreographed chain of syscalls — System Design Atlas</title>
+<meta name="description" content="runc is the program that actually makes a container. It reads an OCI bundle (a directory with config.json and a root filesystem), and turns that JSON into Linux namespace entries, cgroup mem">
+<meta property="og:title" content="runc: a container is a config file plus a choreographed chain of syscalls — System Design Atlas">
+<meta property="og:description" content="runc is the program that actually makes a container. It reads an OCI bundle (a directory with config.json and a root filesystem), and turns that JSON into Linux namespace entries, cgroup mem">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-runc-run-bundle-to-bash-prompt">Walkthrough: one runc run, bundle to bash prompt</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>runc: a container is a config file plus a choreographed chain of syscalls</h1>
+    <div class="meta-chips"><span class="chip domain">container</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/opencontainers/runc" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>9e3a9a3ecd065f6993fca674a022ead4d302f475</code> · 2026-10-08 · <a href="https://github.com/opencontainers/runc" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">runc is the program that actually <em>makes</em> a container. It reads an OCI
+bundle (a directory with <code>config.json</code> and a root filesystem), and turns
+that JSON into Linux namespace entries, cgroup membership, a pivoted
+root filesystem, capability drops and a seccomp filter — then execs
+your process and leaves. There is no daemon, no long-lived supervisor:
+<strong>the entire system is a one-shot parent process that clones a copy of
+itself, hands that child a choreographed sequence of syscalls to
+perform inside the new namespaces, and exits</strong>. Docker, containerd,
+Kubernetes (via CRI-O and containerd) all shell out to this ~30k-line
+Go program. The design lesson: a &quot;container runtime&quot; is not a
+technology — it is a <em>specification made executable</em>, and the hardest
+engineering is not the syscalls but the two-process bootstrap protocol
+that must be safe across privilege boundaries.</p>
+<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/moby.md">Moby</a> dive: Moby wraps images, layers,
+volumes and networks around a daemon; runc is the bottom turtle — the
+place where &quot;container&quot; finally resolves into <code>clone(2)</code>, <code>pivot_root(2)</code>
+and <code>execve(2)</code>.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A porter who builds you a hotel room and then quits.</strong> The hotel is
+the Linux kernel (it owns all the rooms forever). The porter (the
+<code>runc run</code> you type) reads your wishlist (<code>config.json</code>: one room,
+no window onto other guests, a $5/day budget, no phone calls except
+these three numbers). The porter doesn&#39;t build the room himself — he
+hires a twin (a second copy of the very same runc program, <code>runc init</code>)
+and gives him the wishlist through a pipe (a cardboard tube the twins
+shout through, the init pipe). The twin gets the keys to an empty room
+(namespaces: your own PID numbers, your own network cards, your own
+<code>/</code>), repaints the walls so old decorations can&#39;t be seen (pivot_root),
+sticks the budget notice on the door (cgroups), and only <em>then</em> lets
+you in — becoming you (execve of your command). When everything is
+done the porter quits entirely (the parent exits); the room keeps
+existing because the hotel — not the porter — owns it. If the twin
+makes a mistake he shouts it back up the tube before quitting
+(the sync pipe error protocol).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> namespaces and cgroups attach to
+processes, so the setup must be performed by a process that will <em>stay</em>
+inside the container — and keeping the setup logic in a second, throwaway
+copy of the same binary lets the parent stay outside, privileged and
+unpolluted, which is exactly what a supervisor needs to trust.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    U[&quot;user / containerd&quot;] --&gt;|&quot;runc run mybox&quot;| R1[&quot;runc run (parent)&lt;br/&gt;run.go → utils_linux.go:381 startContainer&quot;]
+    SPEC[&quot;bundle/config.json&lt;br/&gt;(OCI runtime-spec)&quot;] --&gt;|&quot;specconv:384&lt;br/&gt;CreateLibcontainerConfig&quot;| CFG[&quot;configs.Config&lt;br/&gt;(internal representation)&quot;]
+    R1 --&gt; CFG
+    CFG --&gt; F[&quot;factory_linux.go:35 Create&lt;br/&gt;(state dir + state.json)&quot;]
+    F --&gt; C[&quot;Container.start&lt;br/&gt;container_linux.go:364&quot;]
+    C --&gt; NP[&quot;newParentProcess&lt;br/&gt;container_linux.go:541&lt;br/&gt;exec clone of /proc/self/exe&quot;]
+    NP --&gt;|&quot;clone + pipes&quot;| RI[&quot;runc init (child twin)&lt;br/&gt;nsexec.c C constructor&lt;br/&gt;then libcontainer.Init&quot;]
+    NP --&gt;|&quot;bootstrapData (netlink)&quot;| RI
+    RI --&gt;|&quot;sync pipe: procReady/procHooks&quot;| PP[&quot;initProcess.start&lt;br/&gt;process_linux.go:778&quot;]
+    PP --&gt;|&quot;cgroups Apply (cpuset door)&quot;| CG[&quot;cgroup manager&lt;br/&gt;(vendored opencontainers/cgroups fs2)&quot;]
+    RI --&gt; INIT[&quot;standard_init_linux.go:51 Init&lt;br/&gt;rootfs → pivot_root → caps → seccomp&quot;]
+    INIT --&gt;|&quot;execve&quot;| USER[&quot;your process&lt;br/&gt;PID 1 in the new PID ns&quot;]
+    U -.-&gt;|&quot;runc exec / kill / delete&quot;| C2[&quot;Container.exec&lt;br/&gt;setns into existing namespaces&quot;]
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The CLI layer</strong> (<code>run.go</code>, <code>create.go</code>, <code>start.go</code>, <code>exec.go</code>,
+<code>kill.go</code>, <code>delete.go</code>) maps the OCI runtime-spec lifecycle verbs
+one-to-one onto library calls; <code>utils_linux.go:381 startContainer</code>
+is the shared spine that every verb funnels through.</li>
+<li><strong>libcontainer</strong> is the real library: <code>specconv/spec_linux.go:384 CreateLibcontainerConfig</code> translates the spec JSON into the internal
+<code>configs.Config</code>; <code>factory_linux.go:35 Create</code> allocates the
+on-disk state directory; <code>container_linux.go</code> owns the lifecycle.</li>
+<li><strong>The two processes</strong>: the parent (<code>runc run</code>) stays outside the
+container holding privileges; the child (<code>runc init</code>, a clone of the
+same binary via <code>exec.Command(exePath, &quot;init&quot;)</code> in
+<code>container_linux.go:541 newParentProcess</code>) performs every step that
+must happen <em>inside</em> the new namespaces. They communicate over
+three pipes: init pipe (config JSON), sync pipe (state machine
+handshake), log pipe (child logs).</li>
+<li><strong>The C bootstrap</strong> (<code>libcontainer/nsenter/nsexec.c</code>) is the
+remarkable seam: a <code>__attribute__((constructor))</code> C function that
+runs <em>before</em> the Go runtime even starts, reads the netlink-encoded
+<code>bootstrapData</code> from the init pipe, and performs the namespace joins
+(<code>setns</code>) and <code>unshare</code>s — because a multi-threaded Go runtime
+cannot safely change its own namespaces after the fact.</li>
+<li><strong><code>runc exec</code> and <code>runc kill</code></strong> take the other path:
+<code>container_linux.go:699 newSetnsProcess</code> joins the <em>existing</em>
+namespaces listed in <code>state.json</code> via <code>setns(2)</code> instead of
+creating them — the same twin trick, different bootstrap payload.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-runc-run-bundle-to-bash-prompt">Walkthrough: one runc run, bundle to bash prompt</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant U as user (containerd)
+    participant P as runc run (parent)
+    participant K as kernel
+    participant C as runc init (child twin)
+    participant W as your bash
+
+    U-&gt;&gt;P: runc run -b bundle mybox
+    P-&gt;&gt;P: parse config.json (specconv)
+    P-&gt;&gt;K: clone(/proc/self/exe init) + pipes
+    P-&gt;&gt;C: bootstrapData (netlink: clone flags, uid map)
+    Note over C: nsexec.c constructor (before Go!)
+    C-&gt;&gt;K: setns + unshare(CLONE_NEW*)
+    C-&gt;&gt;P: sync: pid of final child
+    P-&gt;&gt;K: cgroup Apply(childPid)
+    P-&gt;&gt;C: initConfig JSON over init pipe
+    C-&gt;&gt;C: mounts, pivot_root, caps, seccomp
+    C-&gt;&gt;P: sync: procReady
+    P-&gt;&gt;C: sync: runHooks(procHooks)
+    C-&gt;&gt;P: close pipe = done
+    C-&gt;&gt;C: wait exec FIFO (runc start writes &quot;0&quot;)
+    P-&gt;&gt;P: waitForChildExit, parent returns
+    C-&gt;&gt;W: execve(&quot;/bin/bash&quot;)
+    U-&gt;&gt;U: container runs; parent already gone
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="parse-the-bundle">Parse the bundle</h3>
+<p><code>runc run</code> (<code>run.go</code>) calls
+<code>utils_linux.go:381 startContainer</code> → <code>setupSpec</code> loads
+<code>config.json</code> and <code>specconv/spec_linux.go:384 CreateLibcontainerConfig</code> turns it into the internal <code>configs.Config</code>
+— namespaces list, mounts, cgroup resources, capabilities, seccomp
+profile, hooks. Everything runc will do is already decided by this
+data; there is no policy inside runc itself.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="create-the-container-record">Create the container record</h3>
+<p><code>factory_linux.go:35 Create</code> makes the per-container state directory and writes
+<code>state.json</code> (the <code>State</code> struct in <code>libcontainer/state.go</code>) — the
+disk memory that lets a <em>future</em> <code>runc exec</code> or <code>runc kill</code> find the
+container&#39;s init PID and namespace paths after today&#39;s parent is gone.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="clone-the-twin">Clone the twin</h3>
+<p><code>container_linux.go:364 start</code> →
+<code>newParentProcess</code> (line 541) builds an <code>exec.Command</code> of a <em>cloned
+copy of its own binary</em> (<code>exeseal.CloneSelfExe</code>, a memfd-safe
+<code>/proc/self/exe</code> copy — CVE-2024-21626 hardening) with argv <code>init</code>,
+plus init/sync/log pipes passed as extra file descriptors with
+<code>_LIBCONTAINER_INITPIPE</code>-style env-var door numbers.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="parent-arms-cgroups-then-lets-the-child-proceed">Parent arms cgroups, then lets the child proceed</h3>
+<p><code>initProcess.start</code> (<code>process_linux.go:778</code>) starts the child, then —
+<em>before</em> answering its first sync — calls <code>p.manager.Apply(p.pid())</code>
+so the child is already inside its cgroup the moment it can spawn
+anything (&quot;no children can escape the cgroup&quot;, the comment says).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-c-bootstrap-runs-first">The C bootstrap runs first</h3>
+<p>In the child, the dynamic
+loader runs <code>nsexec.c</code>&#39;s constructor before <code>main</code>: it parses the
+netlink <code>bootstrapData</code>, <code>setns</code>-joins requested namespaces
+(<code>nsexec.c:560</code>), <code>unshare</code>s the rest (<code>try_unshare</code>, <code>nsexec.c:675</code>),
+and uses the <code>clone(CLONE_PARENT | SIGCHLD)</code> trick (<code>nsexec.c:322</code>) so
+the final container process is re-parented to <em>runc&#39;s</em> caller — a
+containerd subreaper, not a dead runc.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-go-side-builds-the-room">The Go side builds the room</h3>
+<p>Control reaches
+<code>libcontainer/init_linux.go:106 Init</code> → <code>startInitialization</code> (line
+128) reads the initConfig JSON, then <code>standard_init_linux.go:51 Init</code>
+does the room setup in order: network (<code>setupNetwork</code>), rootfs mounts
+(<code>rootfs_linux.go:170 prepareRootfs</code>), <code>pivotRoot</code> (line 1139 —
+<code>pivot_root(&quot;.&quot;, &quot;.&quot;)</code> without a scratch directory), console,
+hostname, sysctls, AppArmor, <code>setupUser</code> (line 467: uid/gid switch
+inside the user namespace), capabilities.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="last-checks-then-become-the-payload">Last checks, then become the payload</h3>
+<p>The child tells
+the parent <code>procReady</code>, waits for <code>procHooks</code> (parent runs
+CreateContainer hooks outside), applies seccomp <em>as late as possible</em>
+(&quot;just before execve so as few syscalls take place after it&quot;),
+restores the parent-death signal, re-checks <code>getppid()</code> hasn&#39;t
+changed (kill self if it did), and finally <code>utils.UnsafeCloseFrom</code>
+closes every fd not intentionally passed — then
+<code>linux.Exec</code> (<code>syscall.Exec</code>) replaces the twin with <code>/bin/bash</code>.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-room-exists-the-porter-is-gone">The room exists, the porter is gone</h3>
+<p>The exec FIFO
+(<code>/run/mybox/exec.fifo</code>, created by <code>container_linux.go:492 createExecFifo</code>) gates the final exec for <code>runc create</code> → <code>runc start</code>
+splits; for <code>runc run</code> the parent opens it immediately. The parent
+process has already exited (<code>waitForChildExit</code> in <code>process_linux.go</code>);
+the container persists purely as kernel state — namespaces, cgroup,
+rootfs mount — pointed at by <code>state.json</code>.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>specs.Spec</code> (config.json) → <code>configs.Config</code>.</strong>
+<strong>What:</strong> the OCI runtime-spec document versus runc&#39;s internal,
+Linux-shaped equivalent (namespaces as a typed list, mounts
+pre-resolved, devices as <code>devices.Device</code> entries).
+<strong>Where:</strong> <code>libcontainer/specconv/spec_linux.go:384 CreateLibcontainerConfig</code> (with <code>CreateCgroupConfig</code> at line 778).
+<strong>Why:</strong> keeping the wire format (spec) separate from the operational
+format (config) means the spec can evolve its JSON while runc&#39;s
+library users keep a stable Go structure — the same translation
+seam SQLite uses between SQL and its internal byte formats.</p>
+</li>
+<li><p><strong><code>bootstrapData</code> — a netlink-encoded message.</strong>
+<strong>What:</strong> clone flags, namespace paths and the user-namespace ID map
+encoded as a netlink attribute stream.
+<strong>Where:</strong> built by <code>container_linux.go:1082 bootstrapData</code> from
+<code>c.config.Namespaces.CloneFlags()</code>, consumed by the C code in
+<code>libcontainer/nsenter/nsexec.c</code>.
+<strong>Why netlink-of-all-things:</strong> the message must be parseable by C
+code that runs <em>before the Go runtime exists</em>; netlink attribute
+walking is tiny, dependency-free, and battle-tested in the kernel.
+A protobuf or JSON parser in that slot would drag a runtime in.</p>
+</li>
+<li><p><strong><code>State</code> (state.json).</strong>
+<strong>What:</strong> container ID, init PID, namespace paths, cgroup paths,
+init start time, bundle path — everything a <em>fresh</em> runc invocation
+needs to re-attach.
+<strong>Where:</strong> <code>libcontainer/container_linux.go:49</code> (struct), written under
+<code>factory_linux.go:35 Create</code> and <code>container_linux.go</code>&#39;s state
+serialization.
+<strong>Why:</strong> because runc is one-shot and parentless by design, its only
+durable state is this JSON on disk — the filesystem <em>is</em> the
+database, exactly like etcd&#39;s member dir or git&#39;s refs. Process
+metadata that dies with the parent (PIDs) is paired with kernel
+paths (<code>/proc/&lt;pid&gt;/ns/*</code>) that let a later process verify it.</p>
+</li>
+<li><p><strong>The pipe trio (<code>processComm</code>).</strong>
+<strong>What:</strong> init pipe (config JSON, bootstrapData), sync pipe
+(<code>syncT{Type, Arg, File}</code> JSON messages), log pipe.
+<strong>Where:</strong> <code>container_linux.go:541 newParentProcess</code> (env-var fd
+passing) and <code>libcontainer/init_linux.go:128 startInitialization</code>
+(the receiving side); <code>message_linux.go</code> defines <code>procReady</code>,
+<code>procHooks</code>, <code>procMountPlease</code> etc.
+<strong>Why:</strong> pipes are the only IPC that survives exec, carries FDs
+(SCM_RIGHTS via sockets), and has a natural EOF = &quot;done&quot; semantic —
+the child closing the sync pipe doubles as its final message.</p>
+</li>
+<li><p><strong>The cgroup manager.</strong>
+<strong>What:</strong> an interface (<code>cgroups.Manager</code>) with fs2 (unified) and
+rootless implementations from the vendored
+<code>github.com/opencontainers/cgroups</code> package.
+<strong>Where:</strong> applied in <code>process_linux.go</code> <code>initProcess.start</code>
+(<code>p.manager.Apply(p.pid())</code>) before the child is allowed to fork;
+filesystem writes under <code>/sys/fs/cgroup/...</code>.
+<strong>Why an interface:</strong> cgroup v1/v2 and rootless delegation differ
+wildly in capability; the seam keeps <code>container_linux.go</code> free of
+kernel-version policy.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph procs[&quot;processes&quot;]
+        CT[&quot;containerd&lt;br/&gt;(subreaper)&quot;] --- P1[&quot;runc run&lt;br/&gt;short-lived&quot;]
+        P1 --- P2[&quot;runc init&lt;br/&gt;(intermediate, exits)&quot;]
+        P2 --- P3[&quot;bash + children&lt;br/&gt;PID 1 in pidns&quot;]
+    end
+    CT -.-&gt;|&quot;clone(CLONE_PARENT)&lt;br/&gt;re-parents P3 to CT&quot;| P3
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>No threads, no event loop, no shared memory.</strong> runc is a chain of
+short-lived processes: the parent exits as soon as the child is
+launched (<code>process_linux.go</code> <code>waitForChildExit</code>); the intermediate
+<code>runc init</code> twin exits at <code>execve</code>; what remains is your payload.
+Everything that looks concurrent is either the kernel (namespaces,
+cgroups) or the two-process sync protocol.</li>
+<li><strong>The sync protocol is the failure model.</strong> Every stage of the
+child&#39;s setup is bracketed by sync messages; on error the child
+writes <code>procError</code> with the message back up the pipe
+(<code>init_linux.go:128 startInitialization</code>&#39;s deferred handler), so
+<code>runc run</code> reports <em>why</em> the room couldn&#39;t be built even though the
+failure happened in a different process and PID namespace.</li>
+<li><strong>Crash mid-setup:</strong> the child <code>kill</code>s itself if its parent died
+(<code>unix.Getppid() != l.parentPid</code> check in <code>standard_init_linux.go</code>)
+— a half-built container that outlived its porter would be a
+security hole, not a feature. The parent, for its part, terminates
+and destroys the cgroup if any sync fails
+(<code>initProcess.start</code>&#39;s deferred <code>p.terminate()</code> + <code>p.manager.Destroy()</code>).</li>
+<li><strong>Crash after exec:</strong> PID 1 semantics take over — killing the
+container&#39;s init with SIGKILL from outside takes the whole PID
+namespace down with it (<code>container_linux.go</code> <code>signal</code> and its
+pid_namespaces(7) comment); without a private PID ns, runc
+signal-all-via-cgroup freeze instead.</li>
+<li><strong>Backpressure:</strong> there is none to speak of — runc is not a server.
+The closest analogues are the exec FIFO (a <em>gate</em>, not a queue) and
+the O_CLOEXEC/<code>UnsafeCloseFrom</code> sweeps that make fd leakage —
+the classic runc CVE vector — structurally impossible
+(<code>utils.CloseExecFrom(3)</code> in the parent,
+<code>utils.UnsafeCloseFrom(passed+3)</code> in the child).</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is a specification, not a library.</strong> runc&#39;s
+de-facto API is the OCI runtime-spec: the bundle format, the
+lifecycle verbs (<code>create</code>, <code>start</code>, <code>kill</code>, <code>delete</code>, <code>state</code>), and
+the state machine they walk. Any compliant runtime (crun, youki,
+runsc) is a drop-in replacement — that interchange is the point.</li>
+<li><strong>libcontainer as the embeddable seam.</strong> Under the CLI sits a Go
+library (<code>factory.Create</code> / <code>container.Run</code>) that Docker-era code
+linked directly; the spec layer is deliberately thin over it, so a
+manager that wants <code>create</code>/<code>start</code> split or custom state dirs can
+skip the CLI entirely.</li>
+<li><strong>Extension points inside config.json:</strong> hooks
+(CreateRuntime/StartContainer/PostStart — arbitrary host commands
+fired at protocol-defined moments, <code>configs.Hooks.Run</code>), prestart
+hooks&#39; execution <em>outside</em> the namespaces vs StartContainer&#39;s
+<em>inside</em>), plus runc-specific knobs (rootless mode, no-pivot) that
+the spec leaves as annotations.</li>
+<li><strong>Honest wart:</strong> the two-process protocol means <code>runc exec</code> pays the
+full twin-bootstrap cost (C constructor, setns choreography) for
+every command, and the state.json/PID pairing is racy against PID
+reuse — hence the init start-time recorded in state and checked
+before signaling. The interface optimizes for the <em>manager</em> (one
+short-lived trusted helper per operation), not for interactive use.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-re-exec-self-over-in-process-setup">Trade-off 1: re-exec self over in-process setup</h3>
+<ul>
+<li><strong>Tension:</strong> namespaces must be entered by the process that will
+live in them, but Go&#39;s runtime is multi-threaded, and
+<code>unshare(CLONE_NEWUSER)</code> et al. apply per-thread with surprising
+semantics.</li>
+<li><strong>Choice:</strong> clone a fresh copy of the runc binary (<code>runc init</code>) and
+do namespace work there — in C, via a constructor, before the Go
+runtime spins up its threads at all.</li>
+<li><strong>Evidence:</strong> <code>container_linux.go:541 newParentProcess</code>
+(<code>exec.Command(exePath, &quot;init&quot;)</code> of a safe <code>/proc/self/exe</code> clone);
+<code>libcontainer/nsenter/nsenter.go</code> registers the constructor;
+<code>nsexec.c:675 try_unshare</code>.</li>
+<li><strong>Given up:</strong> simplicity and speed — every container start pays a
+process clone, a C/Go boundary, and a pipe protocol; debugging the
+bootstrap needs both sides of the story.</li>
+<li><strong>Verdict:</strong> right for a security boundary that must run under
+arbitrary managers; wrong for a hot path — nobody re-execs per
+request. The pattern (fresh process = clean namespace context) is
+the general lesson.</li>
+</ul>
+<h3 id="trade-off-2-parent-side-cgroup-arming-over-child-side">Trade-off 2: parent-side cgroup arming over child-side</h3>
+<ul>
+<li><strong>Tension:</strong> the child must be cgroup-limited before it can execute
+<em>any</em> attacker-influenced code, but only the parent is privileged
+enough to write cgroupfs.</li>
+<li><strong>Choice:</strong> <code>initProcess.start</code> calls <code>p.manager.Apply(p.pid())</code>
+<em>between</em> the child&#39;s namespace bootstrap and its permission to
+proceed — the sync protocol creates exactly this rendezvous.</li>
+<li><strong>Evidence:</strong> <code>process_linux.go:778 initProcess.start</code> (comment:
+&quot;Do this before syncing with child so that no children can escape
+the cgroup&quot;).</li>
+<li><strong>Given up:</strong> a strict &quot;child does everything about itself&quot; story;
+the parent must stay alive and privileged through setup, and rootless
+mode needs the delegation fallback instead.</li>
+<li><strong>Verdict:</strong> the two-phase handshake is the design — whenever two
+privilege domains must cooperate on setup, make the <em>handoff</em> itself
+a protocol stage. It would be wrong only when no privilege gap
+exists, where it&#39;s pure ceremony.</li>
+</ul>
+<h3 id="trade-off-3-no-daemon-over-a-resident-runtime">Trade-off 3: no daemon over a resident runtime</h3>
+<ul>
+<li><strong>Tension:</strong> managers need to manipulate running containers (exec,
+kill, stats) — the classic reason to build a daemon.</li>
+<li><strong>Choice:</strong> runc exits after setup; later operations re-enter via
+fresh processes reading <code>state.json</code> and <code>setns</code> into the recorded
+namespaces.</li>
+<li><strong>Evidence:</strong> <code>factory_linux.go:35 Create</code> + <code>Load</code> (state on disk);
+<code>container_linux.go:699 newSetnsProcess</code> for exec.</li>
+<li><strong>Given up:</strong> O(1) in-memory operations, an obvious place for
+container-wide logic, immunity to PID-reuse races.</li>
+<li><strong>Verdict:</strong> right because the kernel already <em>is</em> the daemon —
+namespaces, cgroups and PID 1 semantics do the bookkeeping. A
+resident runc would re-implement (insecurely) what the kernel
+tracks for free; containerd took that supervisor role instead, one
+layer up. Wrong for you if your &quot;kernel&quot; lacks such primitive
+bookkeeping.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>PRINCIPLES.md</code> — four paragraphs on runc&#39;s priorities (security
+over features, no daemon); the whole codebase obeys them.</li>
+<li><code>run.go</code> → <code>utils_linux.go:381 startContainer</code> →
+<code>utils_linux.go:184 createContainer</code> — how a verb becomes a
+<code>runner</code>; note <code>enableSubreaper</code> and where <code>notifySocket</code>
+(systemd sd_notify passthrough) hooks in.</li>
+<li><code>libcontainer/specconv/spec_linux.go:384 CreateLibcontainerConfig</code> — the spec-to-Linux translation; watch
+namespaces become <code>configs.Namespace{Type, Path}</code> entries and
+devices get default entries injected.</li>
+<li><code>libcontainer/factory_linux.go:35 Create</code> + <code>libcontainer/ container_linux.go:49 State</code> — the state directory; open a
+<code>state.json</code> from a real container
+if you have one and map every field.</li>
+<li><code>libcontainer/container_linux.go:364 start</code> → <code>:541 newParentProcess</code> — the twin clone; read the fd-passing env vars
+and the <code>CloseExecFrom(3)</code> sweep; then <code>:670 newInitProcess</code>
+building the netlink <code>bootstrapData</code>.</li>
+<li><code>libcontainer/process_linux.go:778 initProcess.start</code> — the
+parent&#39;s half of the protocol: cgroup arming, bootstrap write,
+<code>getChildPid</code>, <code>waitForChildExit</code>, and the <code>parseSync</code> loop&#39;s
+<code>procMountPlease</code> mount-remapping service (the parent opens source
+files the rootless child cannot).</li>
+<li><code>libcontainer/nsenter/nsexec.c</code> — start at <code>nsexec()</code>; follow
+<code>join_namespaces</code> (<code>setns</code> at line 560), <code>try_unshare</code> (675), the
+<code>clone(CLONE_PARENT)</code> at line 322, and the userns map writes. This
+is the most instructive C you&#39;ll read all week.</li>
+<li><code>init.go</code> (repo root) + <code>libcontainer/init_linux.go:106 Init</code> →
+<code>:128 startInitialization</code> → <code>:241 containerInit</code> — the child&#39;s
+re-entry into Go; note <code>runtime.LockOSThread()</code> and <code>os.Clearenv()</code>.</li>
+<li><code>libcontainer/standard_init_linux.go:51 Init</code> — the setup ladder in
+order; ask yourself why each step is <em>after</em> the previous one (the
+comments answer).</li>
+<li><code>libcontainer/rootfs_linux.go:170 prepareRootfs</code> → <code>:1139 pivotRoot</code> (<code>pivot_root(&quot;.&quot;, &quot;.&quot;)</code> — no scratch dir needed) →
+<code>:277 finalizeRootfs</code> — the mount story, including the
+propagation-flag note about <em>why</em> it comes after pivot.</li>
+<li><code>libcontainer/init_linux.go:297 finalizeNamespace</code> → <code>:467 setupUser</code> — caps, uid/gid, the last fd sweep; then the tail of
+<code>standard_init_linux.go Init</code>: exec-FIFO wait, <code>UnsafeCloseFrom</code>,
+<code>linux.Exec</code>.</li>
+<li><code>container_linux.go:492 createExecFifo</code> + <code>start.go</code> — the
+create/start gate; finally <code>exec.go</code> + <code>container_linux.go:699 newSetnsProcess</code> — the same twins, but joining an existing room.</li>
+</ol>
+<p>You have now traced one <code>runc run</code> from a JSON file through a
+C-level namespace bootstrap, a two-process sync protocol, a pivoted
+root, and an execve — the complete anatomy of &quot;a container&quot;.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Re-exec your own binary to get a clean execution context</strong> —
+namespaces, privileges, or just an uncontaminated environment; you
+saw it in <code>container_linux.go:541</code> and it is how Chrome, nginx and
+sshd all isolate risky phases.</li>
+<li><strong>Make the handoff a protocol, not a flag.</strong> The sync-pipe state
+machine (<code>procReady</code>/<code>procHooks</code>) turns &quot;parent ready? child
+ready?&quot; into explicit, auditable stages — steal it for any
+two-process bootstrap, launcher/worker, or supervisor handoff.</li>
+<li><strong>Encode pre-runtime messages in a parser-free format.</strong> netlink
+attributes walked by ~50 lines of C (<code>bootstrapData</code>) beat pulling
+a serialization library into a process that must not have one.</li>
+<li><strong>Record kernel handles (PIDs, namespace paths) with liveness
+metadata (start time) on disk.</strong> <code>state.json</code> plus a start-time
+check is the minimal honest database for one-shot tools.</li>
+<li><strong>Sweep file descriptors at boundaries.</strong> <code>CloseExecFrom(3)</code> /
+<code>UnsafeCloseFrom</code> — and the CVEs that motivated them — teach that
+fd hygiene must be structural (at exec boundaries), not aspirational.</li>
+<li><strong>Push policy into a spec, keep the engine dumb.</strong> runc&#39;s entire
+&quot;container&quot; definition lives in config.json; the codebase only
+<em>executes</em> it, which is why crun could replace it wholesale.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>moderate</code>. Realistic budget: 5–6 hours for this path
+(add 2 for nsexec.c if C is rusty).</li>
+<li>Prerequisites: reading Go comfortably; the man pages
+<code>namespaces(7)</code>, <code>cgroups(7)</code>, <code>pivot_root(2)</code>, <code>user_namespaces(7)</code>
+(an hour each, skim the parts this dive cites); the OCI
+runtime-spec&#39;s <em>lifecycle</em> section (20 minutes). No kernel-module
+knowledge needed — everything is visible from userspace.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The OCI runtime-spec — the contract runc implements:
+<a href="https://github.com/opencontainers/runtime-spec">https://github.com/opencontainers/runtime-spec</a> (read <em>Lifecycle</em>
+and <em>Linux-specific</em> first).</li>
+<li>The runc security page and the CVE-2024-21626 (leaked fds /
+<code>/proc/self/exe</code> escape) write-ups — the trade-offs in section 5
+are visibly scar tissue from these.</li>
+<li><code>man 7 namespaces</code>, <code>man 7 user_namespaces</code>, <code>man 2 pivot_root</code>,
+<code>man 7 cgroups</code> — the syscall-level ground truth.</li>
+<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/moby.md">Moby</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/libuv.md">libuv</a> dives in this atlas —
+the layers above (image/daemon) and below (portable event loop)
+of the same stack.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../libuv/"><span class="dir">← Previous dive</span>libuv: the event loop distilled into a portable, embeddable library</a>
+  <a href="../lua/" style="text-align:right"><span class="dir">Next dive →</span>Lua: one tagged union, a register VM, and the friendliest embedding API in the business</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 19 of 23 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

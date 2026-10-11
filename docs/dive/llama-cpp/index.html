@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product — System Design Atlas</title>
+<meta name="description" content="llama.cpp runs large language models on laptops, phones, and single-GPU boxes that no &quot;AI framework&quot; considers a target — in pure C/C++ with zero required dependencies. The design lesson is ">
+<meta property="og:title" content="llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product — System Design Atlas">
+<meta property="og:description" content="llama.cpp runs large language models on laptops, phones, and single-GPU boxes that no &quot;AI framework&quot; considers a target — in pure C/C++ with zero required dependencies. The design lesson is ">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-generated-token-prompt-to-sampled-word">Walkthrough: one generated token, prompt to sampled word</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product</h1>
+    <div class="meta-chips"><span class="chip domain">ml-framework</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/ggml-org/llama.cpp" rel="noopener">MIT</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>f2cc7282ce0042641df55e0e563b75e824e2b647</code> · 2026-10-11 · <a href="https://github.com/ggml-org/llama.cpp" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">llama.cpp runs large language models on laptops, phones, and
+single-GPU boxes that no &quot;AI framework&quot; considers a target — in pure
+C/C++ with zero required dependencies. The design lesson is
+radical subtraction: <strong>there is no runtime, no operator registry
+serving a scripting layer, no autograd in the serving path — just a
+tensor struct, a dataflow graph built fresh per inference batch, a
+scheduler that splits that graph across whatever backends exist
+(CPU cores, GPUs), and a file format (GGUF) whose dominant citizen
+is quantized weights</strong>. The same engine serves 160+ model
+architectures because an architecture is <em>a C++ function that builds
+a graph</em> (<code>src/models/*.cpp</code>), not a plugin ABI. Inference is:
+load memory-mapped weights → for each batch of tokens, build the
+graph, allocate it across devices, execute it, read the logits —
+repeat one token at a time.</p>
+<p>Read it against PyTorch-class frameworks: those optimize for
+<em>research flexibility</em> (dynamic everything, Python); llama.cpp
+optimizes for <em>deployment everywhere</em> (static graph per shape, C,
+quantization first). It is the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite</a> of ML runtimes:
+one portable core, a file format, and a fierce refusal to depend on
+anyone.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A bakery that rebuilds its conveyor belt for every cookie — and
+stores flour in tiny compressed jars.</strong> The recipe (the model
+architecture, one C++ builder per model family) says: mix, shape,
+bake, glaze, in that order. For each cookie (one new token), the
+bakers assemble <em>exactly that conveyor</em> (the compute graph) from
+recipe steps, feed in the day&#39;s ingredients (your prompt tokens),
+and out comes one cookie plus a strong hint about the next one. The
+huge pantry of pre-measured ingredients (the weights — billions of
+numbers) is stored in <strong>tiny compressed jars</strong> (4-bit quantization):
+each jar holds 32 measurements squished into a few bytes, good
+enough that cookies taste the same. The jars live on warehouse
+shelves that everyone reads straight from (mmap — the weights are
+never copied into the kitchen, because nothing ever writes to a
+jar). If the kitchen has both a hand mixer and a pro oven (CPU and
+GPU), a supervisor (the backend scheduler) reads the conveyor&#39;s
+steps and assigns each step to the appliance that suits it, handing
+half-finished dough across the counter exactly where needed. The
+day&#39;s log of every dough already kneaded (the KV cache) is kept in
+pigeonholes so kneading never repeats.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when the weights are
+gigabytes of read-only data and the math is known at load time, the
+winning design is a <em>file format plus a graph evaluator</em> — not a
+framework — and compressing the weights 8× moves &quot;runs LLMs&quot; from
+the datacenter to the backpack.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    APP[&quot;tools/main, tools/server, your app&quot;]
+
+    subgraph api[&quot;C API — include/llama.h&quot;]
+        L1[&quot;llama_model_load_from_file&quot;]
+        L2[&quot;llama_decode(ctx, batch)&quot;]
+        L3[&quot;llama_sampler chain&quot;]
+    end
+
+    subgraph loader[&quot;model loading — src/llama-model-loader.cpp&quot;]
+        GGUF[&quot;GGUF file: kv metadata&lt;br/&gt;+ tensor blobs (gguf.cpp:219)&quot;]
+        MMAP[&quot;mmap weights :559&lt;br/&gt;(zero-copy, read-only)&quot;]
+        ARCH[&quot;llama-arch.cpp tensor-name&lt;br/&gt;registry; src/models/*.cpp&lt;br/&gt;(160 arch builders)&quot;]
+    end
+
+    subgraph ctx[&quot;inference — src/llama-context.cpp&quot;]
+        DEC[&quot;decode :1811 → ubatches&quot;]
+        PU[&quot;process_ubatch :1497&lt;br/&gt;graph reuse or build&quot;]
+        GB[&quot;model.build_graph :3300&lt;br/&gt;→ llm_graph_result&quot;]
+    end
+
+    subgraph ggml[&quot;ggml tensor library&quot;]
+        TEN[&quot;ggml_tensor (ggml.h:685)&lt;br/&gt;type, ne[]/nb[], op, src[]&quot;]
+        GRAPH[&quot;ggml_cgraph — topo nodes&quot;]
+        QS[&quot;quant blocks (ggml-common.h)&lt;br/&gt;+ type traits (ggml.c:675+)&quot;]
+        SCHED[&quot;ggml_backend_sched —&lt;br/&gt;split graph across devices&quot;]
+        CPU[&quot;ggml-cpu threadpool&lt;br/&gt;(ggml-cpu.c:3391)&quot;]
+        GPU[&quot;CUDA / Metal / Vulkan / ...&quot;]
+    end
+
+    KVC[&quot;KV cache modules&lt;br/&gt;llama-kv-cache.cpp:916 find_slot&quot;]
+    SMP[&quot;samplers: temp, top-k,&lt;br/&gt;grammar... (llama-sampler.cpp)&quot;]
+
+    APP --&gt; L1 --&gt; GGUF --&gt; MMAP --&gt; ARCH
+    APP --&gt; L2 --&gt; DEC --&gt; PU --&gt; GB --&gt; TEN
+    GB --&gt; GRAPH --&gt; SCHED --&gt; CPU &amp; GPU
+    PU --- KVC
+    GB -.-&gt;|&quot;logits&quot;| SMP --&gt; APP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The public API is five object kinds</strong> — model, context, batch,
+sampler, backend — and deliberately C (<code>include/llama.h</code>), so every
+language binds it and the ABI survives a fast-moving project.</li>
+<li><strong>Loading is file-format-first.</strong> <code>llama-model-loader.cpp</code> opens
+the GGUF container (metadata KV pairs + raw tensor blobs,
+<code>ggml/src/gguf.cpp:219</code>), decides mmap (<code>:559</code>), and the arch
+registry (<code>llama-arch.cpp</code> — tensor <em>names</em> to slots) lets
+<code>src/models/llama.cpp load_arch_tensors</code> map <code>blk.0.attn_q.weight</code>
+onto typed fields without per-format code.</li>
+<li><strong>An architecture is a graph-builder class.</strong> <code>llama_model_llama</code>
+(<code>src/models/models.h:147</code>) implements <code>load_arch_hparams</code>,
+<code>load_arch_tensors</code>, and <code>build_arch_graph</code> — whose constructor
+(<code>src/models/llama.cpp:99</code>) emits the transformer as ggml ops:
+embed → per-layer {RMSNorm, QKV+RoPE, attention via the KV-cache
+input, FFN or MoE} → final norm → lm_head. One hundred fifty-nine
+sibling files do Grok, Qwen, BERT… — the seam that keeps the core
+small.</li>
+<li><strong>Inference is batch → graph → execute.</strong> <code>llama_context::decode</code>
+(<code>src/llama-context.cpp:1811</code>) splits the batch into micro-batches
+against KV-cache capacity; <code>process_ubatch</code> (<code>:1497</code>) reuses the
+previous graph when its shape-defining parameters match, else
+rebuilds (<code>model.build_graph</code>, <code>llama-model.cpp:3300</code>) and asks
+<code>ggml_backend_sched_alloc_graph</code> to place it; <code>graph_compute</code>
+executes; logits are read from the result tensor.</li>
+<li><strong>ggml underneath</strong> is a self-contained tensor library: a tensor
+is <code>{type, ne[4], nb[4], op, src[], view_src}</code> (<code>ggml.h:685</code>) —
+<em>data optional</em> (weights are views into the mmap); a graph is a
+topologically sorted node array; quantized formats are structs of
+super-blocks (<code>ggml-common.h</code>) with per-type trait tables
+(<code>from_float</code>/<code>vec_dot</code>, <code>ggml.c:675+</code>) that kernels dispatch
+through.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-generated-token-prompt-to-sampled-word">Walkthrough: one generated token, prompt to sampled word</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant M as tools/main loop
+    participant D as llama_context::decode
+    participant P as process_ubatch
+    participant B as build_graph (models/llama.cpp)
+    participant S as backend scheduler
+    participant K as KV cache
+    participant X as sampler chain
+
+    M-&gt;&gt;D: llama_decode(ctx, batch=[tok])
+    D-&gt;&gt;K: init_batch → find_slot (:916)
+    K--&gt;&gt;D: slot for this token
+    D-&gt;&gt;P: ubatch (1 token)
+    P-&gt;&gt;B: params changed? build_graph
+    B-&gt;&gt;B: embed → 32×(norm,QKV,RoPE,attn,FFN) → lm_head
+    P-&gt;&gt;S: sched_alloc_graph: split CPU/GPU
+    S-&gt;&gt;S: execute splits (CPU threadpool / GPU)
+    P--&gt;&gt;D: t_logits ready
+    D-&gt;&gt;X: llama_sampler_sample (:895)
+    X--&gt;&gt;M: next token
+    M-&gt;&gt;M: append, loop (next decode reuses graph)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="batch-arrives">Batch arrives</h3>
+<p>The tool loop (or server stream) calls
+<code>llama_decode</code> with the new token(s); <code>decode</code>
+(<code>src/llama-context.cpp:1811</code>) validates shapes, then
+<code>memory-&gt;init_batch</code> splits work into ubatches the cache can seat —
+<code>llama-kv-cache.cpp:916 find_slot</code> chooses contiguous pigeonholes
+for each token&#39;s position, reporting <code>FAILED_PREPARE</code> when full
+(see section 3).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="graph-decision">Graph decision</h3>
+<p><code>process_ubatch</code> (<code>:1497</code>) computes
+the graph&#39;s shape parameters (token count, cache slots, positions);
+if they match the previous graph&#39;s — the steady-state case when
+generating one token at a time — the graph is <em>reused</em> (<code>n_reused</code>
+in the perf stats), with only input tensors re-filled. A changed
+batch shape rebuilds from scratch.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="build-the-graph">Build the graph</h3>
+<p><code>model.build_graph</code>
+(<code>llama-model.cpp:3300</code>) → <code>build_arch_graph</code> → the arch class
+constructor (<code>src/models/llama.cpp:99</code>): <code>build_inp_embd</code>,
+<code>build_inp_pos</code>, attention-input bookkeeping, then the per-layer
+loop emitting <code>ggml_rope_ext</code>, <code>build_attn</code> (which binds KV-cache
+tensors as graph inputs), <code>build_ffn</code>/<code>build_moe_ffn</code>, closing with
+<code>ggml_build_forward_expand</code> — pure construction, no execution, no
+activation memory yet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="allocate-across-devices">Allocate across devices</h3>
+<p><code>ggml_backend_sched_alloc_ graph</code> walks the graph, picks each node&#39;s backend by buffer-type
+preferences (weights live where they were loaded; activations
+follow compute), and inserts <em>split</em> points where data must cross
+devices (<code>ggml/src/ggml-backend.cpp:915 ggml_backend_sched_split</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="execute">Execute</h3>
+<p><code>graph_compute</code> runs the scheduled splits: a
+CPU split enters <code>ggml-cpu.c:3391 ggml_graph_compute</code>&#39;s thread pool
+(a spin barrier — <code>ggml_barrier</code> at <code>:576</code> — choreographs
+<code>n_threads</code> workers over the node list; each node dispatches
+through the type-trait tables into quantized kernels); GPU splits
+enqueue on device streams.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="read-logits-sample">Read logits, sample</h3>
+<p><code>res-&gt;get_logits()</code> hands the
+lm_head output to the sampler chain (<code>src/llama-sampler.cpp:895 llama_sampler_sample</code>): temperature → top-k → top-p → grammar… each
+sampler&#39;s <code>apply</code> mutating the candidates array — the
+<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/redis.md">Redis</a> commands-table pattern applied to decoding
+policy.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-token-out-state-persisted-in-the-cache">One token out, state persisted in the cache</h3>
+<p>The new
+token&#39;s K/V rows already sit in their pigeonholes; the loop calls
+<code>decode</code> again and step 2&#39;s reuse path fires. The graph, the
+scheduler, the mmap — everything persists; nothing about the model
+itself was mutated to produce the token.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>ggml_tensor</code> — descriptor-first objects.</strong>
+<strong>What:</strong> type + shape (<code>ne</code>) + byte strides (<code>nb</code>) + op + up to
+two <code>src[]</code> + <code>view_src</code> (<code>ggml/include/ggml.h:685</code>); <code>data</code> may
+be null (pure graph node) or a view into a buffer.
+<strong>Why:</strong> separating <em>description</em> from <em>storage</em> makes
+graph-building allocation-free, views zero-copy, and weights
+mmap-able — the descriptor/physical split <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite&#39;s</a>
+VFS uses, at tensor granularity.</p>
+</li>
+<li><p><strong>Quantized super-blocks + type-trait tables.</strong>
+<strong>What:</strong> formats like <code>block_q4_K</code> — dozens of values packed
+with per-block scales (<code>ggml-common.h</code>); per-type trait tables
+(<code>ggml.c:675+</code>: <code>from_float</code>, <code>vec_dot</code>, …) that matmul kernels
+call through.
+<strong>Why:</strong> quantization stays a <em>storage and kernel</em> concern — the
+graph says <code>MUL_MAT</code>, the trait table supplies the dot product —
+so new formats (Q4_0 → Q_K → IQ) ship without touching the graph
+layer. The jar analogy is literal: the file <em>is</em> the memory
+layout.</p>
+</li>
+<li><p><strong><code>ggml_cgraph</code> — a flat topological array.</strong>
+<strong>What:</strong> <code>nodes[]</code>/<code>leafs[]</code> plus a visited hash set
+(<code>ggml-impl.h:341</code>), built by forward expansion from the output.
+<strong>Why:</strong> a flat array is scheduler-friendly (backend splits are
+contiguous ranges), cache-friendly, and trivially checkable —
+versus object-graph walking, which interpreter-style designs pay
+for at every dispatch.</p>
+</li>
+<li><p><strong>The KV cache as a slot map.</strong>
+<strong>What:</strong> per-layer K/V tensors plus position-indexed occupancy;
+<code>find_slot</code> (<code>llama-kv-cache.cpp:916</code>) seats ubatches
+contiguously; unified vs. recurrent variants behind one memory
+interface.
+<strong>Why:</strong> making <em>attention state</em> an explicitly managed resource
+(defrag, shifting, eviction) turns &quot;context overflow&quot; from an
+error into admission control — <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/kafka.md">Kafka&#39;s</a> retention
+insight applied to tensor memory.</p>
+</li>
+<li><p><strong>The sampler chain.</strong>
+<strong>What:</strong> <code>struct llama_sampler {iface, ctx}</code>
+(<code>include/llama.h:1427</code>) with name/apply/accept/reset/clone/free
+callbacks; chains compose them over a <code>llama_token_data_array</code>.
+<strong>Why:</strong> decoding policy composes without the engine knowing any
+policy — a miniature of the project&#39;s whole &quot;graph + registered
+plugins&quot; thesis.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>One graph, many threads, no shared mutable state.</strong> Execution
+parallelism is <em>within</em> a node: the CPU thread pool
+(<code>ggml-cpu.c:3391</code>) splits each op&#39;s row range across workers
+synchronized by a spin barrier (<code>:576</code>). The graph itself is
+single-owner — contexts never share schedulers — so there is no
+locking on the inference path; servers run one context (or one
+per slot) per thread.</li>
+<li><strong>Async pipelines are explicit.</strong> With <code>pipeline_parallel</code>, the
+next graph may be enqueued while the previous computes;
+<code>process_ubatch</code> <em>synchronizes before rewriting input tensors</em>
+(<code>if (cparams.pipeline_parallel) ggml_backend_sched_synchronize</code>)
+— the code comment names the hazard exactly. Correctness lives at
+graph boundaries, not in ambient magic.</li>
+<li><strong>Context-full is a return code, not a crash.</strong> <code>find_slot</code> fails
+→ <code>LLAMA_MEMORY_STATUS_FAILED_PREPARE</code> → <code>decode</code> first tries
+cache optimization (the defrag/shift retry loop,
+<code>llama-context.cpp:1921</code>), and only then returns <code>1</code> (&quot;make
+room, then call me again&quot;) — graceful degradation baked into the
+API contract.</li>
+<li><strong>Failure mid-compute:</strong> backend errors surface as
+<code>GGML_STATUS_*</code> from <code>graph_compute</code>; <code>decode</code>&#39;s error path
+removes the failed ubatch&#39;s positions from the cache (the
+<code>pos_min</code> cleanup) so the KV cache never retains tokens from a
+failed pass.</li>
+<li><strong>Numerics honesty:</strong> quantized <code>vec_dot</code> kernels are
+SIMD-architecture-specific, so bit-exact reproducibility across
+CPUs is <em>not</em> promised — a real failure-mode note for anyone
+diffing outputs between machines.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The C surface is the product.</strong> <code>include/llama.h</code> exposes
+model/context/batch/sampler/backend as opaque handles with
+default-parameter structs (<code>llama_model_default_params</code>), every
+field commented. The header is the design document the way
+<code>lua.h</code> is for <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/lua.md">Lua</a>.</li>
+<li><strong>Four extension seams, no plugin ABI:</strong> (1) new model
+architectures — a file in <code>src/models/</code>, a registration in
+<code>models.h</code> and <code>llama-arch.cpp</code>; (2) new quant formats — block
+struct + trait-table entries + kernels; (3) new backends —
+implement ggml&#39;s backend/buffer interface (CUDA, Metal, Vulkan,
+SYCL already do); (4) new samplers — an iface struct.</li>
+<li><strong>ggml is itself the reusable engine</strong> — whisper.cpp and siblings
+consume it directly; llama.cpp is &quot;ggml plus LLM opinions.&quot; The
+layering that made <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/libuv.md">libuv</a> reusable beyond Node, in ML
+clothes.</li>
+<li><strong>Honest wart:</strong> velocity shows. The API accumulates deprecation
+shims (<code>llama_batch</code> legacy vs <code>llama_batch_ext</code> — two <code>decode</code>
+overloads at <code>llama-context.cpp:1811</code>/<code>:4570</code>), parameter structs
+grow dozens of fields, and graph-reuse heuristics
+(<code>can_reuse</code> on topology fingerprints) are cleverness that leans
+on its comments. Stability discipline lags <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl&#39;s</a> by
+choice — the project picked iteration speed.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-build-the-graph-per-batch-over-a-precompiled-engine">Trade-off 1: build the graph per batch over a precompiled engine</h3>
+<ul>
+<li><strong>Tension:</strong> inference is a loop of near-identical graphs; a
+compiled engine or JIT could skip build overhead.</li>
+<li><strong>Choice:</strong> construct the graph each ubatch; <em>reuse</em> it only when
+the shape parameters match.</li>
+<li><strong>Evidence:</strong> <code>src/llama-context.cpp:1497 process_ubatch</code> —
+<code>res-&gt;can_reuse(gparams)</code> vs <code>model.build_graph(gparams)</code> +
+<code>ggml_backend_sched_alloc_graph</code>.</li>
+<li><strong>Given up:</strong> per-token microseconds and &quot;compile once&quot;
+simplicity; graph reuse became a real subsystem.</li>
+<li><strong>Verdict:</strong> right when shapes legitimately vary (prefill vs
+decode, batch sizes, cache slots) and 160 architectures share one
+executor — the builder <em>is</em> the porting layer. Wrong for a
+fixed-shape embedded pipeline, where a static schedule wins.</li>
+</ul>
+<h3 id="trade-off-2-quantization-as-the-on-disk-format-over-fp16-fp32">Trade-off 2: quantization as the on-disk format over fp16/fp32</h3>
+<ul>
+<li><strong>Tension:</strong> model quality vs the memory bandwidth (and capacity)
+of consumer hardware.</li>
+<li><strong>Choice:</strong> weights live <em>natively</em> in 2–8-bit blocks; kernels
+dequantize inline inside <code>vec_dot</code>; the file format is the memory
+layout, so mmap costs nothing.</li>
+<li><strong>Evidence:</strong> <code>ggml-common.h</code> block structs with
+<code>static_assert</code>s on size; trait tables at <code>ggml.c:675+</code>; loader
+mmap path <code>llama-model-loader.cpp:559</code>.</li>
+<li><strong>Given up:</strong> some accuracy (mitigated by per-block scales),
+fp32 debuggability, and a formats × ops × architectures kernel
+matrix to maintain.</li>
+<li><strong>Verdict:</strong> the decision that created the project&#39;s audience —
+8× smaller weights put LLMs on laptops and phones, and
+bandwidth-bound matmuls often run <em>faster</em> quantized. Wrong where
+accuracy is contractual (training, careful evals).</li>
+</ul>
+<h3 id="trade-off-3-zero-dependencies-and-mmap-over-any-platform-layer">Trade-off 3: zero dependencies and mmap over any platform layer</h3>
+<ul>
+<li><strong>Tension:</strong> portability across phones/SBCs/servers vs the
+conveniences of runtimes, allocators, and package ecosystems.</li>
+<li><strong>Choice:</strong> C/C++ with no required deps; GGUF as a
+self-describing container; weights mapped read-only; OS quirks
+behind small shims.</li>
+<li><strong>Evidence:</strong> the loader&#39;s mmap decision (<code>:559</code>) and its
+alignment checks (<code>:688</code> — an embedded GGUF whose data section is
+misaligned fails fast rather than corrupting).</li>
+<li><strong>Given up:</strong> unified memory management, telemetry, plugin
+ecosystems &quot;for free&quot; — the project rebuilds scheduling, thread
+pools, and file I/O itself.</li>
+<li><strong>Verdict:</strong> right for a tool whose differentiator is <em>runs
+anywhere with the model file and nothing else</em> — the
+<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl</a> verdict in ML clothes. Wrong inside a platform
+that already owns those layers.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>include/llama.h</code> — skim the five object kinds and the
+default-params structs; the comment density is the design doc.</li>
+<li><code>ggml/include/ggml.h:685</code> <code>ggml_tensor</code> — the descriptor that
+everything else manipulates; note <code>data</code> is optional and views
+carry <code>view_src</code>.</li>
+<li><code>ggml/src/ggml-common.h</code> — pick <code>block_q4_K</code> (or any Q_K
+format); read the <code>static_assert</code> sizes; this is the jar.</li>
+<li><code>src/llama-model-loader.cpp</code> — <code>use_mmap</code> decision (<code>:559</code>), the
+GGUF metadata pass, tensor-count reconciliation, and the
+embedded-GGUF alignment check (<code>:688</code>).</li>
+<li><code>src/llama.cpp</code> <code>llama_model_load_from_file_impl</code> — hparams,
+vocab, per-arch dispatch; then <code>src/models/llama.cpp load_arch_hparams</code> + <code>load_arch_tensors</code> to see names become
+typed tensor fields.</li>
+<li><code>src/models/models.h:147</code> <code>struct llama_model_llama</code> — the
+arch-class seam: hparams loader, tensor loader, graph builder in
+~100 lines of declaration.</li>
+<li><code>src/models/llama.cpp:99</code> the <code>graph&lt;embed&gt;</code> constructor — read
+it top to bottom as executable transformer math; the MoE branch
+is one <code>if</code> on a null gate pointer.</li>
+<li><code>src/llama-context.cpp:1811 decode</code> — batch splitting, the
+FAILED_PREPARE retry loop (<code>:1921</code>), then <code>:1497 process_ubatch</code> for the reuse-or-build decision and
+<code>set_inputs</code>.</li>
+<li><code>ggml/src/ggml-backend.cpp:915</code> — the scheduler&#39;s split
+structures; skim <code>ggml_backend_sched_alloc_graph</code> to see how
+backend choice and cross-device copies are inserted.</li>
+<li><code>ggml/src/ggml-cpu/ggml-cpu.c:3391 ggml_graph_compute</code> +
+<code>:576 ggml_barrier</code> — the thread pool&#39;s barrier choreography;
+then one trait-table dispatch in <code>ggml.c:675+</code>.</li>
+<li><code>src/llama-kv-cache.cpp:916 find_slot</code> — slot assignment as
+admission control; then <code>src/llama-sampler.cpp:895 llama_sampler_sample</code> and the chain in <code>:966 llama_sampler_chain_add</code>.</li>
+<li><code>tools/main/main.cpp</code> — the loop that ties it together: decode
+→ sample → print → append; everything you read, in 15 lines.</li>
+</ol>
+<p>You have now traced one token from a batch call through a
+freshly-built (or reused) tensor graph, a cross-device schedule, a
+quantized matmul, a cache slot, and a sampler chain — the complete
+anatomy of &quot;LLM inference with no framework.&quot;</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>A dataflow graph as the universal IR</strong> — describe computation
+declaratively, then schedule/allocate/optimize it; per-shape
+specialization falls out of rebuild-vs-reuse for free.</li>
+<li><strong>Type-trait tables for numeric formats</strong> — one dispatch seam
+made a whole quantization ecosystem possible; use it for any
+pluggable encoding (codecs, compression, wire formats).</li>
+<li><strong>Treat giant read-only data as a file you mmap, not memory you
+load</strong> — zero-copy, instant startup, shared page cache; the
+weights never being written is a <em>design</em> fact, not luck.</li>
+<li><strong>Make context/state an explicit, budgeted resource</strong> (the KV
+cache) with admission control and eviction policy — overflow
+becomes a negotiation, not an OOM.</li>
+<li><strong>Split the portable engine (ggml) from the domain (llama)</strong> —
+reuse arrived for free in whisper.cpp et al.</li>
+<li><strong>Compose policy (sampling) as a chain of small interface
+objects</strong> — configuration language for decisions, not flags in
+the engine.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>moderate</code>. Realistic budget: 6–7 hours for this path;
+add 2 if you also read a quantized matmul kernel in full.</li>
+<li>Prerequisites: comfortable C++; what a matrix multiply is;
+transformer vocabulary at the level of &quot;attention reads K/V from
+the cache, Q comes from the token&quot; (any 10-minute attention
+explainer suffices — the graph builder in step 7 is the tutorial).
+No CUDA/GPU knowledge required — the CPU path tells the whole
+story.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The repo&#39;s own <code>docs/</code> — especially the GGUF format spec and the
+server/tool docs; <code>ggml/docs</code> for backend interface notes.</li>
+<li>The original <code>llama.cpp</code> launch discussion (ggml-org/llama.cpp
+PR #52 and README history) — the &quot;no framework&quot; thesis in the
+author&#39;s own words.</li>
+<li><em>Attention Is All You Need</em> (Vaswani et al., 2017) — one read
+of the graph builder makes the paper concrete.</li>
+<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl</a> dives in this atlas —
+the two design lineages (portable core + file format; zero-dependency
+portability) this project consciously or not extends to ML.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../curl/"><span class="dir">← Previous dive</span>curl: a transfer state machine designed to live inside someone else's event loop</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 23 of 23 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -25,7 +25,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">18 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">23 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -59,6 +59,7 @@ alongside it. That is the whole method.</p>
     <button type="button" class="filter-chip" data-domain="distributed" aria-pressed="false">distributed</button>
     <button type="button" class="filter-chip" data-domain="editor" aria-pressed="false">editor</button>
     <button type="button" class="filter-chip" data-domain="language" aria-pressed="false">language</button>
+    <button type="button" class="filter-chip" data-domain="ml-framework" aria-pressed="false">ml-framework</button>
     <button type="button" class="filter-chip" data-domain="networking" aria-pressed="false">networking</button>
     <button type="button" class="filter-chip" data-domain="orchestration" aria-pressed="false">orchestration</button>
     <button type="button" class="filter-chip" data-domain="proxy-lb" aria-pressed="false">proxy-lb</button>
@@ -178,6 +179,36 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A receptionist who never watches anything for long. The receptionist (the event loop) keeps a wall of numbered mailboxes — one per thing she watches (a socket, a timer) — and a big board that…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
 </a>
+<a class="dive-card" href="dive/runc/" data-domains="container">
+  <span class="dc-name">runc</span>
+  <span class="dc-headline">a container is a config file plus a choreographed chain of syscalls</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A porter who builds you a hotel room and then quits. The hotel is the Linux kernel (it owns all the rooms forever). The porter (the runc run you type) reads your wishlist ( config.json : one room,…</span>
+  <span class="dc-meta"><span class="chip domain">container</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/lua/" data-domains="language runtime">
+  <span class="dc-name">Lua</span>
+  <span class="dc-headline">one tagged union, a register VM, and the friendliest embedding API in the business</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A craftsman's workshop that fits inside anyone's garage. The big machine (your game, your server — the host program, written in C) installs a small workbench (the Lua interpreter, lua_State ) in…</span>
+  <span class="dc-meta"><span class="chip domain">language</span><span class="chip domain">runtime</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/envoy/" data-domains="proxy-lb distributed">
+  <span class="dc-name">Envoy</span>
+  <span class="dc-headline">a fleet of single-threaded proxies steered by an API</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A sorting facility where every sorter has their own manual — and head office rewrites the manuals by phone. Letters (connections) arrive at loading docks (listeners) and ride conveyor belts…</span>
+  <span class="dc-meta"><span class="chip domain">proxy-lb</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/curl/" data-domains="networking">
+  <span class="dc-name">curl</span>
+  <span class="dc-headline">a transfer state machine designed to live inside someone else's event loop</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A travel agency that never insists on driving you there. You can say &quot;get me this webpage&quot; (the easy interface: curl_easy_perform ) and the agency does everything while you wait outside. But you…</span>
+  <span class="dc-meta"><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
+</a>
+<a class="dive-card" href="dive/llama-cpp/" data-domains="ml-framework">
+  <span class="dc-name">llama.cpp</span>
+  <span class="dc-headline">LLM inference with no framework — tensors, a graph, and quantization as the product</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A bakery that rebuilds its conveyor belt for every cookie — and stores flour in tiny compressed jars. The recipe (the model architecture, one C++ builder per model family) says: mix, shape, bake,…</span>
+  <span class="dc-meta"><span class="chip domain">ml-framework</span><span class="chip diff-moderate">moderate</span></span>
+</a>
   </div>
 </section>
 
@@ -209,7 +240,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 18 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 23 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -249,7 +280,7 @@ transferable design moves you can apply to your own systems.</li>
 <summary>proxy-lb <span class="count">(2)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/haproxy/haproxy" rel="noopener">HAProxy ↗</a></span><span class="cat-status cataloged">cataloged</span>
   <div class="cat-why">The load balancer that refuses to drop traffic: run queues and tasks instead of threads, zero-downtime reload via socket handoff, and obsessive per-connection memory accounting (pools + ebtree). Teaches how to design…</div></li>
-<li><span class="cat-name"><a href="https://github.com/envoyproxy/envoy" rel="noopener">Envoy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<li><span class="cat-name"><a href="dive/envoy/">Envoy</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The modern data-plane architecture: an event loop per worker thread, filter chains as the extension model (network filters, HTTP filters), xDS as the control-plane API, and stats/tracing built into the skeleton.…</div></li></ul>
 </details>
 <details class="catalog-group">
@@ -277,7 +308,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>language <span class="count">(1)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/lua/lua" rel="noopener">Lua ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/lua/">Lua</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A whole language — lexer, parser, register-based VM, incremental GC, and the friendliest C embedding API ever designed — in ~30k lines with almost no dependencies. Teaches that a runtime's power comes from a few…</div></li></ul>
 </details>
 <details class="catalog-group">
@@ -292,7 +323,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>container <span class="count">(2)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/opencontainers/runc" rel="noopener">runc ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/runc/">runc</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">What &quot;a container&quot; actually is, in ~30k lines: parse an OCI bundle (config.json), clone(2) with namespaces, set up cgroups, pivot_root, exec. Teaches the Linux container primitives one syscall at a time — the rare…</div></li>
 <li><span class="cat-name"><a href="dive/moby/">Moby (Docker)</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The tool that made containers mainstream, and it won on a packaging design decision: images as immutable, content-addressed, layered tarballs with copy-on-write union mounts, plus one command (dockerfile → docker…</div></li></ul>
@@ -301,7 +332,7 @@ transferable design moves you can apply to your own systems.</li>
 <summary>ml-framework <span class="count">(2)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/pytorch/pytorch" rel="noopener">PyTorch ↗</a></span><span class="cat-status cataloged">cataloged</span>
   <div class="cat-why">A tensor library that became the dominant training framework via one architectural bet: define-by-run autodiff, where the forward pass records a dynamic graph and backward walks it. Teaches how to layer an eager…</div></li>
-<li><span class="cat-name"><a href="https://github.com/ggml-org/llama.cpp" rel="noopener">llama.cpp ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<li><span class="cat-name"><a href="dive/llama-cpp/">llama.cpp</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">LLM inference with no framework: ggml tensors, memory-mapped weight files, quantization as first-class, graph-built-per-model eval loops. Teaches performance engineering as architecture — how batching, KV cache…</div></li></ul>
 </details>
 <details class="catalog-group">
@@ -327,7 +358,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>networking <span class="count">(1)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/curl/curl" rel="noopener">curl ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/curl/">curl</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">Every protocol, every platform, zero dependencies, one API — for decades. Teaches portability as an architectural commitment (curl_multi for event-loop integration, a build system that spans embedded to…</div></li></ul>
 </details>
 <details class="catalog-group">

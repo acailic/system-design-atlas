@@ -109,7 +109,11 @@ machines instead of threads;
 [Memcached](deep-dives/memcached.md) — one libevent loop per worker
 thread, connections dispatched round-robin at accept;
 [libuv](deep-dives/libuv.md) — the pattern distilled into a portable
-library: phases, watcher queues, and a poller backend per OS.
+library: phases, watcher queues, and a poller backend per OS;
+[Envoy](deep-dives/envoy.md) — one dispatcher per worker thread over
+thread-local config snapshots;
+[curl](deep-dives/curl.md) — the tenant's side of the same contract:
+a transfer state machine that rents any foreign loop via pollsets.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -132,7 +136,9 @@ with autovacuum tuning; [Kubernetes](deep-dives/kubernetes.md) —
 resync periods as a safety net under the event stream;
 [Memcached](deep-dives/memcached.md) — hash-table expansion by a
 background thread moving buckets under the same stripe locks the
-request path uses.
+request path uses; [Lua](deep-dives/lua.md) — the GC advances in
+allocation-debt-paced steps (`luaC_step`) so a guest language never
+pauses its host's frame budget.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -215,7 +221,15 @@ OCI-standardized boundaries; [VS Code](deep-dives/vscode.md) — the
 stable/proposed two-tier API plus LSP/DAP as protocol-level seams;
 [Apache httpd](deep-dives/httpd.md) — hooks, filters, and even the
 process model (MPM) are extension surfaces, which is why one binary
-served a decade of web-ecosystem roles.
+served a decade of web-ecosystem roles; [Envoy](deep-dives/envoy.md)
+— network/HTTP filter factories plus registered load-balancer
+policies make even core scheduling an extension;
+[curl](deep-dives/curl.md) — connection filters and protocol scheme
+tables as composable seams; [llama.cpp](deep-dives/llama-cpp.md) —
+model architectures as graph-builder files (160 of them) over a
+dumb tensor core; [Lua](deep-dives/lua.md) — the metatable protocol
+as the single seam users build inheritance, prototypes, and DSLs
+through.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
