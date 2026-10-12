@@ -353,7 +353,7 @@ section.eli10 .eli-why strong { color: var(--accent-ink); }
   padding: 0.5rem 1.1rem;
   font-family: var(--sans); font-size: 0.85rem;
 }
-.read-bar label { color: var(--ink-faint); display: flex; align-items: center; gap: 0.35rem; }
+.read-bar label, .read-bar .rb-title { color: var(--ink-faint); display: flex; align-items: center; gap: 0.35rem; }
 .read-bar select {
   font-family: inherit; font-size: 0.82rem; max-width: 12.5rem;
   background: var(--bg); color: var(--ink); border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.2rem 0.35rem;
@@ -390,15 +390,12 @@ section.eli10 .eli-why strong { color: var(--accent-ink); }
 .ra-btn:hover { border-color: var(--accent); color: var(--accent-ink); }
 .ra-btn.ra-play { color: var(--accent-ink); }
 .ra-host.reading .ra-btn.ra-play { background: var(--accent); border-color: var(--accent); color: var(--bg-raised); }
-.ra-btn.ra-stop { display: none; }
-.ra-host.reading .ra-btn.ra-stop, .ra-host.reading-paused .ra-btn.ra-stop { display: flex; }
 
 .ra-host.reading {
   background: linear-gradient(transparent 0, var(--reading) 0.12em, var(--reading) calc(100% - 0.12em), transparent 100%);
   box-shadow: -0.4rem 0 0 var(--reading), 0.4rem 0 0 var(--reading);
   border-radius: 0.3rem;
 }
-.ra-host.reading-paused { opacity: 0.75; }
 
 @media (max-width: 920px) {
   .ra-controls { position: static; display: inline-flex; margin-right: 0.45rem; vertical-align: 0.15rem; }
