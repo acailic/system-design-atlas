@@ -216,8 +216,6 @@ function initReadAloud() {
   let activeEl = null;
   let activeUtter = null;
   let advanceTimer = 0;
-  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
-
   blocks.forEach((el, i) => {
     el.classList.add('ra-host');
     const c = document.createElement('span');
@@ -226,7 +224,7 @@ function initReadAloud() {
     play.type = 'button';
     play.className = 'ra-btn ra-play';
     play.textContent = PLAY;
-    play.setAttribute('aria-label', 'Pročitaj ovaj pasus naglas');
+    play.setAttribute('aria-label', 'Read this paragraph aloud');
     c.append(play);
     el.prepend(c);
 
@@ -240,14 +238,14 @@ function initReadAloud() {
     if (!activeEl) return;
     activeEl.classList.add('reading');
     const b = activeEl.querySelector('.ra-btn.ra-play');
-    if (b) { b.textContent = STOP; b.setAttribute('aria-label', 'Zaustavi čitanje ovog pasusa'); }
+    if (b) { b.textContent = STOP; b.setAttribute('aria-label', 'Stop reading this paragraph'); }
     status.textContent = `¶ ${blocks.indexOf(activeEl) + 1}/${blocks.length}`;
   }
   function clearMark() {
     if (!activeEl) return;
     activeEl.classList.remove('reading');
     const b = activeEl.querySelector('.ra-btn.ra-play');
-    if (b) { b.textContent = PLAY; b.setAttribute('aria-label', 'Pročitaj ovaj pasus naglas'); }
+    if (b) { b.textContent = PLAY; b.setAttribute('aria-label', 'Read this paragraph aloud'); }
     activeEl = null;
     status.textContent = '';
   }
@@ -267,7 +265,7 @@ function initReadAloud() {
       markPlaying();
       const r = el.getBoundingClientRect();
       if (r.top < 0 || r.bottom > innerHeight) {
-        el.scrollIntoView({ block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
     };
     u.onend = () => {
