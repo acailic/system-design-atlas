@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>curl: a transfer state machine designed to live inside someone else's event loop — System Design Atlas</title>
+<meta name="description" content="curl is the most portable network client on earth — every protocol from HTTP/3 to gopher, every platform from mainframes to microcontrollers, zero required dependencies, one C API, stable fo">
+<meta property="og:title" content="curl: a transfer state machine designed to live inside someone else's event loop — System Design Atlas">
+<meta property="og:description" content="curl is the most portable network client on earth — every protocol from HTTP/3 to gopher, every platform from mainframes to microcontrollers, zero required dependencies, one C API, stable fo">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-https-get-foreign-event-loop-to-body-callback">Walkthrough: one HTTPS GET, foreign event loop to body callback</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>curl: a transfer state machine designed to live inside someone else's event loop</h1>
+    <div class="meta-chips"><span class="chip domain">networking</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/curl/curl" rel="noopener">curl (MIT-style)</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>70c084a0123b468fe7078e3fc72c78e1b66394b6</code> · 2026-10-11 · <a href="https://github.com/curl/curl" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">curl is the most portable network client on earth — every protocol
+from HTTP/3 to gopher, every platform from mainframes to
+microcontrollers, zero required dependencies, one C API, stable for
+decades. The design lesson is not &quot;support many protocols&quot;; it is
+<strong>how an API composes with someone else&#39;s program</strong>. curl refuses to
+own the clock: the <code>easy</code> interface is a blocking convenience wrapper,
+and underneath it the <code>multi</code> interface exposes a transfer as an
+explicit state machine (<code>MSTATE_*</code>) that the <em>host&#39;s</em> event loop drives
+through <code>curl_multi_perform</code>/<code>curl_multi_poll</code>. Around that engine,
+two vtable-based filter chains — connection filters for bytes on the
+wire, client writers for bytes to the application — let TLS, proxies,
+HTTP/2, and decompression stack like envelopes without any protocol
+knowing about the others. Portability and API stability are treated as
+architectural commitments, not packaging chores.</p>
+<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/nginx.md">nginx</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a> dives:
+those own the process and the event loop; curl is the inversion — a
+network engine that must <em>rent</em> concurrency from whatever loop,
+thread, or coroutine the embedding application already has.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A travel agency that never insists on driving you there.</strong> You can
+say &quot;get me this webpage&quot; (the easy interface: <code>curl_easy_perform</code>)
+and the agency does everything while you wait outside. But you can
+also run the switchboard yourself (the multi interface): for every
+trip in progress you ask &quot;what happens next, and which phone should I
+listen on?&quot; (<code>curl_multi_perform</code> + <code>curl_multi_poll</code>), and you decide
+when to ask again. The agency never grabs the steering wheel — it
+works for a hundred travel agents&#39; clocks at once because it keeps
+zero of its own. Trips go through <strong>nested envelopes</strong> (connection
+filters): your letter (HTTP request) goes into a security envelope
+(TLS) which goes into a diplomatic pouch (proxy tunnel) which rides
+the postal truck (socket) — each layer adds or peels its own wrapper
+without reading the others&#39;. Replies go through the reverse: an
+<strong>out-tray sorter</strong> (client writers) that un-gzips, un-chunks, and
+hands pages to you in order, and can even <em>hold</em> mail politely
+(pausing) if you say &quot;my hands are full.&quot;</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a library that brings its own
+threads or event loop fights every program it lives in — so curl made
+&quot;you drive, I&#39;ll advise&quot; the core contract, and everything else
+(protocols, TLS, even the blocking mode) became layers on top.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    APP[&quot;embedding application&quot;]
+
+    subgraph api[&quot;public API (include/curl/*.h)&quot;]
+        EASY[&quot;easy: curl_easy_init/setopt/&lt;br/&gt;perform — lib/easy.c:770&quot;]
+        MULTI[&quot;multi: add_handle/perform/&lt;br/&gt;poll/waitfds/info_read — lib/multi.c&quot;]
+    end
+
+    subgraph engine[&quot;transfer engine (lib/multi.c)&quot;]
+        SM[&quot;multi_runsingle :2717&lt;br/&gt;switch on data-&gt;mstate&quot;]
+        MST[&quot;MSTATE_INIT → SETUP → CONNECT →&lt;br/&gt;CONNECTING → PROTOCONNECT* → DO* →&lt;br/&gt;PERFORMING → DONE → COMPLETED (multihandle.h)&quot;]
+    end
+
+    subgraph conn[&quot;connection layer&quot;]
+        CFSET[&quot;cf-setup.c:446 Curl_cf_setup_add&lt;br/&gt;builds the chain per connection&quot;]
+        CF[&quot;cfilter chain: cf-socket →&lt;br/&gt;cf-ip-happy → socks/http-proxy →&lt;br/&gt;TLS (vtls) — cfilters.h:217 Curl_cftype&quot;]
+        CPOOL[&quot;connection pool (cpool)&lt;br/&gt;keep-alive reuse across transfers&quot;]
+        SCH[&quot;protocol schemes&lt;br/&gt;protocol.c: Curl_scheme_http :131&quot;]
+    end
+
+    subgraph appside[&quot;application side&quot;]
+        CW[&quot;client writers: cw-out.c (body/header&lt;br/&gt;delivery, pause buffering), content&lt;br/&gt;decoding, HTTP/1 chunked&quot;]
+        CB[&quot;your write/header/xferinfo callbacks&quot;]
+    end
+
+    APP --&gt; EASY --&gt;|&quot;runs its own internal multi&quot;| MULTI
+    APP --&gt;|&quot;your poll/epoll/event loop&quot;| MULTI
+    MULTI --&gt; SM --&gt; MST
+    SM --&gt; CFSET --&gt; CF --&gt; CPOOL
+    SM --&gt; SCH
+    SM --&gt; CW --&gt; CB
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Two public interfaces, one engine.</strong> <code>curl_easy_perform</code>
+(<code>lib/easy.c:770 easy_perform</code>) is sugar: it creates a private
+<code>multi</code> handle sized for one transfer and runs the very same state
+machine to completion. Everything below the API is multi-shaped.</li>
+<li><strong>The state machine is the spine.</strong> <code>multi_runsingle</code>
+(<code>lib/multi.c:2717</code>) switches on <code>data-&gt;mstate</code> — <code>multistate_init</code>,
+<code>multistate_setup</code>, <code>multistate_connect</code>, …, <code>multistate_done</code> —
+each call advancing one transfer by <em>one non-blocking step</em>. States
+live in <code>lib/multihandle.h</code> (INIT through MSGSENT) with the
+pollset each state wants declared in a parallel switch
+(<code>multi.c:1146</code>).</li>
+<li><strong>Connection filters stack by vtable.</strong> A connection is a chain of
+<code>Curl_cfilter</code> nodes (<code>cfilters.h</code>), each typed by a
+<code>Curl_cftype</code> (line 217) with <code>do_connect/do_send/do_recv/ adjust_pollset</code> methods. <code>cf-setup.c</code> assembles the chain in order
+— socket, then Happy Eyeballs (dual-stack racing), then proxy
+tunnels, then TLS — so an HTTPS request through a SOCKS proxy is
+four wrappers, none aware of the others. <code>Curl_conn_send/recv</code>
+(<code>cfilters.c:1003/…</code>) enter the chain&#39;s top.</li>
+<li><strong>Protocols are data + a protocol vtable.</strong> Each URL scheme is a
+<code>struct Curl_scheme</code> instance (<code>protocol.c:131</code> for http, <code>:145</code>
+for https) carrying flags and a <code>Curl_protocol</code> implementation;
+lookup is <code>Curl_getn_scheme</code> (<code>protocol.c:608</code>). Adding SFTP or
+MQTT changes no engine code.</li>
+<li><strong>The application side mirrors it.</strong> Client writers (<code>cw-out.c</code>
+and friends) form the response-side chain that delivers headers and
+bodies to your callbacks — including the buffering rules that make
+<code>CURL_WRITEFUNC_PAUSE</code> work (the file&#39;s own design comment at
+<code>cw-out.c:37</code> is a small masterpiece of pause-protocol reasoning).</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-https-get-foreign-event-loop-to-body-callback">Walkthrough: one HTTPS GET, foreign event loop to body callback</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant H as host app (owns epoll)
+    participant M as multi engine
+    participant CF as cfilter chain
+    participant CW as client writers
+    participant S as server
+
+    H-&gt;&gt;M: curl_multi_add_handle(easy)
+    H-&gt;&gt;M: curl_multi_perform
+    M-&gt;&gt;M: INIT→SETUP→CONNECT: scheme lookup, URL check
+    M-&gt;&gt;CF: Curl_cf_setup_add (socket→happy→TLS)
+    H-&gt;&gt;M: curl_multi_poll (multi&#39;s fds + yours)
+    H-&gt;&gt;M: perform — CONNECTING: TCP+TLS non-blocking
+    M-&gt;&gt;M: PROTOCONNECT→DO: request written via chain
+    H-&gt;&gt;M: perform — PERFORMING: recv via chain
+    CF-&gt;&gt;CW: decrypted bytes flow into writer chain
+    CW-&gt;&gt;H: header callback, then write callback (body)
+    M-&gt;&gt;M: DONE→COMPLETED: conn returns to cpool
+    H-&gt;&gt;M: curl_multi_info_read → msg: done, code=0
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="attach-a-transfer">Attach a transfer</h3>
+<p><code>curl_easy_init</code> + a pile of
+<code>CURLOPT_*</code> (URL, headers, <code>CURLOPT_WRITEFUNCTION</code>) build the
+<code>Curl_easy</code> — a struct holding <em>everything</em> one transfer is
+(options, state, buffers, connection pointer). <code>curl_multi_add_handle</code>
+puts it in the multi&#39;s transfer table keyed by a 32-bit id.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="init-setup">INIT/SETUP</h3>
+<p>Your first <code>curl_multi_perform</code> calls
+<code>multi_runsingle</code>; <code>multistate_init</code> → <code>multistate_setup</code> parse the
+URL (<code>urlapi.c</code>), resolve the scheme via <code>Curl_getn_scheme</code>
+(<code>protocol.c:608</code>), and decide credentials, ports, and redirects
+context. No socket yet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="connect-filters-assemble">CONNECT, filters assemble</h3>
+<p><code>multistate_connect</code> creates
+(or reuses, via the connection pool) a <code>connectdata</code> and calls
+<code>Curl_cf_setup_add</code> (<code>cf-setup.c:446</code>), which stacks filters in
+order — <code>cf_setup_add_ip_happy</code> (line 173), proxy filters
+(<code>cf_setup_add_socks</code>/<code>_http_proxy</code>), <code>cf_setup_add_origin_filters</code>
+(line 228) for TLS. Each filter&#39;s <code>do_connect</code> returns &quot;done&quot; or
+&quot;call me again&quot; — the whole handshake is non-blocking by
+construction.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-host-polls">The host polls</h3>
+<p><code>curl_multi_waitfds</code>/<code>curl_multi_poll</code>
+(<code>multi.c:1295</code>/<code>:1660</code>) report which sockets each transfer wants to
+read or write (per-state pollsets via <code>mstate_*_pollset</code>); your epoll
+waits on those alongside everything else your app does. curl never
+sleeps for itself.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="do-doing">DO/DOING</h3>
+<p>On writability, <code>multistate_do</code> hands the
+protocol its turn; the HTTP protocol writes the request <em>through the
+filter chain</em> (<code>Curl_conn_send</code>), so TLS-encrypting or proxy-wrapping
+happens below it invisibly. Happy Eyeballs may still be racing
+families here.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="performing">PERFORMING</h3>
+<p><code>multistate_performing</code> reads via
+<code>Curl_conn_recv</code>, feeds bytes to the client-writer chain: HTTP/1
+chunked peeling, content-decoding (gzip), then <code>cw-out</code> — which
+invokes your header callback and <code>WRITEFUNCTION</code> with ordered body
+chunks. If your callback returns pause, <code>cw-out</code> buffers and the
+engine stops asking to read until you unpause (<code>cw-out.c:37</code>&#39;s
+documented rules).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="done">DONE</h3>
+<p>The final byte, close, or error moves the handle
+to <code>multistate_done</code> → <code>multi_done</code> (<code>multi.c:673</code>): the connection
+is <em>not</em> closed but returned to the pool if keep-alive applies;
+messages are queued for the app.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="completion-is-a-message-not-a-return-value">Completion is a message, not a return value</h3>
+<p><code>curl_multi_info_read</code> hands you <code>{msg: DONE, code: CURLE_OK}</code> and
+you remove the handle. The connection sits warm in the pool for the
+next transfer; the state machine is parked at <code>MSTATE_COMPLETED</code>,
+holding zero timers, threads, or secret sleeps.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>struct Curl_easy</code> — one transfer, one struct.</strong>
+<strong>What:</strong> options (<code>set</code>), dynamic state (<code>state</code>), the attached
+connection, callbacks, buffers, progress — the transfer&#39;s whole
+biography.
+<strong>Where:</strong> <code>lib/urldata.h</code>; created by <code>curl_easy_init</code>
+(<code>lib/easy.c:368</code>).
+<strong>Why:</strong> making the <em>transfer</em> (not the connection or the request)
+the unit gives you redirect-following for free (same easy handle,
+new SETUP pass) and makes the multi handle just a table of these —
+contrast designs where a connection owns state and redirects
+become surgery.</p>
+</li>
+<li><p><strong><code>struct Curl_multi</code> — a scheduler, not a server.</strong>
+<strong>What:</strong> a 32-bit-id→handle transfer table, an internal <code>admin</code>
+easy handle for self-wakes, the connection pool, shutdown tracking,
+and the event bookkeeping that answers &quot;when should you call me
+again?&quot;.
+<strong>Where:</strong> <code>lib/multihandle.h</code>; <code>multi_runsingle</code> walks exactly one
+easy per invocation.
+<strong>Why:</strong> no threads, no timers of its own — every blocking
+decision is exported as pollsets and timeout hints. This is what
+lets libevent/libuv/epoll hosts embed curl as <em>one more fd source</em>
+(the same &quot;rent your clock&quot; contract as <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv&#39;s</a>
+loop, offered from the tenant side).</p>
+</li>
+<li><p><strong><code>Curl_cfilter</code> + <code>Curl_cftype</code> — the wire-side vtable chain.</strong>
+<strong>What:</strong> a singly linked stack of filters over one socket;
+<code>cfilters.h:217</code> declares the type vtable (<code>do_connect</code>,
+<code>do_send</code>, <code>do_recv</code>, <code>adjust_pollset</code>, <code>query</code>…).
+<strong>Where:</strong> instances in <code>cf-socket.c</code>, <code>cf-ip-happy.c</code>,
+<code>cf-h1-proxy.c</code>, <code>cf-https-connect.c</code>, <code>vtls/…</code>; assembly in
+<code>cf-setup.c:446</code>.
+<strong>Why:</strong> protocol-vs-transport matrix explodes combinatorially
+(https via socks5 over IPv6 …); filters turn the matrix into a
+linear stack composition. The chain also <em>queries</em> upward
+(<code>query</code>) — how the engine learns &quot;is this TLS?&quot; without a type
+flag — and <code>adjust_pollset</code> is how a filter makes the engine wait
+on its private fds (TLS handshakes, DNS).</p>
+</li>
+<li><p><strong><code>struct Curl_scheme</code> / <code>Curl_protocol</code> — protocols as data.</strong>
+<strong>What:</strong> scheme metadata (default port, credential rules, flags
+like <code>PROTOPT_SSL</code>, <code>PROTOPT_CONN_REUSE</code>) plus an implementation
+pointer; <code>protocol.c:131</code> shows http/https sharing one
+implementation with different flags.
+<strong>Why:</strong> the engine&#39;s branches key off <em>flags</em>, not scheme names —
+so &quot;add a new TLS-wrapped protocol&quot; is a table entry plus flag
+reuse, the registered-component pattern FFmpeg also runs (and curl
+runs it in ~200 lines).</p>
+</li>
+<li><p><strong>The client-writer chain (<code>cw-*</code>).</strong>
+<strong>What:</strong> response bytes flow through <code>cw-out</code> (terminal delivery
+to callbacks, with pause buffering — design comment at
+<code>cw-out.c:37</code>), content decoders, and protocol-specific peelers.
+<strong>Why:</strong> symmetry with connection filters keeps &quot;bytes toward the
+app&quot; as composable as &quot;bytes toward the wire&quot;; pause/resume —
+backpressure from <em>your</em> callback — becomes one filter&#39;s local
+problem instead of the engine&#39;s.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>The host provides concurrency; curl provides progress.</strong> No
+worker threads exist (the threaded DNS resolver is the deliberate
+exception, isolated behind <code>Curl_async</code>). Thousands of transfers
+share one thread because every state-machine step is non-blocking
+and every wait is a pollset report.</li>
+<li><strong>Waking from outside:</strong> <code>curl_multi_wakeup</code> writes to an internal
+socketpair consumed through the <code>admin</code> handle (<code>multi.c:355</code>,
+<code>:409</code>) — the same self-pipe trick nginx uses, so a timer or
+another thread can interrupt a sleeping poll without touching the
+host&#39;s loop.</li>
+<li><strong>Failure is per-transfer, always reported.</strong> Any state can fail;
+the handle goes DONE with a <code>CURLcode</code>, the connection is torn down
+(or pooled if reusable — <code>multi_done</code> at <code>multi.c:673</code> checks
+protocol <code>done</code> handlers first), and a <code>CURLMsg</code> is queued for
+<code>curl_multi_info_read</code>. Errors never escape as exceptions or
+process state — they are mailbox messages, the contract an evented
+host needs.</li>
+<li><strong>Crash-safety and half-states:</strong> connections mid-handshake are
+owned by their filter chain; if the easy handle is removed early,
+<code>multi_done(premature=TRUE)</code> closes rather than pools. The pause
+protocol (a <em>deliberate</em> half-state, bounded by
+<code>DYN_PAUSE_BUFFER</code> → <code>CURLE_TOO_LARGE</code>) shows the design&#39;s
+discipline: even backpressure has explicit limits instead of
+unbounded buffering.</li>
+<li><strong>Overload behavior:</strong> rate limiting is itself a state
+(<code>MSTATE_RATELIMITING</code> — &quot;let time pass, ignore sockets&quot;), and
+connection-pool ceilings cap fan-out; an overloaded host observes
+slowdowns, never secret internal queues.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The easy surface is one function wide:</strong> configure via the
+<code>CURLOPT_*</code> universe, act with <code>perform</code>, inspect with
+<code>getinfo</code>. The multi surface is four verbs — add/remove,
+perform/wait, read-info — because those four are exactly what an
+event loop integration needs.</li>
+<li><strong>Seams:</strong> connection filters (write a filter, register a setup
+function), protocol schemes (data table entry), client writers,
+and above all the callback family (write/header/progress/socket-
+function) — extension without linking into internals, the same
+&quot;no new concepts, new registrations&quot; economy as the scheme table.</li>
+<li><strong>ABI stability is engineered, not hoped:</strong> <code>CURL_EAPI_ENTER</code>
+guards in <code>lib/easy.c:849</code> validate handles against misuse;
+<code>CURLOPT_*</code> grows by appending (never renumbering); deprecated
+functions stay declared forever (<code>multi.h</code> still ships
+<code>curl_multi_socket</code> from 1999). The cost is paid in API surface
+sprawl — the honest wart: <code>setopt</code> is a stringly-typed mega-switch
+where the compiler cannot check option/type pairs, a 25-year-old
+compromise that every wrapper library works around.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-rented-event-loops-over-an-owned-reactor">Trade-off 1: rented event loops over an owned reactor</h3>
+<ul>
+<li><strong>Tension:</strong> transfers are inherently asynchronous; libraries that
+run their own threads/loops fight every embedding application.</li>
+<li><strong>Choice:</strong> export the asynchrony — explicit states, pollsets,
+timeout hints, <code>curl_multi_poll</code>/<code>waitfds</code>, and a wakeup pipe;
+own no clock, spawn no threads.</li>
+<li><strong>Evidence:</strong> <code>multi.c:2717 multi_runsingle</code> (one non-blocking
+step); <code>multi.c:1146</code> (per-state pollsets); <code>curl_multi_wakeup</code> +
+admin handle (<code>multi.c:355</code>).</li>
+<li><strong>Given up:</strong> one-line &quot;just fetch this&quot; simplicity at the engine
+layer (easy API re-implements it as a wrapper, <code>easy.c:770</code>) and
+any internal scheduling cleverness like happy-eyeballs scheduling
+must itself be pollset-driven.</li>
+<li><strong>Verdict:</strong> unambiguously right for a library — this is why curl
+embeds everywhere from PostgreSQL extensions to games. Your
+<em>application</em> server should invert it and own the loop
+(<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/nginx.md">nginx</a>); a tenant must rent.</li>
+</ul>
+<h3 id="trade-off-2-filter-vtable-chains-over-monolithic-protocol-code">Trade-off 2: filter vtable chains over monolithic protocol code</h3>
+<ul>
+<li><strong>Tension:</strong> N protocols × M transports (proxy types × TLS × IP
+families) in one C codebase.</li>
+<li><strong>Choice:</strong> two orthogonal chains — <code>Curl_cfilter</code> toward the
+wire, client writers toward the app — each node a small vtable.</li>
+<li><strong>Evidence:</strong> <code>cfilters.h:217</code>; assembly order in
+<code>cf-setup.c:446</code> (<code>ip_happy</code> → <code>socks</code>/<code>http_proxy</code> → origin TLS).</li>
+<li><strong>Given up:</strong> call-chain indirection on the hot path and stack
+traces that need <code>CURL_TRC</code> tracing to follow; a naive single-file
+HTTP fetch is genuinely simpler to read.</li>
+<li><strong>Verdict:</strong> right once the matrix exceeds ~2×2, which it did by<ol start="2001">
+<li>The same reasoning produced HTTP/2&#39;s layering in <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a>;
+curl&#39;s version is notable for doing it in C with zero
+allocation churn per call.</li>
+</ol>
+</li>
+</ul>
+<h3 id="trade-off-3-forever-stable-c-abi-over-expressive-api-evolution">Trade-off 3: forever-stable C ABI over expressive API evolution</h3>
+<ul>
+<li><strong>Tension:</strong> fix bugs and add HTTP/3 for thirty years without ever
+breaking a compiled consumer (embedded firmware, OS vendors).</li>
+<li><strong>Choice:</strong> append-only enums, opaque handles, <code>curl_off_t</code> for
+large-file safety, runtime feature discovery, deprecation without
+removal.</li>
+<li><strong>Evidence:</strong> <code>include/curl/multi.h</code> (1999-era functions still
+declared, <code>CURL_DEPRECATED</code> annotated); <code>easy.c:849</code>&#39;s EAPI guards
+catching handle misuse across versions.</li>
+<li><strong>Given up:</strong> the ability to reshape the API even when wrong —
+hence <code>CURLOPT_*</code>&#39;s unchecked void-pointer folklore and the
+<code>curl_easy_escape</code> renames that had to <em>add</em> rather than fix.</li>
+<li><strong>Verdict:</strong> right when you are infrastructure (curl is linked by
+roughly everything); wrong for an internal library where forcing
+recompiles is cheap honesty.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>README.md</code> + <code>docs/</code> layout — the portability manifesto (&quot;no
+dependencies beyond a C89-ish compiler&quot; carries design weight
+here); then <code>include/curl/curl.h</code> skimmed for the API&#39;s shape.</li>
+<li><code>lib/easy.c:770 easy_perform</code> — watch the blocking API <em>create an
+internal multi</em> and run it; the easy/multi split in one function.</li>
+<li><code>lib/multihandle.h</code> — the <code>MSTATE_*</code> enum with the file&#39;s state
+comments; hold this map in your head for the rest of the walk.</li>
+<li><code>lib/multi.c:2717 multi_runsingle</code> — the spine&#39;s switch; then pick
+three states and read their <code>multistate_*</code> functions
+(<code>multistate_connect</code>, <code>multistate_do</code>, <code>multistate_performing</code>).</li>
+<li><code>lib/multi.c:1146</code> — the parallel pollset switch; notice how
+&quot;what does this state wait on?&quot; is <em>declared</em>, adjacent to the
+states.</li>
+<li><code>lib/cfilters.h</code> — the <code>Curl_cftype</code> vtable (line 217) and
+<code>Curl_cfilter</code> node; then <code>lib/cfilters.c:1003 Curl_conn_recv</code>
+and <code>Curl_conn_send</code> to see the chain walk on every I/O.</li>
+<li><code>lib/cf-setup.c:446 Curl_cf_setup_add</code> — chain assembly; follow
+<code>cf_setup_add_ip_happy</code> (line 173) into <code>cf-ip-happy.c</code> for Happy
+Eyeballs racing (connect to both families, keep the winner).</li>
+<li><code>lib/protocol.c:131</code> <code>Curl_scheme_http</code> and the scheme table
+nearby; then <code>Curl_getn_scheme</code> (line 608) — protocols as data.</li>
+<li><code>lib/cw-out.c:37</code> — read the design comment block first, then
+<code>Curl_cwt_out</code> (line 490): pause buffering as the terminal
+writer&#39;s local concern.</li>
+<li><code>lib/multi.c:673 multi_done</code> — teardown, keep-alive decisions,
+and the connection&#39;s return to the pool; then the cpool reuse
+path in <code>lib/connect.c</code>.</li>
+<li><code>lib/multi.c:1295 curl_multi_waitfds</code> and <code>:1660 curl_multi_poll</code> — the composition surface your own epoll would
+use; finally <code>curl_multi_wakeup</code> + the <code>admin</code> handle (<code>:355</code>)
+for cross-thread wakes.</li>
+</ol>
+<p>You have now traced one HTTPS GET from an application&#39;s event loop,
+through an explicit transfer state machine, two stacked filter
+chains, and a callback delivery path with pause semantics — the full
+tenant&#39;s-side story of network asynchrony.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Export your state machine; rent your concurrency.</strong> The
+perform/wait/info trio plus pollsets is the minimal contract for
+embedding any async engine in a foreign loop — steal it whole for
+DNS resolvers, client pools, or worker queues.</li>
+<li><strong>Two vtable chains (wire-side and app-side) dissolve the
+protocol×transport matrix</strong> — and let backpressure (pause) live in
+exactly one terminal filter (<code>cw-out.c:37</code>&#39;s rules).</li>
+<li><strong>One struct per unit of work</strong> (the easy handle, not the
+connection) makes lifecycle features — redirects, retries, reuse —
+local state changes instead of cross-object surgery.</li>
+<li><strong>Declare what each state waits on, next to the state</strong>
+(<code>mstate_*_pollset</code>) — pollability as documentation, and the
+evented host needs zero engine knowledge.</li>
+<li><strong>Self-pipe/admin-handle wakeup</strong> for interrupting hosts without
+touching their loops — the trick to steal whenever your library
+must be callable from another thread.</li>
+<li><strong>Treat API stability as architecture:</strong> append-only options,
+opaque handles, runtime feature probes. Thirty years of &quot;it still
+links&quot; is a feature users can build businesses on.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>moderate</code>. Realistic budget: 5–6 hours for this path;
+add 2 if you also read a vtls backend.</li>
+<li>Prerequisites: solid C (structs of function pointers, <code>poll(2)</code>);
+comfort with non-blocking sockets and <code>epoll</code>-style thinking —
+the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv</a> dive is the perfect companion read; HTTP/1.1
+verbs at the level of &quot;GET has headers&quot; (RFC 9110 skim, 20 min).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>docs/internals/MULTI-EV.md</code> and <code>docs/internals/CONNECTION-FILTERS.md</code>
+in the curl repo — the maintainers&#39; own guides to the multi-event model
+and connection filters (see also <code>docs/internals/CLIENT-WRITERS.md</code>).</li>
+<li>Daniel Stenberg, <em>Everything curl</em> — <a href="https://everything.curl.dev/">https://everything.curl.dev/</a>
+(chapters on the multi API and connection filters).</li>
+<li>RFC 8305 (Happy Eyeballs) — what <code>cf-ip-happy.c</code> implements.</li>
+<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a> dives in this atlas —
+the loop-owner perspective this design deliberately rents from.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../envoy/"><span class="dir">← Previous dive</span>Envoy: a fleet of single-threaded proxies steered by an API</a>
+  <a href="../llama-cpp/" style="text-align:right"><span class="dir">Next dive →</span>llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 22 of 23 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

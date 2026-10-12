@@ -240,7 +240,7 @@ projects:
     license: Apache-2.0
     domains: [proxy-lb, distributed]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       The modern data-plane architecture: an event loop per worker thread,
@@ -374,7 +374,7 @@ projects:
     license: MIT
     domains: [language, runtime]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
     why: >
       A whole language — lexer, parser, register-based VM, incremental GC,
@@ -452,7 +452,7 @@ projects:
     license: Apache-2.0
     domains: [container]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 5, teachability: 5, domain_fit: 4 }
     why: >
       What "a container" actually is, in ~30k lines: parse an OCI bundle
@@ -507,7 +507,7 @@ projects:
     license: MIT
     domains: [ml-framework]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 4 }
     why: >
       LLM inference with no framework: ggml tensors, memory-mapped weight
@@ -646,7 +646,7 @@ projects:
     license: curl
     domains: [networking]
     difficulty: moderate
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 3 }
     why: >
       Every protocol, every platform, zero dependencies, one API — for

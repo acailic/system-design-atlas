@@ -111,7 +111,11 @@ machines instead of threads;
 <a href="../dive/memcached/">Memcached</a> — one libevent loop per worker
 thread, connections dispatched round-robin at accept;
 <a href="../dive/libuv/">libuv</a> — the pattern distilled into a portable
-library: phases, watcher queues, and a poller backend per OS.</p>
+library: phases, watcher queues, and a poller backend per OS;
+<a href="../dive/envoy/">Envoy</a> — one dispatcher per worker thread over
+thread-local config snapshots;
+<a href="../dive/curl/">curl</a> — the tenant&#39;s side of the same contract:
+a transfer state machine that rents any foreign loop via pollsets.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -129,7 +133,9 @@ with autovacuum tuning; <a href="../dive/kubernetes/">Kubernetes</a> —
 resync periods as a safety net under the event stream;
 <a href="../dive/memcached/">Memcached</a> — hash-table expansion by a
 background thread moving buckets under the same stripe locks the
-request path uses.</p>
+request path uses; <a href="../dive/lua/">Lua</a> — the GC advances in
+allocation-debt-paced steps (<code>luaC_step</code>) so a guest language never
+pauses its host&#39;s frame budget.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -192,7 +198,15 @@ OCI-standardized boundaries; <a href="../dive/vscode/">VS Code</a> — the
 stable/proposed two-tier API plus LSP/DAP as protocol-level seams;
 <a href="../dive/httpd/">Apache httpd</a> — hooks, filters, and even the
 process model (MPM) are extension surfaces, which is why one binary
-served a decade of web-ecosystem roles.</p>
+served a decade of web-ecosystem roles; <a href="../dive/envoy/">Envoy</a>
+— network/HTTP filter factories plus registered load-balancer
+policies make even core scheduling an extension;
+<a href="../dive/curl/">curl</a> — connection filters and protocol scheme
+tables as composable seams; <a href="../dive/llama-cpp/">llama.cpp</a> —
+model architectures as graph-builder files (160 of them) over a
+dumb tensor core; <a href="../dive/lua/">Lua</a> — the metatable protocol
+as the single seam users build inheritance, prototypes, and DSLs
+through.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they

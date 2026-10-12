@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lua: one tagged union, a register VM, and the friendliest embedding API in the business — System Design Atlas</title>
+<meta name="description" content="Lua is a whole programming language — lexer, parser, a register-based virtual machine, an incremental garbage collector, coroutines, and a standard library — in ~28k lines of C with almost n">
+<meta property="og:title" content="Lua: one tagged union, a register VM, and the friendliest embedding API in the business — System Design Atlas">
+<meta property="og:description" content="Lua is a whole programming language — lexer, parser, a register-based virtual machine, an incremental garbage collector, coroutines, and a standard library — in ~28k lines of C with almost n">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-script-source-to-metamethod">Walkthrough: one script, source to metamethod</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Lua: one tagged union, a register VM, and the friendliest embedding API in the business</h1>
+    <div class="meta-chips"><span class="chip domain">language</span><span class="chip domain">runtime</span><span class="chip diff-moderate">difficulty: moderate</span><span class="chip">license: <a href="https://github.com/lua/lua" rel="noopener">MIT</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>0b29f408433e92953cc72b1d3e06c7ac8139e439</code> · 2026-09-16 · <a href="https://github.com/lua/lua" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Lua is a whole programming language — lexer, parser, a register-based
+virtual machine, an incremental garbage collector, coroutines, and a
+standard library — in ~28k lines of C with almost no dependencies.
+Other languages are <em>applications</em> you run; Lua&#39;s defining design
+decision is the opposite: <strong>it is a library you embed</strong>, with a C API
+so disciplined that games, Redis, nginx, Neovim, and OpenWrt all
+carry it inside themselves as their scripting engine. The deep-dive
+teaches how far a few orthogonal primitives get you: one tagged-union
+value type (<code>TValue</code>), one table structure doing duty as object,
+package and namespace, one metamethod protocol replacing class
+systems, and one <em>virtual stack</em> between host and VM that makes the
+embedding boundary safe without ever exposing a pointer.</p>
+<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/cpython.md">CPython</a> dive: same problem domain,
+inverted priorities. CPython optimizes for being a platform (batteries,
+C extensions reaching <em>into</em> objects); Lua optimizes for being a
+tenant (tiny, reentrant, no global state beyond one <code>lua_State</code>
+per interpreter, values you may only touch through the tray).</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A craftsman&#39;s workshop that fits inside anyone&#39;s garage.</strong> The big
+machine (your game, your server — the host program, written in C)
+installs a small workbench (the Lua interpreter, <code>lua_State</code>) in the
+corner. Between the big machine and the workbench is a <strong>tray</strong> (the
+API stack): to ask the craftsman anything, you place materials on the
+tray (<code>lua_pushnumber</code>), press the button (<code>lua_call</code>), and take the
+result off the tray (<code>lua_tonumber</code>). You never grab his tools
+directly — everything crosses the tray, so nobody gets hurt. His
+workbench has <strong>named cubbies</strong> (the registry, a coat-check room) where
+the big machine can store its own precious items without the
+craftsman seeing them. While he works, a <strong>janitor</strong> (the incremental
+garbage collector) quietly sweeps the floor, marking things that are
+still needed and binning the rest — a little at a time so work never
+stops for a big cleanup. And the craftsman can suspend himself
+mid-task (a coroutine yielding) to let another craftsman work, since
+each has his own tray but shares the one supply closet (the
+<code>global_State</code>).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a language that must live
+inside <em>other people&#39;s</em> programs has to be small, reentrant, and
+pointer-free at its boundary — so its designers spent their complexity
+budget on the embedding protocol, not on the type system.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    HOST[&quot;host program (C/C++)&lt;br/&gt;game, Redis module, nginx&quot;]
+
+    subgraph lib[&quot;liblua (~28k lines, one .a)&quot;]
+        AUX[&quot;lauxlib.c — helper layer&lt;br/&gt;luaL_check*, luaL_Buffer&quot;]
+        API[&quot;lapi.c — the public C API&lt;br/&gt;index2value :58 — virtual stack&quot;]
+        CORE[&quot;core VM: ldo.c call protocol,&lt;br/&gt;lvm.c luaV_execute :1204,&lt;br/&gt;lstate.c states&quot;]
+        OBJ[&quot;lobject.h — TValue :65,&lt;br/&gt;ltable.c, lstring.c interning,&lt;br/&gt;lfunc.c closures/upvalues&quot;]
+        GC[&quot;lgc.c — incremental/generational&lt;br/&gt;collector, luaC_step :1741&quot;]
+        COMP[&quot;front end: llex.c → lparser.c&lt;br/&gt;→ lcode.c (register codegen)&quot;]
+        LIBS[&quot;stdlib: lbaselib, lstrlib,&lt;br/&gt;ltablib, lcorolib ...&quot;]
+    end
+
+    HOST --&gt;|&quot;lua_push / lua_call / lua_to*&quot;| API
+    API --&gt; CORE --&gt; OBJ
+    CORE --&gt; GC
+    CORE --&gt; COMP
+    LIBS --&gt; API
+    AUX --&gt;|&quot;built on plain API only&quot;| API
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The embedding boundary is <code>lapi.c</code>.</strong> Every public function
+(<code>lua_pushinteger</code>, <code>lua_gettable</code>, <code>lua_call</code>, …) resolves its
+arguments through <code>index2value</code> (<code>lapi.c:58</code>), which translates an
+integer index — positive from the bottom of the stack, negative
+from the top, and the pseudo-indices <code>LUA_REGISTRYINDEX</code> and
+upvalue slots — into a <code>TValue*</code>. Host code holds <em>no</em> object
+pointers, only stack indexes.</li>
+<li><strong>The spine of a script</strong> is <code>luaL_dofile</code> → <code>lua_load</code> (lex,
+parse, generate bytecode) → <code>lua_pcall</code> → <code>luaD_precall</code>
+(<code>ldo.c:717</code>) → <code>luaV_execute</code> (<code>lvm.c:1204</code>, the dispatch loop)
+→ per-instruction <code>vmcase(OP_...)</code> blocks → returns bubble back up
+the CallInfo chain.</li>
+<li><strong>Core object layer</strong>: <code>lobject.h</code> defines every runtime value —
+<code>TValue</code> (the tagged union), <code>TString</code> (interned, with a hash),
+<code>Table</code> (array part + hash part), <code>LClosure</code>/<code>CClosure</code> and
+<code>UpVal</code> (open while on a stack, closed when the stack goes away),
+<code>Proto</code> (a function&#39;s bytecode + constant pool).</li>
+<li><strong>The collector</strong> (<code>lgc.c</code>) runs interleaved with allocation in
+small steps (<code>luaC_step</code>, line 1741), paced by a memory &quot;debt&quot;
+(<code>setpause</code>, line 1122), in either incremental or generational
+mode; mutator barriers keep the tri-color invariant.</li>
+<li><strong><code>lauxlib.c</code> is the demonstration that the API is complete</strong>:
+the entire auxiliary library (type checking, buffers, argument
+error messages) is written <em>on top of</em> the plain API, not beside
+it — the same discipline SQLite applies with its own test harness.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-script-source-to-metamethod">Walkthrough: one script, source to metamethod</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it with Next;
+in the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant H as host (C)
+    participant L as lapi.c (API stack)
+    participant D as ldo.c (call protocol)
+    participant V as lvm.c luaV_execute
+    participant G as lgc.c
+
+    H-&gt;&gt;L: luaL_dofile(&quot;a = 1 + width&quot;)
+    L-&gt;&gt;L: lua_load: llex → lparser → lcode
+    L-&gt;&gt;D: lua_pcall(0, 0)
+    D-&gt;&gt;V: luaD_precall → luaV_execute
+    V-&gt;&gt;V: OP_ADD → not numbers → luaT_trybinTM(__add)
+    V-&gt;&gt;D: luaD_call(getmetatable(w).__add)
+    V-&gt;&gt;G: allocation triggers luaC_step
+    V-&gt;&gt;D: OP_RETURN → luaD_poscall
+    D--&gt;&gt;H: status OK
+    H-&gt;&gt;L: lua_getglobal(&quot;a&quot;) + lua_tointeger
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="load">Load</h3>
+<p><code>luaL_dofile</code> (lauxlib) reads the file, calls
+<code>lua_load</code>, and the front end runs without ever touching the VM:
+<code>llex.c</code> tokenizes, <code>lparser.c</code> builds the syntax tree in the same
+pass (a one-pass recursive-descent parser), and <code>lcode.c</code> emits
+bytecode for a <em>register</em> machine — <code>OP_ADD A B C</code> means &quot;registers
+B and C add into A&quot;, with constants reachable via <code>OP_LOADK</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-call-protocol">The call protocol</h3>
+<p><code>lua_pcall</code> pushes the function and
+arguments per the stack convention, then <code>ldo.c:717 luaD_precall</code>
+classifies the callee: a C function gets its own little frame and
+returns immediately; a Lua closure extends the stack, allocates a
+<code>CallInfo</code>, and <code>luaV_execute</code> (<code>lvm.c:1204</code>) takes over.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-dispatch-loop">The dispatch loop</h3>
+<p><code>luaV_execute</code> is a computed-goto
+(<code>vmdispatch</code>) loop over instructions; <code>vmfetch</code> decodes, <code>RA/RB/RC</code>
+macros compute operand addresses relative to the frame base, and
+each <code>vmcase(OP_...)</code> block is short enough to read at a glance —
+<code>OP_MOVE</code> is two lines.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="a-metamethod-detour">A metamethod detour</h3>
+<p>Evaluating <code>1 + width</code> where
+<code>width</code> is a userdata lands in <code>OP_ADD</code>&#39;s &quot;not numbers&quot; branch,
+which calls <code>luaT_trybinTM</code> (<code>ltm.c</code>) to look up <code>__add</code> in the
+value&#39;s metatable — the entire extensibility story of Lua is this
+one uniform lookup protocol, not a class system.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="gc-ticks-on-allocation">GC ticks on allocation</h3>
+<p>The <code>__add</code> C function
+allocates a result; <code>lmem.c</code>&#39;s allocation wrapper sees the GC &quot;debt&quot;
+and runs <code>luaC_step</code> (<code>lgc.c:1741</code>) — a bounded amount of marking or
+sweeping, then back to the program. Big cleanups never happen; the
+floor is swept a few squares at a time.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="return">Return</h3>
+<p><code>OP_RETURN</code> moves results down, <code>luaD_poscall</code>
+pops the <code>CallInfo</code>, and control unwinds to <code>luaV_execute</code>&#39;s caller
+loop or, at the outermost frame, back to the host&#39;s <code>lua_pcall</code> with
+status <code>LUA_OK</code> — the API stack now holds exactly the declared
+results.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-host-holds-the-answer-nothing-else">The host holds the answer, nothing else</h3>
+<p>The host
+reads <code>a</code> with <code>lua_getglobal</code> + <code>lua_tointeger</code> — two tray round
+trips — and the interpreter retains no ambient state from the call:
+no registers, no leaked frames, one tidy <code>lua_State</code>.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>TValue</code> — one tagged union for every value.</strong>
+<strong>What:</strong> <code>Value value_</code> (a union of pointer/integer/float/C
+function) plus a one-byte tag with variant bits
+(<code>lobject.h:49</code> union, <code>:65</code> struct; collectable vs primitive
+variants).
+<strong>Why:</strong> one representation means one set of macros
+(<code>setivalue</code>, <code>ttisnumber</code>, …) for the whole VM — the dispatch
+loop stays uniform, the GC needs exactly one &quot;is it an object?&quot;
+test (the <code>iscollectable</code> bit), and C hosts never guess a layout.
+The rejected alternative (unboxed doubles via NaN-boxing, as some
+JITs do) buys speed and pays in debugging pain — Lua keeps the
+honest 16-byte value everywhere except where it caches.</p>
+</li>
+<li><p><strong><code>Table</code> — array part and hash part in one struct.</strong>
+<strong>What:</strong> a <code>TValue *array</code> prefix plus a <code>Node</code> hash array,
+auto-rebalanced by <code>rehash</code> which <em>migrates integer keys into the
+array part</em>; <code>lastfree</code> cached just before the node block (the
+<code>Limbox</code> layout trick at <code>ltable.c:55</code>).
+<strong>Where:</strong> <code>ltable.c</code> (<code>luaH_new</code>, <code>luaH_set</code>, <code>rehash</code>).
+<strong>Why:</strong> Lua&#39;s tables are simultaneously arrays, dictionaries,
+objects, modules and environments; the hybrid makes the two common
+shapes (<code>t[1]</code>, <code>t.name</code>) both fast without two user-visible types
+— the same &quot;one structure, two access paths&quot; economy as
+Redis&#39;s ziplist/listpack conversions, but at language level.</p>
+</li>
+<li><p><strong><code>lua_State</code> + <code>CallInfo</code> — the stack is the interpreter.</strong>
+<strong>What:</strong> per-thread value stack with a linked chain of <code>CallInfo</code>
+activation frames (<code>lstate.h:285</code>); <code>L-&gt;ci-&gt;func.p + 1</code> is the
+current frame base, the API&#39;s pseudo-index arithmetic hangs off
+the same stack.
+<strong>Why:</strong> one contiguous <code>TValue</code> array serves interpreter frames,
+C-call frames, and host API traffic — coroutines are then just a
+second <code>lua_State</code> sharing the <code>global_State</code>, and context switch
+is a pointer swap, not a copy.</p>
+</li>
+<li><p><strong>Interned strings + the <code>stringtable</code>.</strong>
+<strong>What:</strong> every string is a <code>TString</code> hash-consed into a global
+hash table (<code>lstring.c:269</code> <code>luaS_new</code>, <code>:133 luaS_init</code>).
+<strong>Why:</strong> string comparison becomes pointer equality (the hot path
+in every dynamic language), table keys get cheap hashing
+(<code>hashstr</code>, <code>ltable.c:115</code>), and interning gives the GC a single
+place to find all strings — the same trick Java and Python use,
+visible here in ~100 lines.</p>
+</li>
+<li><p><strong>Closures and upvalues.</strong>
+<strong>What:</strong> <code>LClosure</code> references up to 254 <code>UpVal</code> handles
+(<code>lfunc.c</code>); an <code>UpVal</code> is <em>open</em> (points into a live stack slot,
+linked in <code>L-&gt;openupval</code>) until its variable goes out of scope,
+then it is closed — its value copied into the cell itself.
+<strong>Why:</strong> open upvalues make nested functions share mutable locals
+with zero copying while the parent frame lives, and closing is a
+one-shot snapshot the GC can own. C functions get the same
+mechanism (<code>CClosure</code> upvalues reachable as pseudo-indexes), so
+<em>host</em> closures and <em>script</em> closures are the same concept.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph g[&quot;global_State (one per lua_newstate)&quot;]
+        STRT[&quot;stringtable&lt;br/&gt;(interned strings)&quot;]
+        GC[&quot;GC state&lt;br/&gt;(tri-color, debt-paced)&quot;]
+        REG[&quot;l_registry&lt;br/&gt;(host coat-check)&quot;]
+        MT[&quot;metatable name →&lt;br/&gt;event table cache&quot;]
+    end
+    L1[&quot;lua_State A&lt;br/&gt;(main thread)&quot;]
+    L2[&quot;lua_State B&lt;br/&gt;(coroutine)&quot;]
+    L3[&quot;lua_State C&lt;br/&gt;(coroutine)&quot;]
+    L1 &amp; L2 &amp; L3 --- g
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>One OS thread, many <code>lua_State</code>s.</strong> The VM assumes it owns its
+thread; concurrency is <em>cooperative</em> coroutines (<code>lcorolib.c</code>,
+<code>lua_resume</code> on the state machine in <code>ldo.c</code>) — never preemption,
+never shared-memory threading. Embedders needing parallelism run
+one <code>lua_newstate</code> per OS thread (that is the entire isolation
+model, and why it composes with hosts like nginx per-worker).</li>
+<li><strong>Errors are longjmp, contained by <code>lua_pcall</code>.</strong> <code>luaD_throw</code>
+(<code>ldo.c:125</code>) jumps to the nearest recovery point
+(<code>LUAI_THROW</code>); <code>luaD_rawrunprotected</code> brackets calls. Error
+values are ordinary values on the stack, and the panic boundary —
+what happens if a C callback throws without a <code>pcall</code> — is
+explicit (<code>lua_atpanic</code>). Same shape as SQLite&#39;s <code>setjmp</code>
+transaction aborts: one cheap non-local exit instead of errno
+plumbing through every VM function.</li>
+<li><strong>Crash mid-GC:</strong> the incremental design means the mutator never
+observes a half-moved world; barriers (<code>luaC_barrier</code>) are the
+protocol that keeps every intermediate state valid — recovery is
+simply &quot;keep stepping the collector.&quot;</li>
+<li><strong>Yield across C boundaries</strong> is the subtle failure case: a C
+function cannot keep its C stack frame while yielded, so resumable
+C calls get <em>continuation functions</em> (<code>k</code> argument of <code>lua_callk</code>)
+and the unfinished-C-call state is replayed by <code>unroll</code> /
+<code>finishCcall</code> (<code>ldo.c:868</code>). This is the price paid for
+coroutines-as-language-feature rather than OS threads, paid once,
+in <code>ldo.c</code>, by the implementors instead of every user.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The virtual stack is the API.</strong> Push, call, read: three verbs
+cover everything; <code>lapi.c:58 index2value</code>&#39;s positive/negative/
+pseudo-index rules are the entire addressing scheme. No handles,
+no refcounts handed to hosts, no struct layouts in headers beyond
+<code>lua_State</code>&#39;s opaque declaration.</li>
+<li><strong>The registry</strong> (<code>LUA_REGISTRYINDEX</code>, <code>index2value</code>&#39;s branch at
+line 71) is a normal table only the host can conveniently see —
+the coat-check for C-side references (module tables, callbacks,
+userdata metatables). <code>luaL_ref</code>/<code>luaL_unref</code> hand out integer
+tickets.</li>
+<li><strong>Seams:</strong> metatables (per-type default tables in the registry),
+<code>__index</code>/<code>__newindex</code> chains (including <code>__gc</code>, <code>__close</code>
+to-be-closed variables — see <code>L-&gt;tbclist</code> in <code>lstate.h</code>), userdata
+with per-object environments, and module loading via <code>require</code>
+(<code>loadlib.c</code>) with searchers as a table the host can extend.</li>
+<li><strong>Honest wart:</strong> the copy-through-the-tray discipline means every
+host interaction is O(1) stack traffic but <em>visibly</em> bureaucratic —
+a five-line C computation is ten calls. Lua 5.x&#39;s answer (luaL
+helpers, <code>luaL_Buffer</code>) papers over it, but the friction is the
+price of safety, and the API has grown pseudo-index exceptions
+(upvalues, registry, <code>lua_upvalueindex</code>) that every wrapper
+library must re-derive.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-uniform-tvalue-over-specialized-representations">Trade-off 1: one uniform <code>TValue</code> over specialized representations</h3>
+<ul>
+<li><strong>Tension:</strong> dynamic languages pay per value; unboxed or tagged-in-
+pointer schemes are faster but leak layout assumptions everywhere.</li>
+<li><strong>Choice:</strong> a plain 16-byte tagged union for <em>every</em> value on every
+stack and in every table.</li>
+<li><strong>Evidence:</strong> <code>lobject.h:49</code>/<code>:65</code>; the VM&#39;s uniform
+<code>setobjs2s</code>/<code>ttis*</code> macros throughout <code>lvm.c</code>.</li>
+<li><strong>Given up:</strong> cache density and the last factor of interpreter
+speed (LuaJIT took exactly the other path and shows what was left
+on the table).</li>
+<li><strong>Verdict:</strong> right for a <em>portable, embeddable</em> core where the host
+compiler and target CPU are unknowable; wrong for a JIT whose whole
+job is representation specialization.</li>
+</ul>
+<h3 id="trade-off-2-incremental-debt-paced-gc-over-stop-the-world">Trade-off 2: incremental, debt-paced GC over stop-the-world</h3>
+<ul>
+<li><strong>Tension:</strong> hosts embed Lua inside soft-realtime loops (game
+frames, request handlers); a 50ms GC pause inside them is a bug
+report.</li>
+<li><strong>Choice:</strong> the collector advances in small steps on every
+allocation, paced by a debt accumulator, with barriers preserving
+the invariants in between (<code>lgc.c:1741 luaC_step</code>, <code>:1122 setpause</code>; generational mode switches in the same file).</li>
+<li><strong>Evidence:</strong> every table write macro funnels through
+<code>luaC_barrier</code> variants — the mutator pays a branch per store to
+keep steps valid.</li>
+<li><strong>Given up:</strong> the simple two-line &quot;mark all, sweep all&quot; collector,
+and some throughput — incremental collectors do more total work.</li>
+<li><strong>Verdict:</strong> right whenever you are a guest in someone else&#39;s
+latency budget — the same reasoning that drove <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/redis.md">Redis&#39;s</a>
+incremental rehash and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/zookeeper.md">ZooKeeper&#39;s</a> steady-state
+design. Wrong for short-lived CLI processes where a sweep at exit
+is free.</li>
+</ul>
+<h3 id="trade-off-3-copy-semantics-through-a-virtual-stack-over-direct-references">Trade-off 3: copy semantics through a virtual stack over direct references</h3>
+<ul>
+<li><strong>Tension:</strong> C hosts want speed and convenience; the language wants
+to stay portable and GC-safe across an FFI boundary it cannot
+police.</li>
+<li><strong>Choice:</strong> all traffic goes through the stack with explicit
+push/convert/pop; hosts hold indexes, never pointers.</li>
+<li><strong>Evidence:</strong> <code>lapi.c:58 index2value</code>; <code>lua_pushvalue</code> /
+<code>lua_to*</code> copies rather than aliasing; <code>lauxlib.c</code> existing at all
+is proof the raw protocol is usable from the outside.</li>
+<li><strong>Given up:</strong> ergonomic FFI — contrast LuaJIT&#39;s <code>ffi</code> (blazing,
+unsafe, C-layout-coupled). The stock API makes it <em>impossible</em> to
+hold a stale object pointer.</li>
+<li><strong>Verdict:</strong> right for a library whose customers include
+sandboxes and 20-year ABIs; wrong when both sides are one
+tightly-coupled build, where a zero-copy FFI is honest.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>lua.h</code> — the <em>entire</em> public API, in one commented header;
+notice how few functions there are, and that <code>lua_State</code> is
+opaque. This header <em>is</em> the design document.</li>
+<li><code>lapi.c:58 index2value</code> — every API call&#39;s front door; master the
+positive/negative/pseudo index rules here before anything else.</li>
+<li><code>lstate.c</code> <code>lua_newstate</code>/<code>f_luaopen</code> — what one interpreter
+costs: stacks, string table, metatables, registry seeded.</li>
+<li><code>ldo.c:717 luaD_precall</code> — the call protocol: C vs Lua closures,
+frame layout, then <code>luaD_call</code>/<code>luaD_poscall</code>; also <code>ldo.c:125 luaD_throw</code> and <code>luaD_rawrunprotected</code> for the error model.</li>
+<li><code>lvm.c:1204 luaV_execute</code> — spend an hour here. Read <code>vmfetch</code>,
+<code>RA/RB/RKC</code>, then follow <code>OP_MOVE</code>, <code>OP_ADD</code> (numbers fast path,
+metamethod slow path), <code>OP_GETTABUP</code> (how globals actually work:
+an upvalue pointing at the environment table), <code>OP_TAILCALL</code>,
+<code>OP_RETURN</code>.</li>
+<li><code>lobject.h</code> from line 49 — <code>TValue</code>, then walk the object zoo
+(<code>TString</code>, <code>Table</code>, <code>Proto</code>, <code>LClosure</code>/<code>CClosure</code>, <code>UpVal</code>);
+every later file speaks this vocabulary.</li>
+<li><code>ltable.c</code> — <code>luaH_new</code>/<code>luaH_set</code>, the array/hash split, and
+<code>rehash</code> migrating integer keys; the <code>Limbox</code> at line 55 is a
+nice trick for hiding <code>lastfree</code> in the allocation header.</li>
+<li><code>lgc.c</code> — colors and states (<code>lgc.h</code> first), <code>singlestep</code>, the
+atomic phase, then <code>luaC_step:1741</code> and <code>setpause:1122</code>; find the
+barrier macros used in <code>ltable.c</code> writes from step 7.</li>
+<li><code>ltm.c</code> — the ~20 event names and <code>luaT_gettmbyobj</code>; connect it
+back to the <code>OP_ADD</code> slow path you read in step 5.</li>
+<li><code>lauxlib.c</code> — <code>luaL_checkinteger</code>, <code>luaL_Buffer</code>,
+<code>luaL_ref</code>/<code>luaL_unref</code>; the proof-by-construction that the API
+composes.</li>
+<li><code>lbaselib.c</code> (<code>print</code> is ~15 lines) and <code>lcorolib.c</code> (<code>coroutine .resume</code> wrapping <code>lua_resume</code>) — libraries as ordinary API
+clients; then <code>lundump.c</code> if you care about precompiled chunks.</li>
+</ol>
+<p>You have now traced one script from bytes through bytecode, a
+register-VM loop, a metamethod dispatch, and a garbage-collection
+step — plus the tray that made it all embeddable.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make your library&#39;s boundary a virtual stack (or queue) of
+values, not object references.</strong> <code>lapi.c</code> shows that one
+addressing rule (positive/negative/pseudo) plus push/convert/pop
+covers everything, and stays ABI-stable for decades.</li>
+<li><strong>A registry with integer tickets</strong> (<code>luaL_ref</code>) is the minimal
+safe &quot;host owns a reference&quot; mechanism whenever a GC lives
+underneath — steal it for any plugin host.</li>
+<li><strong>Pace background work by allocation debt</strong>, not timers:
+<code>luaC_step</code>&#39;s &quot;every malloc pays a slice&quot; trick keeps GC cost
+proportional to allocation with zero scheduling machinery.</li>
+<li><strong>One representation discipline beats N special cases</strong>: the
+uniform <code>TValue</code> is why 28k lines cover strings-to-coroutines;
+resist per-type fast paths until measurement demands them.</li>
+<li><strong>Implement your own helpers on your own public API.</strong> <code>lauxlib</code>
+and the stdlib never cheat — so the API&#39;s completeness is
+continuously testable by its own product.</li>
+<li><strong>Metadata-driven extensibility</strong> (one metatable protocol instead
+of class hierarchies) keeps the core small while users build
+inheritance, prototypes, or DSLs themselves.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>moderate</code>. Realistic budget: 6 hours for this path;
+10 if you also read <code>lgc.c</code> in full.</li>
+<li>Prerequisites: comfortable C (function pointers, unions,
+<code>setjmp</code>); basic compiler vocabulary (lexer/parser/bytecode — any
+intro post suffices); no prior VM knowledge needed — <code>lvm.c</code>&#39;s
+comments teach register machines as you go. The Lua reference
+manual&#39;s §4 (the C API) is the ideal pre-read.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><em>Programming in Lua</em> (4th edition), Roberto Ierusalimschy —
+especially the stack-protocol chapters and the C API part.</li>
+<li>The Lua 5.5 reference manual — <a href="https://www.lua.org/manual/5.5/">https://www.lua.org/manual/5.5/</a></li>
+<li>Ierusalimschy et al., <em>Lua: an extensible extension language</em> and
+<em>The Evolution of Lua</em> (HOPL III paper) — the design history
+behind &quot;small core, embed everywhere.&quot;</li>
+<li><code>lua-users.org</code> wiki — the C/Lua binding idioms and <code>luaL_ref</code>
+patterns this dive cites.</li>
+<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/cpython.md">CPython</a> dive in this atlas for the contrasting
+&quot;language as platform&quot; design.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../runc/"><span class="dir">← Previous dive</span>runc: a container is a config file plus a choreographed chain of syscalls</a>
+  <a href="../envoy/" style="text-align:right"><span class="dir">Next dive →</span>Envoy: a fleet of single-threaded proxies steered by an API</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 20 of 23 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
