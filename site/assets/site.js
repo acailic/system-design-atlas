@@ -167,16 +167,16 @@ function initReadAloud() {
      then any local voice, then the engine's own default. */
   const isSrHr = (v) => /^(sr|hr)([-_]|$)/i.test(v.lang);
   const isEnUSGB = (v) => /^en[-_](us|gb)\b/i.test(v.lang);
-  function pickDefaultVoice() {
-    const srHr = voices.filter(isSrHr);
-    const enUSGB = voices.filter(isEnUSGB);
+  function pickDefaultVoice(candidates) {
+    const srHr = candidates.filter(isSrHr);
+    const enUSGB = candidates.filter(isEnUSGB);
     return srHr.find((v) => v.localService)
       || srHr[0]
       || enUSGB.find((v) => v.localService)
       || enUSGB[0]
-      || voices.find((v) => v.localService)
-      || voices.find((v) => v.default)
-      || voices[0];
+      || candidates.find((v) => v.localService)
+      || candidates.find((v) => v.default)
+      || candidates[0];
   }
   function loadVoices() {
     voices = synth.getVoices();
@@ -185,8 +185,8 @@ function initReadAloud() {
     voiceSel.innerHTML = '';
     /* espeak-style engines expose every voice variant ("X+Adam") as its own
        entry — thousands of options. Keep base voices (no "+") in the picker
-       and sort sr/hr first, then en, then the rest; the full list still backs
-       pickDefaultVoice and the stored choice. */
+       and sort sr/hr first, then en, then the rest; the stored choice and
+       the default pick only draw from this list. */
     let listed = voices.filter((v) => !v.name.includes('+'));
     if (!listed.length) listed = voices;
     listed = listed.slice().sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
@@ -199,7 +199,7 @@ function initReadAloud() {
     });
     if (listed.some((v) => v.voiceURI === prevURI)) voiceSel.value = prevURI;
     else {
-      const d = pickDefaultVoice();
+      const d = pickDefaultVoice(listed);
       if (d) voiceSel.value = d.voiceURI;
     }
   }
