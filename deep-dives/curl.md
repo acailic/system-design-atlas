@@ -337,8 +337,8 @@ holding zero timers, threads, or secret sleeps.
   traces that need `CURL_TRC` tracing to follow; a naive single-file
   HTTP fetch is genuinely simpler to read.
 - **Verdict:** right once the matrix exceeds ~2×2, which it did by
-  2001. The same reasoning produced HTTP/2's layering in [Envoy]
-  (envoy.md); curl's version is notable for doing it in C with zero
+  2001. The same reasoning produced HTTP/2's layering in [Envoy](envoy.md);
+  curl's version is notable for doing it in C with zero
   allocation churn per call.
 
 ### Trade-off 3: forever-stable C ABI over expressive API evolution
@@ -429,8 +429,9 @@ tenant's-side story of network asynchrony.
 
 ## 9. Further reading
 
-- `docs/MULTI-EVENT.md` and `docs/INTERNALS.md` in the curl repo —
-  the maintainers' own guides to the event model and internals.
+- `docs/internals/MULTI-EV.md` and `docs/internals/CONNECTION-FILTERS.md`
+  in the curl repo — the maintainers' own guides to the multi-event model
+  and connection filters (see also `docs/internals/CLIENT-WRITERS.md`).
 - Daniel Stenberg, *Everything curl* — https://everything.curl.dev/
   (chapters on the multi API and connection filters).
 - RFC 8305 (Happy Eyeballs) — what `cf-ip-happy.c` implements.

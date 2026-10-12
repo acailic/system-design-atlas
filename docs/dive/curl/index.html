@@ -356,8 +356,8 @@ wire, client writers toward the app — each node a small vtable.</li>
 traces that need <code>CURL_TRC</code> tracing to follow; a naive single-file
 HTTP fetch is genuinely simpler to read.</li>
 <li><strong>Verdict:</strong> right once the matrix exceeds ~2×2, which it did by<ol start="2001">
-<li>The same reasoning produced HTTP/2&#39;s layering in [Envoy]
-(envoy.md); curl&#39;s version is notable for doing it in C with zero
+<li>The same reasoning produced HTTP/2&#39;s layering in <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a>;
+curl&#39;s version is notable for doing it in C with zero
 allocation churn per call.</li>
 </ol>
 </li>
@@ -449,8 +449,9 @@ verbs at the level of &quot;GET has headers&quot; (RFC 9110 skim, 20 min).</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
 <ul>
-<li><code>docs/MULTI-EVENT.md</code> and <code>docs/INTERNALS.md</code> in the curl repo —
-the maintainers&#39; own guides to the event model and internals.</li>
+<li><code>docs/internals/MULTI-EV.md</code> and <code>docs/internals/CONNECTION-FILTERS.md</code>
+in the curl repo — the maintainers&#39; own guides to the multi-event model
+and connection filters (see also <code>docs/internals/CLIENT-WRITERS.md</code>).</li>
 <li>Daniel Stenberg, <em>Everything curl</em> — <a href="https://everything.curl.dev/">https://everything.curl.dev/</a>
 (chapters on the multi API and connection filters).</li>
 <li>RFC 8305 (Happy Eyeballs) — what <code>cf-ip-happy.c</code> implements.</li>

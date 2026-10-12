@@ -142,7 +142,7 @@ in the repo it reads top to bottom.</p>
     C-&gt;&gt;C: wait exec FIFO (runc start writes &quot;0&quot;)
     P-&gt;&gt;P: waitForChildExit, parent returns
     C-&gt;&gt;W: execve(&quot;/bin/bash&quot;)
-    U-&gt;&gt;U: container runs; parent already gone
+    U-&gt;&gt;U: container runs — parent already gone
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
 <div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="parse-the-bundle">Parse the bundle</h3>
 <p><code>runc run</code> (<code>run.go</code>) calls

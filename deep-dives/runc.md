@@ -123,7 +123,7 @@ sequenceDiagram
     C->>C: wait exec FIFO (runc start writes "0")
     P->>P: waitForChildExit, parent returns
     C->>W: execve("/bin/bash")
-    U->>U: container runs; parent already gone
+    U->>U: container runs — parent already gone
 ```
 
 **Step 1 — Parse the bundle.** `runc run` (`run.go`) calls

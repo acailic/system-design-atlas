@@ -142,15 +142,15 @@ sequenceDiagram
     C->>W: TCP connect to listener port
     W->>A: onAcceptWorker (active_tcp_listener.cc:109)
     A->>A: connection balancer may hand off to another worker
-    A->>H: filters built; HCM reads via codec
+    A->>H: filters built — HCM reads via codec
     H->>H: decodeHeaders (conn_manager_impl.cc:1557): overload check, route snapshot
-    H->>R: HTTP filter chain decodes; router is terminal
+    H->>R: HTTP filter chain decodes — router is terminal
     R->>R: cluster snapshot → LB (round_robin) → host
     R->>U: conn_pool newStream (conn_pool_base.cc:60)
     U-->>R: onPoolReady → encodeHeaders upstream
     U-->>H: response headers → encoder filter chain (reverse order)
     H-->>C: write via connection transport socket
-    H->>H: stream destroyed; stats/timers recorded
+    H->>H: stream destroyed — stats/timers recorded
 ```
 
 **Step 1 — Accept.** The worker's `ActiveTcpListener::onAcceptWorker`

@@ -47,6 +47,11 @@ CONTRIBUTING.md). Deep-dives quote from upstream code only as commentary:
   | Apache ZooKeeper | Apache-2.0 | permissive; short attributed quotes fine |
   | NATS | Apache-2.0 | permissive; short attributed quotes fine |
   | libuv | MIT | permissive; short attributed quotes fine |
+  | runc | Apache-2.0 | permissive; short attributed quotes fine |
+  | Lua | MIT | permissive; repo has no LICENSE file — text lives in `lua.h` |
+  | Envoy | Apache-2.0 | permissive; short attributed quotes fine |
+  | curl | curl | MIT-style permissive (see COPYING); short attributed quotes fine |
+  | llama.cpp | MIT | permissive; short attributed quotes fine |
 
 - When in doubt, paraphrase in prose and cite `file:function` as a pointer
   instead of quoting. A pointer is always license-clean.

@@ -444,9 +444,9 @@ anatomy of "LLM inference with no framework."
 
 - The repo's own `docs/` — especially the GGUF format spec and the
   server/tool docs; `ggml/docs` for backend interface notes.
-- The original `llama.cpp` launch discussion (ggml-org/llama.cpp
-  PR #52 and README history) — the "no framework" thesis in the
-  author's own words.
+- The repo's initial commit `26c0846` ("Initial release", 2023-03-10)
+  and the README history — the "no framework" thesis in the author's
+  own words.
 - *Attention Is All You Need* (Vaswani et al., 2017) — one read
   of the graph builder makes the paper concrete.
 - The [SQLite](sqlite.md) and [curl](curl.md) dives in this atlas —
