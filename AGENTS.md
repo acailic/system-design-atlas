@@ -38,6 +38,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
   citations like "the reading path in section 6" stay stable.
 - Read-aloud + steppers are progressive enhancement in `site/assets/site.js`;
   keep them working without JS (raw readable pages, mermaid source visible).
+- Site tests: `npm test` = `node --test "site/tests/*.test.mjs"` — staleness gate
+  plus jsdom DOM/JS wiring tests over the published `docs/` output (sitemap/
+  robots/og/canonical per page; per-paragraph read-aloud play/stop toggle).
+  CI (`.github/workflows/ci.yml`) runs it on every PR. Keep the SEL constant
+  in `site/tests/readaloud.test.mjs` in sync with site.js, and never run a
+  bare `node --test` here — it would scan gitignored `clones/` for tests.
 - Testing speechSynthesis locally: headless Chrome via libspeechd
   (speech-dispatcher + espeak-ng installed) exposes ~13k voices — every espeak
   "Name+variant" as its own entry, langs as bare codes ("sr", "en-US"). The
