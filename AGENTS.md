@@ -27,6 +27,10 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `npm run check` fails if committed `docs/` is stale — run it before every
   push that touches prose. Deps are pinned in package.json (marked, js-yaml;
   no framework).
+- Tests: `npm test` (node:test, zero extra deps) rebuilds `docs/` and locks
+  the generated-output contracts — sitemap.xml / robots.txt shape and each
+  page's canonical/og:* head meta. It asserts what `site/build.mjs` emits;
+  when it fails, fix the builder (or its markdown input), never `docs/`.
 - After editing ANY prose (deep-dives, PATTERNS.md, README, catalog.yaml),
   rebuild and commit `docs/` in the same change.
 - Deep-dive markdown conventions the builder depends on: unnumbered

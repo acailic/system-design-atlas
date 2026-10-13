@@ -94,7 +94,7 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
       prose also cites.
 - [ ] Snippets within policy; no vendored upstream files.
 - [ ] Catalog entry and README updated.
-- [ ] `npm run check` passes (docs/ regenerated and committed).
+- [ ] `npm run check` and `npm test` pass (docs/ regenerated and committed).
 
 ## Re-reviewing entries
 
