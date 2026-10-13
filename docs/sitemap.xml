@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://acailic.github.io/system-design-atlas/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/redis/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/sqlite/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/git/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/leveldb/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/nginx/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/postgresql/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/kafka/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/kubernetes/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/cpython/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/moby/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/vscode/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/etcd/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/elasticsearch/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/memcached/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/httpd/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/zookeeper/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/nats/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/libuv/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/runc/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/lua/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/envoy/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/curl/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/llama-cpp/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/patterns/</loc></url>
+</urlset>
