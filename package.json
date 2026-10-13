@@ -7,10 +7,12 @@
   "scripts": {
     "build": "node site/build.mjs",
     "check": "node site/build.mjs --check",
-    "serve": "node site/build.mjs --serve"
+    "serve": "node site/build.mjs --serve",
+    "test": "node --test \"site/tests/*.test.mjs\""
   },
   "devDependencies": {
-    "marked": "18.1.0",
-    "js-yaml": "4.1.0"
+    "js-yaml": "4.1.0",
+    "jsdom": "30.1.2",
+    "marked": "18.1.0"
   }
 }
