@@ -23,6 +23,7 @@ const CHECK = process.argv.includes('--check');
 const SERVE = process.argv.includes('--serve');
 
 const GITHUB_BASE = 'https://github.com/acailic/system-design-atlas';
+const SITE_URL = 'https://acailic.github.io/system-design-atlas';
 const MERMAID_VERSION = '11.6.0';
 
 /* ── markdown pipeline ─────────────────────────────────────────── */
@@ -207,14 +208,14 @@ function parseDive(raw, id, catalogEntry) {
   if (eli) {
     const firstPara = eli.split(/\n\n/).find((p) => p.trim() && !p.trim().startsWith('**Why'));
     if (firstPara) {
-      eliTeaser = decodeEntities(renderMd(firstPara).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+      eliTeaser = toPlainText(renderMd(firstPara));
       if (eliTeaser.length > 200) eliTeaser = eliTeaser.slice(0, 197).replace(/\s\S*$/, '') + '…';
     }
   }
 
   const headline = title.includes(':') ? title.split(':').slice(1).join(':').trim() : title;
   const introPara = raw.split('\n\n').slice(2).find((p) => p.trim() && !p.trim().startsWith('>') && !p.trim().startsWith('#')) || headline;
-  const description = decodeEntities(renderMd(introPara).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().slice(0, 190);
+  const description = toPlainText(renderMd(introPara)).slice(0, 190);
   return { id, title, headline, meta, html, toc, eliTeaser, description };
 }
 
@@ -222,10 +223,20 @@ function parseDive(raw, id, catalogEntry) {
 
 const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
+/* plain text from rendered html: strip tags, collapse whitespace, and fix the
+ * punctuation spacing the tag stripping itself introduces ("foo </strong>, bar"
+ * must not become "foo , bar") */
+const toPlainText = (html) =>
+  decodeEntities(html.replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim();
+
 function page({ title, description, body, fromDir = '' }) {
   const asset = (p) => relUrl(fromDir, p);
   const home = fromDir ? relUrl(fromDir, '') : 'index.html';
   const patternsHref = fromDir === 'patterns/' ? './' : relUrl(fromDir, 'patterns/');
+  const canonical = `${SITE_URL}/${fromDir}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -236,6 +247,9 @@ function page({ title, description, body, fromDir = '' }) {
 <meta property="og:title" content="${escapeAttr(title)}">
 <meta property="og:description" content="${escapeAttr(description)}">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="${canonical}">
+<link rel="canonical" href="${canonical}">
 <link rel="stylesheet" href="${asset('assets/site.css')}">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
 </head>
@@ -488,6 +502,16 @@ for (const p of pages) outputs.set(p.path, p.html);
 outputs.set('assets/site.css', readFileSync(join(ROOT, 'site/assets/site.css'), 'utf8'));
 outputs.set('assets/site.js', readFileSync(join(ROOT, 'site/assets/site.js'), 'utf8'));
 outputs.set('.nojekyll', '');
+
+/* sitemap + robots: home, dives in reading order, patterns */
+const sitemapPaths = ['', ...ordered.map((d) => `dive/${d.id}/`), 'patterns/'];
+const sitemapXml =
+  '<?xml version="1.0" encoding="UTF-8"?>\n' +
+  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+  sitemapPaths.map((p) => `  <url><loc>${SITE_URL}/${p}</loc></url>\n`).join('') +
+  '</urlset>\n';
+outputs.set('sitemap.xml', sitemapXml);
+outputs.set('robots.txt', `User-agent: *\nAllow: /\n\nSitemap: ${SITE_URL}/sitemap.xml\n`);
 
 const DOCS = join(ROOT, 'docs');
 if (CHECK) {
