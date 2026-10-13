@@ -38,6 +38,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
   citations like "the reading path in section 6" stay stable.
 - Read-aloud + steppers are progressive enhancement in `site/assets/site.js`;
   keep them working without JS (raw readable pages, mermaid source visible).
+- Testing speechSynthesis locally: headless Chrome via libspeechd
+  (speech-dispatcher + espeak-ng installed) exposes ~13k voices — every espeak
+  "Name+variant" as its own entry, langs as bare codes ("sr", "en-US"). The
+  voice picker filters `+` variants for this reason; cancel() surfaces as an
+  `interrupted` error event (handled by the stale-utterance guard), and no
+  boundary events fire, so verify progress by polling `speaking`.
 
 ## Deep-dive process addenda (learned during the 13-dive expansion)
 

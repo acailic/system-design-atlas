@@ -123,7 +123,10 @@ function initReadAloud() {
   );
   if (!blocks.length) return;
 
-  const PLAY = '▶', PAUSE = '❚❚';
+  /* One discrete button per block: click = play this paragraph,
+     click again = stop. Starting a new paragraph cancels the previous
+     one, and the global toolbar Stop cancels everything. */
+  const PLAY = '▶', STOP = '■';
   const store = {
     get(k, d) { try { const v = localStorage.getItem('sda-' + k); return v === null ? d : v; } catch { return d; } },
     set(k, v) { try { localStorage.setItem('sda-' + k, v); } catch { /* private mode */ } },
@@ -135,12 +138,12 @@ function initReadAloud() {
   bar.setAttribute('role', 'group');
   bar.setAttribute('aria-label', 'Read aloud controls');
   bar.innerHTML =
-    '<label>Read aloud <span class="rb-status" aria-live="polite"></span></label>' +
-    '<label>Voice <select class="rb-voice" aria-label="Voice"></select></label>' +
-    '<label>Speed <input type="range" class="rb-rate" min="0.5" max="2.5" step="0.05" aria-label="Reading speed">' +
+    '<span class="rb-title">Read aloud <span class="rb-status" aria-live="polite"></span></span>' +
+    '<label for="rb-voice">Voice <select id="rb-voice" class="rb-voice" aria-label="Voice"></select></label>' +
+    '<label for="rb-rate">Speed <input type="range" id="rb-rate" name="rate" class="rb-rate" min="0.5" max="2.5" step="0.05" aria-label="Reading speed">' +
     '<span class="rate-val"></span></label>' +
-    '<label class="rb-auto" title="Continue to the next paragraph when this one ends">' +
-    '<input type="checkbox" class="rb-advance"> Auto-advance</label>' +
+    '<label class="rb-auto" for="rb-advance" title="Continue to the next paragraph when this one ends">' +
+    '<input type="checkbox" id="rb-advance" name="advance" class="rb-advance"> Auto-advance</label>' +
     '<button type="button" class="rb-stop" title="Stop reading (Esc)">■ Stop</button>';
   document.body.appendChild(bar);
 
@@ -160,21 +163,44 @@ function initReadAloud() {
 
   /* voices (async on some engines) */
   let voices = [];
+  /* default voice: local sr/hr first, then any sr/hr, then en-US/GB,
+     then any local voice, then the engine's own default. */
+  const isSrHr = (v) => /^(sr|hr)([-_]|$)/i.test(v.lang);
+  const isEnUSGB = (v) => /^en[-_](us|gb)\b/i.test(v.lang);
+  function pickDefaultVoice(candidates) {
+    const srHr = candidates.filter(isSrHr);
+    const enUSGB = candidates.filter(isEnUSGB);
+    return srHr.find((v) => v.localService)
+      || srHr[0]
+      || enUSGB.find((v) => v.localService)
+      || enUSGB[0]
+      || candidates.find((v) => v.localService)
+      || candidates.find((v) => v.default)
+      || candidates[0];
+  }
   function loadVoices() {
     voices = synth.getVoices();
     if (!voices.length) return;
     const prevURI = store.get('voice', '');
     voiceSel.innerHTML = '';
-    voices.forEach((v) => {
+    /* espeak-style engines expose every voice variant ("X+Adam") as its own
+       entry — thousands of options. Keep base voices (no "+") in the picker
+       and sort sr/hr first, then en, then the rest; the stored choice and
+       the default pick only draw from this list. */
+    let listed = voices.filter((v) => !v.name.includes('+'));
+    if (!listed.length) listed = voices;
+    listed = listed.slice().sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
+    function rank(v) { return isSrHr(v) ? 2 : isEnUSGB(v) ? 1 : 0; }
+    listed.forEach((v) => {
       const o = document.createElement('option');
       o.value = v.voiceURI;
       o.textContent = `${v.name} (${v.lang})${v.default ? ' — default' : ''}`;
       voiceSel.appendChild(o);
     });
-    if (voices.some((v) => v.voiceURI === prevURI)) voiceSel.value = prevURI;
+    if (listed.some((v) => v.voiceURI === prevURI)) voiceSel.value = prevURI;
     else {
-      const d = voices.find((v) => v.default) || voices[0];
-      voiceSel.value = d.voiceURI;
+      const d = pickDefaultVoice(listed);
+      if (d) voiceSel.value = d.voiceURI;
     }
   }
   loadVoices();
@@ -189,9 +215,7 @@ function initReadAloud() {
   /* per-paragraph controls */
   let activeEl = null;
   let activeUtter = null;
-  let wantPaused = false;
   let advanceTimer = 0;
-
   blocks.forEach((el, i) => {
     el.classList.add('ra-host');
     const c = document.createElement('span');
@@ -201,43 +225,25 @@ function initReadAloud() {
     play.className = 'ra-btn ra-play';
     play.textContent = PLAY;
     play.setAttribute('aria-label', 'Read this paragraph aloud');
-    const stop = document.createElement('button');
-    stop.type = 'button';
-    stop.className = 'ra-btn ra-stop';
-    stop.textContent = '■';
-    stop.setAttribute('aria-label', 'Stop reading');
-    c.append(play, stop);
+    c.append(play);
     el.prepend(c);
 
     play.addEventListener('click', () => {
-      if (activeEl === el) {
-        if (synth.paused) { wantPaused = false; synth.resume(); markPlaying(); }
-        else if (synth.speaking) { wantPaused = true; synth.pause(); markPaused(); }
-        return;
-      }
-      speak(el, i);
+      if (activeEl === el) { stopAll(); return; } // second click stops
+      speak(el, i);                              // new paragraph interrupts previous
     });
-    stop.addEventListener('click', () => stopAll());
   });
 
   function markPlaying() {
     if (!activeEl) return;
     activeEl.classList.add('reading');
-    activeEl.classList.remove('reading-paused');
     const b = activeEl.querySelector('.ra-btn.ra-play');
-    if (b) { b.textContent = PAUSE; b.setAttribute('aria-label', 'Pause reading'); }
+    if (b) { b.textContent = STOP; b.setAttribute('aria-label', 'Stop reading this paragraph'); }
     status.textContent = `¶ ${blocks.indexOf(activeEl) + 1}/${blocks.length}`;
-  }
-  function markPaused() {
-    if (!activeEl) return;
-    activeEl.classList.add('reading-paused');
-    const b = activeEl.querySelector('.ra-btn.ra-play');
-    if (b) { b.textContent = PLAY; b.setAttribute('aria-label', 'Resume reading'); }
-    status.textContent = 'paused';
   }
   function clearMark() {
     if (!activeEl) return;
-    activeEl.classList.remove('reading', 'reading-paused');
+    activeEl.classList.remove('reading');
     const b = activeEl.querySelector('.ra-btn.ra-play');
     if (b) { b.textContent = PLAY; b.setAttribute('aria-label', 'Read this paragraph aloud'); }
     activeEl = null;
@@ -255,16 +261,17 @@ function initReadAloud() {
     u.pitch = 1;
     activeEl = el;
     activeUtter = u;
-    wantPaused = false;
     u.onstart = () => {
       markPlaying();
       const r = el.getBoundingClientRect();
-      if (r.top < 0 || r.bottom > innerHeight) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (r.top < 0 || r.bottom > innerHeight) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
     };
     u.onend = () => {
       if (u !== activeUtter) return; // stale: this utterance was cancelled/replaced
       const wasEl = activeEl;
-      const advance = advanceBox.checked && !wantPaused;
+      const advance = advanceBox.checked;
       clearMark();
       activeUtter = null;
       if (advance && wasEl) {
@@ -289,7 +296,6 @@ function initReadAloud() {
 
   function stopAll() {
     clearTimeout(advanceTimer);
-    wantPaused = false;
     synth.cancel();
     clearMark();
     activeUtter = null;
@@ -302,7 +308,7 @@ function initReadAloud() {
   /* Chrome quirk: long utterances on some voices stall after ~15s unless
      the engine is nudged; pause+resume while speaking keeps it alive. */
   setInterval(() => {
-    if (synth.speaking && !synth.paused && !wantPaused) {
+    if (synth.speaking && !synth.paused) {
       synth.pause();
       synth.resume();
     }
