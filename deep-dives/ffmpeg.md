@@ -452,7 +452,8 @@ flowchart LR
   components, where the flags would just be typed fields.
 
 ### Trade-off 2: refcounted shared buffers over copying handoffs
-- **Tension:** raw 4K video is ~36 MB/s *per frame*; every
+- **Tension:** raw 8-bit 4K video is ~25 MB *per frame* (~1.5 GB/s
+  at 60 fps); every
   pipeline stage touching it multiplicatively would melt memory
   bandwidth.
 - **Choice:** all payload moves as `AVBufferRef` bumps; queues and

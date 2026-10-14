@@ -454,7 +454,8 @@ components, where the flags would just be typed fields.</li>
 </ul>
 <h3 id="trade-off-2-refcounted-shared-buffers-over-copying-handoffs">Trade-off 2: refcounted shared buffers over copying handoffs</h3>
 <ul>
-<li><strong>Tension:</strong> raw 4K video is ~36 MB/s <em>per frame</em>; every
+<li><strong>Tension:</strong> raw 8-bit 4K video is ~25 MB <em>per frame</em> (~1.5 GB/s
+at 60 fps); every
 pipeline stage touching it multiplicatively would melt memory
 bandwidth.</li>
 <li><strong>Choice:</strong> all payload moves as <code>AVBufferRef</code> bumps; queues and
