@@ -224,7 +224,7 @@ projects:
     license: GPL-2.0
     domains: [proxy-lb]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 4, domain_fit: 3 }
     why: >
       The load balancer that refuses to drop traffic: run queues and tasks

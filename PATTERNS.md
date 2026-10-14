@@ -91,7 +91,11 @@ drains the old generation;
 [Servo](deep-dives/servo.md) — the
 constellation thread supervises expendable pipelines (script
 threads or sandboxed child processes) and is chaos-tested against
-random pipeline death.
+random pipeline death;
+[HAProxy](deep-dives/haproxy.md) — the
+master re-executes itself per reload and the old worker hands its
+listening sockets to the new one over a socketpair, so the supervisor
+ever only owns supervision, never a single connection.
 
 **Why it recurs:** crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.
@@ -120,7 +124,10 @@ thread-local config snapshots;
 a transfer state machine that rents any foreign loop via pollsets;
 [Servo](deep-dives/servo.md) — one task-queue event loop per
 site-instance script thread implements the WHATWG event-loop
-processing model, so one page's hang cannot stall another site.
+processing model, so one page's hang cannot stall another site;
+[HAProxy](deep-dives/haproxy.md) — one poll loop per thread, but with
+the loop's own scheduler made explicit: budgeted tasklet run queues
+in ebtrees, weighted by class, policed by a CPU-time watchdog.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.

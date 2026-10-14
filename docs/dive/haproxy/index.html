@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAProxy: a proxy where every hot path runs against a visible budget — System Design Atlas</title>
+<meta name="description" content="HAProxy is the load balancer that refuses to drop traffic — the one deployed in front of banks, exchanges, and CDNs where a restart is an incident report. The design lesson this dive teaches">
+<meta property="og:title" content="HAProxy: a proxy where every hot path runs against a visible budget — System Design Atlas">
+<meta property="og:description" content="HAProxy is the load balancer that refuses to drop traffic — the one deployed in front of banks, exchanges, and CDNs where a restart is an incident report. The design lesson this dive teaches">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/haproxy/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/haproxy/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-http-request-listener-socket-to-backend-and-back">Walkthrough: one HTTP request, listener socket to backend and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>HAProxy: a proxy where every hot path runs against a visible budget</h1>
+    <div class="meta-chips"><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/haproxy/haproxy" rel="noopener">GPL-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>37f3ad8aa35bb34b2363b73541780df6c7226270</code> · 2026-10-14 · <a href="https://github.com/haproxy/haproxy" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">HAProxy is the load balancer that refuses to drop traffic — the one
+deployed in front of banks, exchanges, and CDNs where a restart is an
+incident report. The design lesson this dive teaches is <strong>latency
+discipline as architecture</strong>: nothing in the hot path may block, burst,
+or grow without bound, and every one of those constraints is a <em>visible,
+counted budget in the code</em> — a run-queue depth the scheduler drains in
+weighted slices, a three-level accept counter, a global buffer pool with
+a waiting list, per-thread memory caches measured in bytes. Connections
+are not threads: each is a small state machine (session → stream) riding
+a task scheduled on per-thread elastic-binary-tree run queues, woken by
+edge-triggered pollers. And reloads are honest about what a proxy
+actually owns: the master re-executes the binary and the <em>old</em> worker
+hands its listening sockets to the new worker over a socketpair, so the
+front door never closes.</p>
+<p>Read it against <a href="../nginx/">nginx</a> (same problem, process-per-worker and
+config-reload generation) and <a href="../envoy/">Envoy</a> (same era, API-driven
+control plane): HAProxy is the maximalist answer to &quot;what if the
+scheduler itself is the product&quot; — compare its budgeted tasklet
+scheduler with <a href="../libuv/">libuv</a>&#39;s phases or <a href="../redis/">Redis</a>&#39;s
+single loop.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A restaurant where every waiter works alone with a to-do list that is
+never allowed to get long.</strong> Each waiter (a thread) has a to-do list
+ordered by when you wrote the item down (the run queue, an elastic
+binary tree keyed by a counter), plus an alarm-clock shelf (the timer
+tree) where sticky notes ring at set times (task expiry ticks). The
+kitchen door bell (the poller, epoll) never rings twice for the same
+thing — the waiter remembers &quot;door said ready&quot; (the ready/active bits)
+so it only re-checks what actually went quiet. When a waiter gets an
+order that takes too long, they slice it and put the rest back on the
+list (a task yielding) — because the manager (the watchdog timer)
+panics and fires anyone stuck for more than a second. Trays (buffers)
+come from a shared tray pool and every waiter keeps a small private
+stack (the thread-local pool cache); when trays run out, waiters queue
+at the counter (the buffer wait queue) and the kitchen wakes exactly as
+many as trays freed up. And when the restaurant changes its menu (a
+config reload), the old shift doesn&#39;t close the doors: the new shift
+lines up behind them and the old shift <em>hands over the front-door keys</em>
+(the listening sockets, passed as file descriptors) before clocking
+out.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a proxy at a million connections
+cannot afford to block, to thrash a shared lock, or to allocate without
+a ceiling — so the design makes every limit an explicit, countable
+thing the code checks before doing work, instead of hoping the OS
+behaves.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph master[&quot;master process — src/mworker.c:1249 mworker_loop&quot;]
+        ML[&quot;signals, child supervision,&lt;br/&gt;CLI socketpair to each worker&quot;]
+        RE[&quot;reload: mworker_reexec :329&lt;br/&gt;exec self with -x sockpair@N&quot;]
+    end
+
+    subgraph worker[&quot;worker process (per reload generation)&quot;]
+        subgraph threads[&quot;threads (one per CPU, grouped by NUMA locality)&quot;]
+            T0[&quot;thread 0: run_poll_loop&lt;br/&gt;src/haproxy.c:3042&quot;]
+            T1[&quot;thread 1..N&quot;]
+        end
+    end
+
+    subgraph loop[&quot;one thread&#39;s loop body&quot;]
+        WET[&quot;wake_expired_tasks&lt;br/&gt;src/task.c:345 (timer ebtree)&quot;]
+        PRT[&quot;process_runnable_tasks&lt;br/&gt;src/task.c:714 (budgeted, weighted)&quot;]
+        POLL[&quot;cur_poller.poll&lt;br/&gt;src/ev_epoll.c (edge-triggered)&quot;]
+    end
+
+    subgraph spine[&quot;the request spine (all as tasks/tasklets)&quot;]
+        ACC[&quot;sock_accept_iocb src/sock.c:892&lt;br/&gt;→ listener_accept src/listener.c:1342&quot;]
+        RING[&quot;accept_queue_ring handoff&lt;br/&gt;include/haproxy/listener-t.h:311&quot;]
+        SESS[&quot;session_accept_fd src/session.c:218&lt;br/&gt;→ conn_complete_session :573&quot;]
+        MUX[&quot;mux h1c/h2c: h1_process&lt;br/&gt;src/mux_h1.c:4204&quot;]
+        STRM[&quot;stream_new src/stream.c:352&lt;br/&gt;process_stream :1878&quot;]
+        LB[&quot;assign_server_and_queue&lt;br/&gt;src/backend.c:978 → fwrr src/lb_fwrr.c:562&quot;]
+        CS[&quot;connect_server src/backend.c:1811&lt;br/&gt;server conn pools / reuse&quot;]
+    end
+
+    ML --&gt;|&quot;fork&quot;| worker
+    RE -.-&gt;|&quot;execvp&quot;| master
+    T0 --&gt; loop
+    T1 --&gt; loop
+    ACC --&gt; RING --&gt; SESS --&gt; MUX --&gt; STRM --&gt; LB --&gt; CS
+    POLL --&gt; ACC
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Process model:</strong> with <code>-W</code> (today, <code>master-worker</code>), a small master
+supervises one worker process per configuration generation
+(<code>src/mworker.c:1249 mworker_loop</code> — it runs the same poll loop with
+jobs=1, mostly to catch signals and child deaths). The worker is the
+data plane: threads pinned one per CPU, arranged in <em>thread groups</em>
+by cache locality (<code>doc/design-thoughts/thread-group.txt</code>; <code>tg_ctx</code>,
+<code>tgid</code> in <code>include/haproxy/thread-t.h</code>) so a &gt;64-thread machine
+doesn&#39;t pay cross-socket cache-line rent on every wakeup.</li>
+<li><strong>Each thread is a complete scheduler + poller.</strong> The loop
+(<code>src/haproxy.c:3042 run_poll_loop</code>) does exactly three things:
+wake expired timers, drain a budgeted slice of runnable tasks, sleep
+in the poller until the next timer. Everything else in HAProxy —
+proxying, health checks, DNS, the CLI, Lua — exists as tasks or
+tasklets queued into that loop. This is rule 7 of the project&#39;s own
+<code>doc/internals/core-principles.txt</code>: no blocking calls, no long
+loops, complex processing must be split into small steps and yield.</li>
+<li><strong>Layers under a stream, bottom-up:</strong> poller (<code>src/ev_*.c</code>) reports
+FD readiness into <code>fdtab[]</code>; <code>sock_conn_iocb</code>
+(<code>src/sock.c:1090</code>) drives the <em>connection</em>; an XPRT stack (raw,
+SSL…) carries it; a <em>mux</em> (h1c/h2c/qcc — <code>conn_install_mux_fe</code>,
+<code>src/connection.c:349</code>) demultiplexes it into per-request <em>streams</em>
+through a stream connector (<code>stconn</code>); the stream
+(<code>process_stream</code>, <code>src/stream.c:1878</code>) runs analysers, picks a
+backend server, and bridges the two sides over <code>struct buffer</code>s.
+The naming rule (<code>doc/internals/core-principles.txt</code> §8): <code>*c</code> =
+per-connection, <code>*s</code> = per-stream.</li>
+<li><strong>Where the spine is:</strong> client socket → <code>sock_accept_iocb</code> →
+<code>listener_accept</code> → (maybe another thread&#39;s ring) →
+<code>session_accept_fd</code> → <code>h1_process</code> → <code>stream_new</code> →
+<code>process_stream</code> → <code>assign_server_and_queue</code> → <code>fwrr_get_next_server</code>
+→ <code>connect_server</code> → backend mux → response in reverse. The
+Walkthrough walks exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-http-request-listener-socket-to-backend-and-back">Walkthrough: one HTTP request, listener socket to backend and back</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as client
+    participant L as listener_accept (thread A)
+    participant R as accept_queue_ring (thread B)
+    participant M as h1c mux (thread B)
+    participant S as stream task (thread B)
+    participant U as backend conn (pool)
+
+    C-&gt;&gt;L: TCP connect
+    L-&gt;&gt;L: budgets: maxaccept, cps/sps freq ctrs, 3-level CAS counts
+    L-&gt;&gt;R: ring push (least-loaded thread picks up)
+    R-&gt;&gt;M: session_accept_fd → session; mux installed
+    M-&gt;&gt;M: h1_process parses request → h1c_frt_stream_new
+    M-&gt;&gt;S: stream_new allocates from pool; stream task queued
+    S-&gt;&gt;S: process_stream: analysers, rules, headers
+    S-&gt;&gt;S: assign_server_and_queue → fwrr_get_next_server
+    S-&gt;&gt;U: connect_server (or reuse idle conn)
+    U--&gt;&gt;S: h1s back side demuxes response
+    S--&gt;&gt;C: mux encodes to h1c obuf → sock_conn_iocb sends
+    S-&gt;&gt;S: stream released; buffers offered to waiters
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="accept-under-budget">Accept under budget</h3>
+<p>The listener&#39;s fd callback
+<code>sock_accept_iocb</code> (<code>src/sock.c:892</code>) calls <code>listener_accept</code>
+(<code>src/listener.c:1342</code>). Before touching <code>accept()</code>, the code checks
+its budgets: <code>maxaccept</code> per wake, global and frontend conn/sess
+per-second frequency counters (<code>freq_ctr_remain</code>), then pre-increments
+three counters — listener <code>nbconn</code>, proxy <code>feconn</code>, process <code>actconn</code> —
+each by CAS with a planned rollback, so a full listener <em>pauses itself</em>
+by re-arming with a timer instead of accepting and dropping.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="hand-the-connection-to-the-least-busy-thread">Hand the connection to the least busy thread</h3>
+<p>If the
+listener is bound to several threads, the accepting thread doesn&#39;t keep
+the connection: it pushes it onto a per-thread lock-free ring
+(<code>struct accept_queue_ring</code>, <code>include/haproxy/listener-t.h:311</code> —
+1024 slots, 16-bit head/tail packed in one atomic word,
+<code>accept_queue_push_mp</code> at <code>src/listener.c:124</code>), waking that thread&#39;s
+tasklet. Two rotating indexes pick the least-loaded thread: round-robin
+for short connections, by connection count for long ones — work is
+<em>moved</em>, never shared.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="a-session-not-yet-a-request">A session, not yet a request</h3>
+<p>On the owning thread,
+<code>session_accept_fd</code> (<code>src/session.c:218</code>) allocates a <code>session</code> (the
+client connection&#39;s lifetime) from a pool, runs L4/L5 rules, and
+<code>conn_complete_session</code> (<code>src/session.c:573</code>) installs the frontend
+mux chosen by the listener (<code>conn_install_mux_fe</code>,
+<code>src/connection.c:349</code>). At this point there is still no HTTP anywhere.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-mux-parses-a-stream-is-born">The mux parses; a stream is born</h3>
+<p>When bytes arrive, the
+H1 mux task runs <code>h1_process</code> (<code>src/mux_h1.c:4204</code>): it peeks the
+buffer for an HTTP/2 preface (an upgrade path!), else parses the
+request with <code>h1_process_demux</code>, creating the <code>h1s</code> via
+<code>h1c_frt_stream_new</code> (<code>src/mux_h1.c:981</code>), which calls <code>stream_new</code>
+(<code>src/stream.c:352</code>) — the per-request state machine, pool-allocated,
+with its own task. Data crosses the mux/stream boundary as HTX blocks,
+not raw bytes.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-stream-task-runs-the-rules">The stream task runs the rules</h3>
+<p><code>process_stream</code>
+(<code>src/stream.c:1878</code>) is the proxy proper: it syncs receives on both
+sides, runs the analyser chain (TCP rules, HTTP processing, ACLs,
+header rewrites), and — critically — never loops waiting: if it cannot
+get a buffer, <code>stream_alloc_work_buffer</code> (<code>src/stream.c:824</code>) queues
+the stream on the buffer wait list and the task yields
+(<code>t-&gt;expire = TICK_ETERNITY</code>, <code>goto leave</code>). A loop detector even
+crashes the process with a dump if a stream wakes 100k times without
+progress (<code>stream_dump_and_crash</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="pick-a-server-from-a-tree">Pick a server from a tree</h3>
+<p><code>assign_server_and_queue</code>
+(<code>src/backend.c:978</code>) calls the configured LB lookup; for
+<code>roundrobin</code> it is <code>fwrr_get_next_server</code> (<code>src/lb_fwrr.c:562</code>):
+servers live in two eb32 trees (&quot;init&quot;/&quot;next&quot;) keyed by position;
+picking a server takes <code>eb32_first</code>, then <code>fwrr_update_position</code>
+re-queues it at <code>pos + weight/eweight</code> — weighted round-robin as tree
+insertion, O(log n) picks with the tree doing the fairness math.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="connect-or-reuse-and-answer">Connect (or reuse) and answer</h3>
+<p><code>connect_server</code>
+(<code>src/backend.c:1811</code>) takes an idle pooled backend connection if
+safe-mode allows, else creates one (the backend mux may be H2, so one
+socket carries many streams). The response walks the mirror image:
+backend <code>h1s</code> demux → stream → frontend mux encodes into <code>h1c-&gt;obuf</code> →
+<code>sock_conn_iocb</code> sends. The stream then frees its buffers, and
+<code>__offer_buffers</code> (<code>src/dynbuf.c:128</code>) wakes exactly as many waiters
+from the buffer queues as buffers were released — the global memory
+budget enforcing itself.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="counted-at-every-step-never-blocked-anywhere">Counted at every step, never blocked anywhere</h3>
+<p>The
+connection either completed, was retried, or was refused <em>early</em> —
+maxconn fullness pauses the listener, not the kernel&#39;s backlog; buffer
+exhaustion parks streams instead of ballooning memory; and no mutex was
+ever held across a syscall on this path.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong>The task + per-thread run queue / timer tree.</strong>
+<strong>What:</strong> <code>struct task</code> (process fn, context, <code>state</code> bits, <code>nice</code>,
+<code>expire</code>, and two eb32 nodes <code>rq</code>/<code>wq</code>); <code>struct tasklet</code> — the
+smaller cousin without timers. Per thread: <code>th_ctx-&gt;rqueue</code> (eb32
+keyed by <code>rqueue_ticks</code> + <code>nice * runqueue_depth</code> offset — niceness
+<em>is</em> the tree key, <code>__task_wakeup</code>, <code>src/task.c:218</code>) and
+<code>th_ctx-&gt;timers</code> (eb32 keyed by expiry tick, <code>__task_queue</code>,
+<code>src/task.c:295</code>).
+<strong>Why:</strong> the run queue&#39;s key trick makes priority scheduling free —
+a nice&#39;d task is inserted &quot;in the past/future&quot; of the same tree, no
+second structure. And the tree is an <strong>ebtree</strong>:
+<code>include/import/ebtree.h:170</code> documents deletion as
+<code>min=1, max=1, avg=1</code> — a task can be woken, re-queued, killed, and
+moved between threads with O(1) removal from the queue, which a heap
+or red-black tree cannot promise.</p>
+</li>
+<li><p><strong><code>fdtab[]</code> — a per-direction 2-bit state machine, not &quot;events&quot;.</strong>
+<strong>What:</strong> each entry has <code>state</code> with <em>active</em> and <em>ready</em> bits per
+direction (the full diagram is a comment at <code>src/fd.c:1–53</code>), an
+<code>iocb</code> callback, and membership in per-thread update lists. Pollers
+only compute <code>if (active &amp;&amp; !ready) poll</code>.
+<strong>Why:</strong> &quot;ready&quot; caches the last EAGAIN, so an FD reported ready
+that goes quiet again stops generating events — the condition for
+<em>edge-triggered</em> epoll correctness — and cross-thread FD migration
+(<code>fd_takeover</code>, used by connection takeover between thread groups)
+becomes a matter of moving who owns the update, not fighting over
+epoll registrations.</p>
+</li>
+<li><p><strong><code>struct buffer</code> + the buffer wait queue.</strong>
+<strong>What:</strong> a 4-word struct — <code>size</code>, <code>area</code>, <code>data</code>, <code>head</code>
+(<code>include/haproxy/buf-t.h:34</code>) describing a wrapping window; storage
+comes from the buffer pool, and when the global budget
+(<code>tune.buffers.limit</code>) is exhausted, waiters register a
+<code>buffer_wait</code> on per-thread priority queues
+(<code>b_requeue</code>, <code>include/haproxy/dynbuf.h:265</code>).
+<strong>Why:</strong> making the buffer an inline 4-word header lets <em>any</em>
+container own zero-copy data in transit, and making buffer
+acquisition fallible turns total memory into a scheduler-visible
+condition: streams park, get woken precisely when buffers free
+(<code>__offer_buffers</code>, <code>src/dynbuf.c:128</code>), and the OOM killer never
+enters the story.</p>
+</li>
+<li><p><strong>The pool cache — three-tier recycling.</strong>
+<strong>What:</strong> every runtime type (<code>connection</code>, <code>stream</code>, <code>task</code>…) has a
+<code>pool_head</code>; allocation tries the thread-local cache first
+(<code>pool_get_from_cache</code>, <code>include/haproxy/pool.h:305</code> — hottest
+object first, LRU on the side), refills from the shared cache, then
+from mmap. Per-thread <code>pool_cache_bytes</code>/<code>pool_cache_count</code> are
+tracked so caches can be trimmed (<code>pool_evict_from_local_cache</code>,
+<code>src/pool.c:745</code>).
+<strong>Why:</strong> the caches are sized and counted <em>in bytes</em>, because the
+project treats memory as a budget to be displayed (<code>show info</code>&#39;s
+pools stats), not an implementation detail of malloc — core
+principle #3: &quot;pools are used for runtime allocation; malloc/free
+are for boot code only.&quot;</p>
+</li>
+<li><p><strong><code>accept_queue_ring</code> — cross-thread handoff without a lock.</strong>
+<strong>What:</strong> a 1024-slot ring per thread; <code>idx</code> is one atomic word
+holding 16-bit head and tail; multi-producer push via CAS retry,
+single-consumer pop by the owner tasklet
+(<code>src/listener.c:80 pop_sc</code>, <code>:124 push_mp</code>).
+<strong>Why:</strong> the alternative — a shared accept mutex or letting the
+kernel&#39;s single accept queue decide placement — serializes the very
+front of the hot path. The ring makes thread placement a
+micro-decision costing one CAS, in the same family as <a href="../envoy/">Envoy&#39;s
+connection balancer</a> and <a href="../memcached/">Memcached&#39;s accept
+round-robin</a>.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph mw[&quot;reload choreography&quot;]
+        M0[&quot;master (gen 1)&quot;] --&gt;|&quot;SIGHUP: execvp self, -x sockpair@N&quot;| M1[&quot;master (gen 2)&quot;]
+        M1 --&gt;|&quot;fork&quot;| W2[&quot;worker gen 2&quot;]
+        W0[&quot;worker gen 1&lt;br/&gt;_getsocks CLI :2821&quot;] --&gt;|&quot;SCM_RIGHTS: listener FDs&quot;| W2
+        W2 --&gt;|&quot;READY on ipc socketpair&quot;| M1
+        M1 --&gt;|&quot;SIGTERM (-sf)&quot;| W0
+    end
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Threads share nothing on the hot path.</strong> Each thread has its own
+run queue, timers, update lists, trash chunks, pool caches, and
+buffer queues; cross-thread activity happens by queuing <em>to the
+other thread</em> (<code>__task_wakeup</code> posting into
+<code>rqueue_shared</code> under a spinlock, or <code>shared_tasklet_list</code> as an
+mt-list). The only locks are spinlocks and RW locks —
+<code>core-principles.txt</code> §6 bans sleeping locks outright, because a
+thread preempted while spinning is survivable but a thread
+preempted on a mutex with the fdtab half-updated is not.</li>
+<li><strong>The watchdog makes latency a hard contract.</strong> Each thread arms a
+POSIX CPU-time timer; <code>wdt_handler</code> (<code>src/wdt.c:66</code>) warns after
+<code>warn-blocked-traffic-after</code> ms (default 100) of no scheduler
+progress and, past one second, marks <code>TH_FL_STUCK</code> so the <em>next</em>
+pass calls <code>ha_panic()</code> — fail-fast as a scheduling policy, the
+same verdict as <a href="../envoy/">Envoy&#39;s guard dog</a> but enforced on CPU
+time, not wall clock.</li>
+<li><strong>Crash of a worker is an incident, not an outage:</strong> the master
+restarts it (children supervised in <code>mworker_catch_sigchld</code>,
+<code>src/mworker.c:570</code>); in-flight connections on that worker are lost,
+the listening sockets are not — which is why the <em>master</em>, not the
+worker, is the process expected to stay up.</li>
+<li><strong>Reload is the interesting failure path:</strong> SIGHUP → master
+re-executes itself with <code>-sf &lt;old pids&gt; -x sockpair@N</code>
+(<code>mworker_reexec</code>, <code>src/mworker.c:329</code>); the new worker, before
+binding, sends <code>_getsocks</code> over the socketpair and the old worker
+streams its listener FDs + metadata via SCM_RIGHTS with ack
+flow control (<code>sock_get_old_sockets</code>, <code>src/sock.c:469</code>; sender
+<code>_getsocks</code>, <code>src/cli.c:2821</code>). The new worker binds by <em>reusing</em>
+those FDs, signals READY, and only then does the master TERM the
+old worker, which drains in-flight streams (<code>stopping</code> in
+<code>run_poll_loop</code>) and exits. Not one SYN is lost.</li>
+<li><strong>Backpressure is layered budgets:</strong> accept-rate frequency counters
+and 3-level maxconn gate the front door (<code>listener_accept</code>);
+<code>maxqueue</code> per server bounds waiting streams; the buffer pool
+parks streams that would otherwise balloon memory; and
+<code>runqueue_depth</code> (default 280, auto-scaled ~1/√threads,
+<code>src/haproxy.c:2491</code>) bounds scheduler latency per poll iteration.
+Overload shows up as <em>deliberate pauses with timers</em>, never as
+unbounded queues.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The operator API is a configuration grammar + a runtime CLI.</strong>
+Config keywords self-register in linked lists
+(<code>struct cfg_kw_list</code>, <code>cfg_register_keywords</code> — every subsystem&#39;s
+parser from <code>src/cfgparse*.c</code>), which is how HAProxy grows keywords
+without a central switch. The same self-registration produces the
+runtime API: CLI keywords, <code>show info</code>/<code>show stat</code> fields, and the
+master CLI reached over the very socketpairs that supervise workers.</li>
+<li><strong>Internal seams are vtables at every layer boundary:</strong> <code>struct protocol</code> (accept/bind/connect per socket family — <code>sockpair@</code>,
+<code>abns@</code>, <code>unix@</code> are <em>protocol families</em>, <code>src/proto_sockpair.c</code>),
+<code>struct xprt_ops</code> (raw/SSL handshakes as stackable transports),
+<code>struct mux_ops</code> (h1/h2/FCGI/QCP — registered via
+<code>register_mux_proto</code>, chosen by ALPN/protocol sniffing), <code>struct poller</code> (epoll/kqueue/evports/poll/select self-register and are
+benchmarked at boot — <code>src/ev_*.c</code>), LB algorithms as whole files
+behind <code>lbprm</code> (<code>src/lb_fwrr.c</code>, <code>lb_fwlc.c</code>, <code>lb_chash.c</code>…), and
+filters (<code>src/flt_*.c</code>) inside the stream.</li>
+<li><strong>Out-of-process extension exists too:</strong> Lua actions/fetches
+(<code>doc/lua.txt</code>) and SPOE for external agents — but they run as
+<em>applets in the scheduler</em>, subject to the same yield rules as
+everything else, which is why a slow Lua loop cannot stall a thread
+(the watchdog would kill it).</li>
+<li><strong>Honest wart:</strong> the extension surface is compile-time. There is no
+plugin ABI like <a href="../nginx/">nginx</a> modules or <a href="../envoy/">Envoy</a>&#39;s
+extensions; adding a keyword or mux means rebuilding HAProxy. The
+grammar&#39;s string-array parsing (<code>char **args</code>) also shows its
+1990s C roots — <code>strconv</code> helpers everywhere, and keyword conflicts
+between sections are resolved by registration order. The price of
+&quot;everything is a registered keyword&quot; is that the <em>contract</em> users
+actually program against (the config file) has no formal schema.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-tasks-under-an-explicit-scheduler-over-a-thread-per-connection">Trade-off 1: tasks under an explicit scheduler over a thread per connection</h3>
+<ul>
+<li><strong>Tension:</strong> hundreds of thousands of concurrent connections cannot
+each afford a thread&#39;s stack and context switches, but a single
+loop can be starved by one expensive connection.</li>
+<li><strong>Choice:</strong> every activity is a task/tasklet on per-thread run
+queues; the scheduler runs a <em>weighted, budgeted slice</em> per loop —
+five tasklet classes (RT/URGENT/NORMAL/BULK/HEAVY) get fair shares
+of <code>runqueue_depth</code> (weights 1/64/60/4/1,
+<code>process_runnable_tasks</code>, <code>src/task.c:714</code>), and long operations
+must split themselves and yield (core principle #7).</li>
+<li><strong>Evidence:</strong> <code>src/task.c:714 process_runnable_tasks</code> — the weights
+table and the HEAVY cap that throttles self-wakers (e.g. SSL
+handshakes) to protect latency; <code>src/haproxy.c:3042 run_poll_loop</code>
+calling it between timer wakes and polls; the watchdog
+(<code>src/wdt.c:66</code>) that turns a violation into a crash.</li>
+<li><strong>Given up:</strong> the simplicity of blocking code — every protocol
+handler is a resumable state machine; and per-connection CPU
+isolation (a thread-per-connection design pins a bad actor to one
+core, HAProxy&#39;s budgets only <em>bound</em> it).</li>
+<li><strong>Verdict:</strong> right at proxy scale, where per-connection work is
+tiny and I/O-bound; it is the same bet <a href="../nginx/">nginx</a> took with
+state machines, but HAProxy went further and made the <em>scheduler
+itself</em> fair and observable. Wrong for systems whose per-connection
+work is CPU-heavy and irregular — there you want workers you can
+saturate (PATTERNS.md #4 territory) or per-stream
+processes.</li>
+</ul>
+<h3 id="trade-off-2-process-replacement-reload-with-fd-handoff-over-a-live-config-api">Trade-off 2: process-replacement reload with FD handoff over a live config API</h3>
+<ul>
+<li><strong>Tension:</strong> routing rules must change without dropping connections
+or SYN packets, but the operator&#39;s source of truth is a file, not a
+control plane.</li>
+<li><strong>Choice:</strong> reload = new process. The master re-execs and the new
+worker <em>pulls</em> the listening sockets from the old worker
+(<code>_getsocks</code> over a socketpair, SCM_RIGHTS), binds by reuse, then
+the old generation drains.</li>
+<li><strong>Evidence:</strong> <code>src/mworker.c:329 mworker_reexec</code> (the <code>-x sockpair@N</code> argv dance); <code>src/sock.c:469 sock_get_old_sockets</code>
+(socketpair-in-socketpair, ack-per-batch flow control);
+<code>src/cli.c:2821 _getsocks</code> (sender walks receivers, sends FD +
+path/iface metadata); <code>src/haproxy.c:4030+</code> the READY handshake.</li>
+<li><strong>Given up:</strong> instant, per-object config changes (Envoy&#39;s xDS
+streams updates without touching processes); cheap frequent
+reconfiguration; and any state that is not sockets must be rebuilt
+(stick tables sync is limited, Lua state restarts).</li>
+<li><strong>Verdict:</strong> exactly right when the config is file-declared and
+reloads are occasional events, because process replacement is the
+strongest garbage collection there is — leaked state, fragmented
+memory, and half-applied config all die with the old worker.
+Wrong when config churns per-second; that is the world where
+<a href="../envoy/">Envoy&#39;s</a> subscription API wins by design.</li>
+</ul>
+<h3 id="trade-off-3-counted-budgets-over-dynamic-resource-absorption">Trade-off 3: counted budgets over dynamic resource absorption</h3>
+<ul>
+<li><strong>Tension:</strong> under overload, a proxy either refuses early or dies
+late; the OS defaults (malloc growth, listen backlog, accept rate)
+refuse nothing and just degrade.</li>
+<li><strong>Choice:</strong> every unbounded resource has a visible budget and a
+backpressure behavior: pools report bytes, caches trim themselves,
+buffer allocation queues, listeners pause on maxconn/rate limits,
+the run queue runs in slices.</li>
+<li><strong>Evidence:</strong> <code>include/haproxy/pool.h:305 pool_get_from_cache</code> +
+<code>pool_cache_bytes</code> accounting; <code>src/dynbuf.c:128 __offer_buffers</code>
+(wake N waiters for N freed buffers); <code>src/listener.c:1342 listener_accept</code>&#39;s <code>freq_ctr_remain</code> gates and CAS&#39;d
+listener/proxy/process counters; <code>src/haproxy.c:2491</code>&#39;s
+√threads-scaled <code>runqueue_depth</code>.</li>
+<li><strong>Given up:</strong> peak throughput per connection (a check-then-work
+step on every hot path) and simplicity — budgets must be tuned,
+and a budget set too low <em>is</em> the outage you were avoiding.</li>
+<li><strong>Verdict:</strong> right for infrastructure whose failure mode must be
+&quot;slower, visibly&quot; rather than &quot;dead, silently&quot;. For a
+latency-microoptimized inner loop (per-packet work), the checks
+would be overhead; HAProxy gets away with it because its budget
+checks are a few atomics against memory it already owns.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>doc/internals/core-principles.txt</code> — the project&#39;s own rules;
+read §3 (pools), §6 (no sleeping locks), §7 (tasks must yield)
+before any code. This file is the design doc the code obeys.</li>
+<li><code>src/haproxy.c:3042 run_poll_loop</code> — the entire loop in 100
+lines: wake timers, run tasks, decide sleep, poll. Everything
+else hangs off it.</li>
+<li><code>src/task.c:714 process_runnable_tasks</code> — the budgeted scheduler:
+the five tasklet classes, the weights table, the HEAVY cap, the
+local/shared run-queue merge, then <code>run_tasks_from_lists</code>.</li>
+<li><code>src/task.c:218 __task_wakeup</code> + <code>:295 __task_queue</code> — how a task
+enters the run queue (key = tick + nice offset) and the timer
+tree (key = expiry); notice both are ebtrees and why deletion is
+O(1).</li>
+<li><code>src/fd.c:1–53</code> — the per-direction active/ready state machine as
+a comment; then <code>fd_update_events</code> (<code>src/fd.c:678</code>) and the iocb
+dispatch loop. This is what makes edge-triggered epoll safe.</li>
+<li><code>src/ev_epoll.c</code> — <code>__do_poll</code>: epoll_wait results folded into
+<code>fdtab[]</code> state, never delivered directly; compare with how
+<code>poll</code> would do it in <code>src/ev_poll.c</code>.</li>
+<li><code>src/listener.c:1342 listener_accept</code> — accept under budgets:
+freq counters, three CAS&#39;d counters with rollback, then the
+ring-balancing logic below it (<code>accept_queue_push_mp</code> at
+<code>src/listener.c:124</code>).</li>
+<li><code>src/session.c:218 session_accept_fd</code> → <code>:573 conn_complete_session</code> — the session layer: L4/L5 rules, mux
+install; note the embryonic session <em>task</em> that keeps the
+handshake alive without a stream yet.</li>
+<li><code>src/mux_h1.c:4204 h1_process</code> — bytes to streams: preface
+peeking (H2 upgrade), <code>h1c_frt_stream_new</code> (<code>:981</code>),
+<code>h1_process_demux</code>, error paths that recycle the connection for
+the next request (keep-alive as mux state).</li>
+<li><code>src/stream.c:352 stream_new</code> → <code>:1878 process_stream</code> — the
+proxy&#39;s brain: sync receives, analyser flags, the buffer-wait
+yield (<code>stream_alloc_work_buffer</code>, <code>:824</code>), and the
+call-rate loop detector that crashes on pathological wakeups.</li>
+<li><code>src/backend.c:978 assign_server_and_queue</code> →
+<code>src/lb_fwrr.c:562 fwrr_get_next_server</code> — weighted round robin
+as two rotating eb32 trees; then <code>src/backend.c:1811 connect_server</code> for the backend-side connection lifecycle and
+reuse accounting.</li>
+<li><code>src/mworker.c:329 mworker_reexec</code> → <code>src/sock.c:469 sock_get_old_sockets</code> → <code>src/cli.c:2821 _getsocks</code> — the reload
+spine end to end: re-exec, socketpair bootstrap, <code>_getsocks</code>
+CLI, SCM_RIGHTS batches with acks, and finally the READY/TERM
+handoff in <code>src/mworker.c:570 mworker_catch_sigchld</code>.</li>
+</ol>
+<p>You have now traced one request from SYN to response through
+scheduler, poller, listener, session, mux, and stream — and one
+seamless reload from SIGHUP to old-worker exit, without losing a
+socket.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make every unbounded resource a counted budget with a park path</strong>
+— run-queue depth, buffer waiters, accept rates: the pattern
+(<code>freq_ctr_remain</code> gates, <code>__offer_buffers</code> waking exactly N
+waiters) applies to any server that must degrade gracefully.</li>
+<li><strong>Put priority in the queue key, not in a second structure</strong> —
+<code>__task_wakeup</code> adding <code>nice * runqueue_depth</code> to the ebtree key
+is a one-line trick for any sorted work queue.</li>
+<li><strong>Choose trees with O(1) deletion for hot mutable queues</strong> —
+ebtrees for timers and run queues; most queues are removed-from
+more than searched, which is exactly what ebtree&#39;s unbalanced
+design buys (<code>include/import/ebtree.h:170</code>).</li>
+<li><strong>Hand work across threads by ring, not by lock</strong> —
+<code>accept_queue_ring</code>&#39;s packed-head/tail word plus one tasklet
+consumer is the minimal honest cross-thread queue.</li>
+<li><strong>Let the supervisor own only the sockets, and hand them between
+generations with SCM_RIGHTS</strong> — reload semantics that keep the
+front door open without sharing memory between old and new code
+(<code>_getsocks</code> over a socketpair).</li>
+<li><strong>Arm a watchdog on CPU time, not wall time</strong> — <code>wdt_handler</code>
+distinguishes &quot;slow but progressing&quot; from &quot;stuck&quot;, warns at 100ms,
+panics at 1s; steal the two-stage warn/panic before it kills you.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 9–10 hours; split into
+runtime (scheduler/poller/fd) and request path (mux/stream/LB), and
+save the reload choreography for a third sitting — it crosses three
+files and two processes.</li>
+<li>Prerequisites: comfortable C (macros, <code>container_of</code>, atomics);
+epoll edge-triggered semantics (the <a href="../libuv/">libuv</a> dive helps);
+HTTP/1.1 framing; timer-wheel alternatives (why a tree beats a
+linear heap here needs only big-O intuition). No prior
+load-balancer knowledge required.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>doc/internals/core-principles.txt</code> in the repo — the project&#39;s
+own constitution; the rare design doc the code still obeys.</li>
+<li><code>doc/internals/sched.pdf</code> (and <code>sched.fig</code>) — Willy Tarreau&#39;s
+original scheduler design notes; read after section 1.</li>
+<li><code>doc/design-thoughts/thread-group.txt</code> — the NUMA thread-group
+design that split <code>tid</code> from <code>tgid</code>.</li>
+<li><code>doc/internals/mworker.md</code> and <code>doc/internals/fd-migration.txt</code> —
+the master-worker and FD-takeover designs behind section 3.</li>
+<li>Willy Tarreau&#39;s HAProxy talks and write-ups (the &quot;20 years of
+HAProxy&quot; series) for the history of decisions this dive sees the
+current shape of.</li>
+<li>The <a href="../nginx/">nginx</a>, <a href="../envoy/">Envoy</a>, and <a href="../memcached/">Memcached</a>
+dives in this atlas — the other three answers to &quot;how should a
+proxy handle concurrency&quot;: worker processes, worker threads with
+snapshots, and rented loops.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../servo/"><span class="dir">← Previous dive</span>Servo: a browser engine as a supervised graph of message-passing pipelines</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 28 of 28 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
