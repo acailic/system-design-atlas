@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">25 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">26 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -225,6 +225,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A factory where every machine speaks the same plug. Packages arrive from trucks (the demuxers take containers apart into packets — still-wrapped presents). Unwrapping machines ( decoders ) open…</span>
   <span class="dc-meta"><span class="chip domain">media</span><span class="chip domain">networking</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/pytorch/" data-domains="ml-framework">
+  <span class="dc-name">PyTorch</span>
+  <span class="dc-headline">the forward pass that records its own graph</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every cook writes a receipt for what they made, and at closing time a cleanup crew walks the receipts backwards to pay everyone back. When you order (call torch.mul in Python),…</span>
+  <span class="dc-meta"><span class="chip domain">ml-framework</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -256,7 +262,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 25 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 26 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -346,7 +352,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>ml-framework <span class="count">(2)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/pytorch/pytorch" rel="noopener">PyTorch ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/pytorch/">PyTorch</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A tensor library that became the dominant training framework via one architectural bet: define-by-run autodiff, where the forward pass records a dynamic graph and backward walks it. Teaches how to layer an eager…</div></li>
 <li><span class="cat-name"><a href="dive/llama-cpp/">llama.cpp</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">LLM inference with no framework: ggml tensors, memory-mapped weight files, quantization as first-class, graph-built-per-model eval loops. Teaches performance engineering as architecture — how batching, KV cache…</div></li></ul>

@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyTorch: the forward pass that records its own graph — System Design Atlas</title>
+<meta name="description" content="PyTorch is a tensor library that became the dominant ML training framework through one architectural bet: define-by-run autodiff. There is no graph-building phase separate from computation —">
+<meta property="og:title" content="PyTorch: the forward pass that records its own graph — System Design Atlas">
+<meta property="og:description" content="PyTorch is a tensor library that became the dominant ML training framework through one architectural bet: define-by-run autodiff. There is no graph-building phase separate from computation —">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/pytorch/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/pytorch/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-multiply-recorded-then-walked-backwards">Walkthrough: one multiply recorded, then walked backwards</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>PyTorch: the forward pass that records its own graph</h1>
+    <div class="meta-chips"><span class="chip domain">ml-framework</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/pytorch/pytorch" rel="noopener">BSD-3-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>4290a8548a523d960de21ae86fec8eaa9803c5b1</code> · 2026-10-13 · <a href="https://github.com/pytorch/pytorch" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">PyTorch is a tensor library that became the dominant ML training
+framework through one architectural bet: <strong>define-by-run
+autodiff</strong>. There is no graph-building phase separate from
+computation — every eager <code>a * b</code> call <em>is</em> graph construction. The
+call flows from Python through a generated C++ binding into a
+central dispatcher, which routes to an autograd kernel whose job is
+twofold: run the real kernel for the backend, and leave a receipt
+(a <code>Node</code>) on the output tensor describing how to invert the
+operation. <code>loss.backward()</code> is then a tiny DAG scheduler — ready
+queues, in-degree countdowns, one worker thread per device —
+walking those receipts in reverse topological order. The lesson
+this codebase teaches better than any other: how to layer a thin
+Python frontend over a C++ core through <em>one</em> dispatch table, how
+to generate that entire surface (bindings, kernels, autograd
+nodes, signatures) from two YAML schemas, and what it costs to
+make every single operation carry the weight of an implicit,
+user-invisible tracing system.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A restaurant where every cook writes a receipt for what they
+made, and at closing time a cleanup crew walks the receipts
+backwards to pay everyone back.</strong> When you order (call <code>torch.mul</code>
+in Python), the receptionist (the dispatcher, in C++) looks at
+where your ingredients came from (each tensor carries a tag — the
+dispatch key set — saying CPU or GPU, needs-grad or not) and routes
+the order to the right kitchen (the kernel). As the cook works,
+the receptionist also staples a receipt (the autograd <code>Node</code>) onto
+the finished dish, and each receipt points back to the receipts of
+the dishes it was made from (<code>next_edges</code>). At closing time
+(<code>loss.backward()</code>), the cleanup crew (the autograd engine) has
+one clerk per room (one worker thread per device), each with a
+pile of receipts to process (the <code>ReadyQueue</code>); a clerk may only
+process a receipt once every dish that contributed to it has
+delivered its share, because contributions going to the same cook
+must be added together first (the <code>InputBuffer</code>). If someone
+sneaks back and rewrites a saved ingredient after its receipt was
+stapled, the crew refuses to close the books (the version counter
+check). And because receipts are <em>generated</em> for every operation
+in advance from a recipe book (the <code>derivatives.yaml</code> schema), no
+cook ever has to write one by hand.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when the computation graph
+depends on Python control flow (loop lengths, data-dependent
+branches), the only graph builder that can capture it faithfully
+is the execution itself — so the design records while it runs, and
+pays for that choice on every single op call.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    PY[&quot;Python: torch package&lt;br/&gt;(torch/__init__.py:2635)&lt;br/&gt;torch.autograd&quot;]
+
+    subgraph csrc[&quot;torch/csrc — Python boundary&quot;]
+        GEN[&quot;generated bindings&lt;br/&gt;(python_torch_functions.cpp etc.)&lt;br/&gt;+ PythonArgParser :212&quot;]
+        THPV[&quot;THPVariable&lt;br/&gt;wrap / unpack&lt;br/&gt;(python_variable.cpp:408)&quot;]
+        PYENG[&quot;THPEngine / PythonEngine&lt;br/&gt;(python_engine.cpp:120)&quot;]
+    end
+
+    subgraph disp[&quot;c10 dispatcher — aten/src/ATen/core/dispatch&quot;]
+        DCALL[&quot;Dispatcher::call :784&quot;]
+        OE[&quot;OperatorEntry::lookup :182&lt;br/&gt;flat array indexed by key&quot;]
+        DKS[&quot;DispatchKeySet&lt;br/&gt;(c10/core/DispatchKeySet.h:50)&quot;]
+    end
+
+    subgraph grad[&quot;autograd layer — torch/csrc/autograd&quot;]
+        VT[&quot;generated VariableType kernels&lt;br/&gt;(Autograd dispatch key)&lt;br/&gt;record + redispatch&quot;]
+        NODES[&quot;generated Node subclasses&lt;br/&gt;(MulBackward0, ...)&quot;]
+        ENG[&quot;Engine + GraphTask&lt;br/&gt;+ ReadyQueue (engine.cpp)&quot;]
+        AG[&quot;AccumulateGrad&quot;]
+    end
+
+    subgraph aten[&quot;ATen — backend kernels&quot;]
+        SK[&quot;structured kernel mul_out&lt;br/&gt;(BinaryOps.cpp:441)&quot;]
+        TI[&quot;TensorIterator&lt;br/&gt;(TensorIterator.cpp:1467)&quot;]
+        STUB[&quot;DispatchStub: AVX2/AVX512&lt;br/&gt;(cpu/BinaryOpsKernel.cpp:126)&quot;]
+        CUDAK[&quot;cuda/BinaryMulKernel.cu:22&quot;]
+    end
+
+    subgraph c10core[&quot;c10 — tensor core&quot;]
+        TI2[&quot;TensorImpl :569&lt;br/&gt;+ Storage, intrusive_ptr&quot;]
+        AM[&quot;AutogradMeta (nullable)&lt;br/&gt;(variable.h:231)&quot;]
+    end
+
+    Y1[&quot;native_functions.yaml:4246 mul.Tensor&quot;]
+    Y2[&quot;derivatives.yaml:1251 mul.Tensor&quot;]
+    CG[&quot;codegen: torchgen/ + tools/autograd/&lt;br/&gt;generates bindings, VariableType,&lt;br/&gt;Node classes, redispatch fns&quot;]
+
+    PY --&gt; GEN --&gt; THPV --&gt; DCALL
+    DCALL --&gt; OE --&gt; VT
+    VT --&gt;|&quot;record&quot;| NODES
+    VT --&gt;|&quot;redispatch below Autograd&quot;| SK
+    SK --&gt; TI --&gt; STUB
+    SK --&gt; CUDAK
+    SK --&gt; TI2
+    TI2 --- AM
+    PY --&gt;|&quot;backward()&quot;| PYENG --&gt; ENG --&gt; NODES --&gt; AG --&gt; AM
+    Y1 &amp; Y2 --&gt; CG
+    CG -.-&gt;|&quot;generates&quot;| GEN &amp; VT &amp; NODES
+    DKS -.-&gt; DCALL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Python is a skin, not the body.</strong> <code>torch/__init__.py:2635</code>
+does <code>from torch._C._VariableFunctions import *</code>; those
+functions are <em>generated</em> C bindings (<code>tools/autograd/templates/ python_torch_functions.cpp</code>), one static <code>PyObject*</code> function per
+operator, each fronting a cached <code>PythonArgParser</code>
+(<code>torch/csrc/utils/python_arg_parser.h:212</code>). The result wraps
+back into Python via <code>THPVariable_WrapWithType</code>
+(<code>torch/csrc/autograd/python_variable.cpp:408</code>), which allocates
+(or finds — see the PyObject slot below) the Python wrapper for
+a <code>TensorImpl</code>.</li>
+<li><strong>One dispatcher is the entire language boundary.</strong> Every op —
+Python-called, C++-called, custom, or compiled — goes through
+<code>Dispatcher::call</code> (<code>Dispatcher.h:784</code>): compute a
+<code>DispatchKeySet</code> from the arguments&#39; tensors (each tensor carries
+its key set in its <code>TensorImpl</code>), then <code>OperatorEntry::lookup</code>
+(<code>OperatorEntry.h:182</code>) — a single array index into a per-op
+table of kernels, sized to stay cache-resident. What looks like
+&quot;the C++ API&quot; is the same table reached from the other side.</li>
+<li><strong>The Autograd layer is a dispatch key, not a wrapper class.</strong>
+Old frameworks wrapped tensors in differentiable shells. PyTorch
+registers <em>generated autograd kernels</em> at the <code>Autograd</code> dispatch
+key (<code>tools/autograd/gen_variable_type.py:912</code> emits the
+<code>TORCH_LIBRARY_IMPL(aten, Autograd, ...)</code> registrations). Each
+kernel runs the backward-recipe (from <code>derivatives.yaml</code>),
+saves what backward needs, redispatches to the backend key
+<em>below</em> autograd, then staples the <code>Node</code> onto the output
+(<code>set_history</code>, <code>torch/csrc/autograd/functions/utils.h:67</code>).</li>
+<li><strong>ATen kernels never know autograd exists.</strong> A structured op
+like <code>mul.out</code> implements one <code>TORCH_IMPL_FUNC(mul_out)</code>
+(<code>aten/src/ATen/native/BinaryOps.cpp:441</code>) that hands a prepared
+<code>TensorIterator</code> to a <code>DispatchStub</code> (<code>aten/src/ATen/native/ DispatchStub.h</code>) — which picks the AVX2/AVX512/NEON-compiled
+version of <code>mul_kernel</code> (<code>cpu/BinaryOpsKernel.cpp:126</code>) or the
+CUDA one (<code>cuda/BinaryMulKernel.cu:22</code>). <code>TensorIterator::build</code>
+(<code>TensorIterator.cpp:1467</code>) did the hard part: broadcasting,
+dtype promotion, dimension reordering, dimension coalescing —
+so the kernel body is a flat, vectorizable loop.</li>
+<li><strong>The spine</strong> is one op call end-to-end: Python <code>torch.mul</code> →
+generated binding → <code>Dispatcher::call</code> → generated Autograd
+kernel (record) → redispatch → <code>mul_out</code> → <code>TensorIterator</code> →
+vectorized CPU loop → wrapped output with a fresh
+<code>grad_fn</code> — and later, <code>backward()</code> walking the same receipts
+in reverse. The Walkthrough traces exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-multiply-recorded-then-walked-backwards">Walkthrough: one multiply recorded, then walked backwards</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant P as Python
+    participant B as generated binding + Parser
+    participant D as Dispatcher::call
+    participant V as VariableType kernel (Autograd key)
+    participant K as mul_out → TensorIterator
+    participant E as Engine (backward)
+    participant G as AccumulateGrad (leaf .grad)
+
+    P-&gt;&gt;B: torch.mul(a, b)  both require grad
+    B-&gt;&gt;D: parse args → at::mul(a, b)
+    D-&gt;&gt;V: keyset = CPU + Autograd → lookup
+    V-&gt;&gt;V: make MulBackward0 node
+    V-&gt;&gt;V: next_edges ← a and b grad_fn
+    V-&gt;&gt;V: save a and b into the node
+    V-&gt;&gt;K: redispatch with Autograd excluded
+    K--&gt;&gt;V: result tensor
+    V-&gt;&gt;V: set_history(result, node)
+    V--&gt;&gt;P: THPVariable_Wrap(result)
+    Note over P: training loop ... then loss.backward()
+    P-&gt;&gt;E: _engine_run_backward → Engine::execute
+    E-&gt;&gt;E: compute_dependencies (in-degree count)
+    E-&gt;&gt;E: seed ReadyQueue with root
+    E-&gt;&gt;E: thread_main → MulBackward0::apply
+    E-&gt;&gt;G: InputBuffer → countdown → AccumulateGrad
+    G--&gt;&gt;P: a.grad and b.grad set
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-order-enters-reception">The order enters reception</h3>
+<p><code>torch.mul(a, b)</code> lands
+in a generated binding (shaped by <code>tools/autograd/ gen_python_functions.py:835</code>): a static <code>PythonArgParser</code>
+(<code>python_arg_parser.h:212</code>) compiled once per process matches the
+arguments against the overload signatures generated from
+<code>native_functions.yaml</code> — <code>mul.Tensor</code> before <code>mul.Scalar</code>, zero-dim
+tensors binding to Scalar unless they require grad (the parser&#39;s
+header comment documents these rules). The tensors are unwrapped
+from their Python wrappers (<code>THPVariable_Unpack</code>) — no copies, the
+Python object and the C++ tensor share one <code>TensorImpl</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="dispatch-by-tag-not-by-type">Dispatch by tag, not by type</h3>
+<p><code>Dispatcher::call</code>
+(<code>Dispatcher.h:784</code>) extracts each tensor argument&#39;s
+<code>DispatchKeySet</code> and ORs them; <code>a</code> and <code>b</code> on CPU with
+<code>requires_grad=True</code> yield a set containing <code>AutogradCPU</code>. One
+array lookup (<code>OperatorEntry::lookup</code>, <code>OperatorEntry.h:182</code>)
+selects the highest-priority functionality&#39;s kernel — the
+generated VariableType kernel registered at the <code>Autograd</code> key.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-receipt-is-prepared-before-the-dish-exists">The receipt is prepared before the dish exists</h3>
+<p>The
+kernel (generated from <code>tools/autograd/derivatives.yaml:1251</code>,
+the <code>mul.Tensor</code> entry whose formula is <code>grad * other</code> and
+<code>grad * self</code>) checks whether any input requires grad and grad
+mode is on; if so it creates a <code>MulBackward0</code> <code>Node</code>
+(<code>tools/autograd/gen_variable_type.py:637</code> <code>ASSIGN_GRAD_FN</code>,
+<code>:704</code> <code>SET_HISTORY</code> templates show the generated shape), whose
+<code>next_edges</code> come from <code>collect_next_edges(a, b)</code>
+(<code>torch/csrc/autograd/function.h:71</code>) — i.e. the <em>inputs&#39;</em>
+existing <code>grad_fn</code>s (or their <code>AccumulateGrad</code> accumulators, for
+leaves). The operands the backward formula needs are saved into
+the node (<code>SavedVariable</code>), each pinned at its current version
+counter.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="compute-below-autograd">Compute, below autograd</h3>
+<p>The kernel calls the
+generated <code>at::redispatch::mul_</code> with the autograd keys excluded
+(<code>gen_variable_type.py:664</code> <code>CALL_REDISPATCH</code>): the dispatcher
+lands on the CPU backend kernel <code>TORCH_IMPL_FUNC(mul_out)</code>
+(<code>BinaryOps.cpp:441</code>) → <code>mul_stub</code> → <code>mul_kernel</code>
+(<code>cpu/BinaryOpsKernel.cpp:126</code>). <code>TensorIterator::build</code>
+(<code>TensorIterator.cpp:1467</code>) has broadcast shapes, promoted dtypes,
+reordered and coalesced dimensions; <code>mul_kernel</code> then runs
+<code>cpu_kernel_vec</code> with a scalar lambda and a <code>Vectorized&lt;T&gt;</code> lambda
+side by side — with special cases for bool (logical and) and a
+fast path when one operand is a Python scalar. The result
+<code>TensorImpl</code> shares nothing with the inputs&#39; storage.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="staple-and-return">Staple and return</h3>
+<p>Back in the autograd kernel,
+<code>set_history</code> (<code>functions/utils.h:67</code>) calls
+<code>impl::set_gradient_edge(result, {node, output_nr})</code> — the output&#39;s
+<code>AutogradMeta::grad_fn_</code> now points at <code>MulBackward0</code>. The
+generated binding wraps the tensor (<code>THPVariable_WrapWithType</code>,
+<code>python_variable.cpp:408</code>); the PyObject and the TensorImpl keep
+each other alive (an <code>impl::PyObjectSlot</code> on the TensorImpl,
+<code>c10/core/TensorImpl.h:2269</code>). The forward pass <em>was</em> the graph
+builder. Nothing else was recorded anywhere.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="close-the-books">Close the books</h3>
+<p><code>loss.backward()</code> goes
+<code>torch/autograd/graph.py:1100 _engine_run_backward</code> →
+<code>THPEngine_run_backward</code> (<code>python_engine.cpp:179</code>) →
+<code>PythonEngine::execute</code> (<code>python_engine.cpp:120</code>, which
+<code>TORCH_CHECK</code>s the GIL is <em>released</em> — expensive C++ work must
+not serialize Python) → <code>Engine::execute</code>
+(<code>engine.cpp:1428</code>). It builds a <code>GraphTask</code>
+(<code>graph_task.h:18</code>), wraps the roots in a <code>GraphRoot</code>, and
+<code>compute_dependencies</code> (<code>engine.cpp:1360</code>) walks <code>next_edges</code>
+counting each node&#39;s in-degree into <code>dependencies_</code> — a plain
+<code>unordered_map&lt;Node*, int&gt;</code>; no topological sort, no locks per
+edge.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="walk-the-receipts">Walk the receipts</h3>
+<p>The calling thread itself becomes
+the CPU worker (<code>thread_main</code>, <code>engine.cpp:575</code>); GPU-device nodes
+are executed by one persistent thread per device created lazily by
+<code>start_device_threads</code> (<code>engine.cpp:1725</code>, each named
+<code>pt_autograd_N</code>, <code>engine.cpp:344 thread_init</code>). Each
+<code>evaluate_function</code> (<code>engine.cpp:1168</code>) runs the node&#39;s <code>apply</code>
+via <code>call_function</code> (<code>engine.cpp:1114</code> — pre-hooks, the node call,
+post-hooks, output shape validation), then for each output edge
+decrements the target&#39;s dependency count; a target whose count
+reaches zero graduates from its staging <code>InputBuffer</code> (partial
+gradient sums accumulated in <code>not_ready_</code>, <code>input_buffer.h:41</code>)
+into a <code>NodeTask</code> pushed on the target device&#39;s <code>ReadyQueue</code>
+(<code>engine.h:87</code> — a priority queue ordered by <code>sequence_nr</code>, which
+is why <code>AccumulateGrad</code> constructs itself with
+<code>sequence_nr = UINT64_MAX</code> to always sort first (set in its
+constructor at <code>functions/accumulate_grad.cpp:87</code>, applied in
+<code>AccumulateGrad::apply</code> at <code>:92</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="leaves-hold-their-gradients-and-the-tape-is-spent">Leaves hold their gradients, and the tape is spent</h3>
+<p>Gradient paths ending at leaves reach <code>AccumulateGrad::apply</code>
+(<code>accumulate_grad.cpp:92</code>): under the node&#39;s mutex it either
+steals the incoming gradient (when the engine&#39;s refcount protocol
+says nobody else holds it — <code>call_function</code> bumps the expected
+count exactly when post-hooks exist) or accumulates into
+<code>variable.grad_</code> in place. When <code>outstanding_tasks_</code> — incremented
+by every <code>ReadyQueue::push</code> (<code>engine.cpp:234</code>) and decremented on
+every completed task — hits zero, the GraphTask&#39;s future
+completes; <code>Engine::execute</code>&#39;s <code>fut-&gt;wait()</code> returns the captured
+gradients. With <code>keep_graph=False</code> each node released its saved
+tensors as it ran: the tape is single-use by default.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>TensorImpl</code> — one refcounted body, three optional souls.</strong>
+<strong>What:</strong> <code>c10/core/TensorImpl.h:569</code> — storage pointer, dtype,
+device, sizes/strides (possibly symbolic), a <code>DispatchKeySet</code>,
+a nullable <code>AutogradMeta</code> pointer, a <code>PyObject</code> slot, and a
+shared <code>VariableVersion</code> counter. Owned by <code>intrusive_ptr</code>; the
+Python <code>torch.Tensor</code> and the C++ <code>Tensor</code> are both thin handles
+to it. <strong>Why:</strong> Python refcounting, C++ refcounting, and
+autograd state each get to exist or <em>not exist</em> independently —
+a plain float tensor pays zero autograd bytes (<code>autograd_meta_</code>
+stays null, see the invariant note at <code>TensorImpl.h:3003</code>), and
+a C++-only workload (libtorch) never materializes a PyObject.
+The descriptor/physical split of <a href="../llama-cpp/">llama.cpp</a>&#39;s
+<code>ggml_tensor</code>, taken further: here even <em>language identity</em> is
+an optional slot.</p>
+</li>
+<li><p><strong><code>DispatchKeySet</code> — dispatch as a uint64 bitmap.</strong>
+<strong>What:</strong> <code>c10/core/DispatchKeySet.h:50</code> — a 64-bit word of
+ordered &quot;functionality&quot; bits (Autograd above backend) plus
+backend bits; every tensor carries one, and per-thread
+include/exclude masks (guards like <code>torch.no_grad</code> clear the
+Autograd bit) refine it at call time (<code>DispatchKeyExtractor</code>,
+<code>aten/src/ATen/core/dispatch/DispatchKeyExtractor.h:39</code>).
+<strong>Why:</strong> multiple dispatch over N arguments collapses into an
+OR of bitsets plus one <code>countr_zero</code>-style priority pick — the
+dispatch step is O(1), branch-predictable, and needs no per-op
+virtual call. The cost is a fixed bit budget (see the &quot;No More
+Than 16 Backends&quot; note in the header) and aliasing rules that
+the file documents at length — a fair price versus a
+type-tower.</p>
+</li>
+<li><p><strong><code>Edge</code> and <code>Node</code> — the tape as ownership graph.</strong>
+<strong>What:</strong> <code>torch/csrc/autograd/edge.h</code> — an <code>Edge</code> is exactly
+<code>(intrusive_ptr&lt;Node&gt;, input_nr)</code>; a <code>Node</code>
+(<code>torch/csrc/autograd/node.h</code>) owns its <code>next_edges_</code> via
+refcounted pointers, plus <code>sequence_nr</code> (creation order →
+queue priority), <code>topological_nr</code> (an internal DAG property
+used to prune traversal), input metadata for shape validation,
+and a <code>mutex_</code> for concurrent <code>apply</code> (<code>node.h:682</code> documents
+exactly when users must lock it). <strong>Why:</strong> the tape is not a
+separate data structure the framework stores somewhere — it is
+<em>literally</em> the ownership chain of small objects hanging off
+tensors&#39; <code>AutogradMeta::grad_fn_</code>. Free the tensor, and if no
+other output keeps the node alive, the subgraph below it
+deallocates itself. Liveness and graph extent are one fact.</p>
+</li>
+<li><p><strong><code>GraphTask</code> — the run-state of one backward.</strong>
+<strong>What:</strong> <code>torch/csrc/autograd/graph_task.h:18</code> — atomic
+<code>outstanding_tasks_</code>, the <code>dependencies_</code> in-degree map,
+<code>not_ready_</code> staged <code>InputBuffer</code>s, <code>exec_info_</code> (which paths to
+actually execute when <code>inputs=</code> is passed), captured leaf
+streams for CUDA, and the completion future. <strong>Why:</strong> everything
+a lock-light dataflow scheduler needs, and nothing else: no
+global pass over the graph at completion (the counter <em>is</em> the
+barrier), no scheduler thread (workers pull), no per-node
+promise. Compare the countdown pattern with
+<a href="../kubernetes/">Kubernetes</a> controllers — same &quot;count dependent
+edges&quot; idea, here paid per-node in nanoseconds.</p>
+</li>
+<li><p><strong><code>TensorIterator</code> — the great leveler of elementwise kernels.</strong>
+<strong>What:</strong> <code>aten/src/ATen/TensorIterator.cpp:1467 build</code> —
+fills operand slots, checks memory overlap, computes the
+broadcast shape, promotes a common dtype, permutes dimensions
+for coalescing, coalesces adjacent dims, allocates outputs;
+afterwards the kernel sees flat pointers/strides and (usually)
+a contiguous 1-D loop. <strong>Why:</strong> one C++ class absorbs the
+combinatorial horror of NumPy semantics (broadcast + cast +
+layout) so that ~200 pointwise ops are each a dozen lines —
+<code>mul_kernel</code> is literally <code>a * b</code> twice, scalar and vector. The
+ATen &quot;structured kernel&quot; split (<code>mul.Tensor</code> delegates to
+<code>mul.out</code> via <code>structured_delegate</code> in the yaml) means the
+out-variant owns the iterator setup for all three variants.</p>
+</li>
+<li><p><strong><code>SavedVariable</code> + <code>VariableVersion</code> — snapshots that can
+complain.</strong> <strong>What:</strong> saving for backward pins the tensor&#39;s
+data pointer and records its version counter
+(<code>saved_variable.h</code>); <code>unpack</code> (<code>saved_variable.cpp:166</code>)
+refuses if <code>saved_version_ != current_version</code> — the error
+users know as &quot;one of the variables needed for gradient
+computation has been modified by an inplace operation.&quot;
+<strong>Why:</strong> in-place ops bump the shared counter
+(<code>TensorImpl.h</code>&#39;s <code>bump_version</code>, shared between a view and its
+base), so correctness of the tape doesn&#39;t require copying
+saved inputs — just detecting staleness cheaply. A validation
+budget of one atomic counter, checked once per save.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><p><strong>Two parallelism worlds, deliberately separate.</strong> Forward
+execution is single-threaded <em>per op call</em>; parallelism lives
+inside kernels (CPU thread pools, CUDA streams). Backward is
+parallel across the DAG: <code>Engine</code> runs one worker thread per
+device (created on first backward touching that device,
+<code>engine.cpp:1725</code>) plus whatever thread called <code>backward()</code> as
+the CPU worker (<code>engine.cpp:1585</code>). No lock protects &quot;the
+graph&quot; — the graph is immutable during execution; coordination
+happens through per-queue mutexes, the in-degree map, and
+<code>InputBuffer</code> accumulation under the GraphTask&#39;s own mutex
+(<code>engine.cpp:1223</code>).</p>
+</li>
+<li><p><strong>Readiness is a countdown, not a scheduler.</strong> A node runs when
+its dependency count hits zero (<code>engine.cpp:1295</code>), because all
+its incoming gradients have arrived and been summed into its
+<code>InputBuffer</code> — an implicit addition node (the file comment in
+<code>input_buffer.h</code> calls it exactly that). Priorities inside each
+<code>ReadyQueue</code> are <code>(reentrant depth, sequence_nr)</code>
+(<code>engine.h:87</code>), so within a device, work is <em>approximately</em>
+topological, which keeps peak memory of intermediate gradients
+bounded without any global ordering pass.</p>
+</li>
+<li><p><strong>CUDA correctness is streams-and-events bookkeeping.</strong> Each
+produced gradient records the stream it was computed on;
+<code>InputBuffer::add</code> (<code>input_buffer.cpp:350</code>) records events and
+<code>evaluate_function</code> (<code>engine.cpp:1203</code>) makes the consumer&#39;s
+stream wait on the producer&#39;s event when they differ. The
+GraphTask collects <code>leaf_streams</code> and <code>exec_post_processing</code>
+syncs them with the caller&#39;s streams — the semantics documented
+publicly as &quot;stream semantics of backward passes.&quot; The Node
+<code>mutex_</code> (<code>node.h:682</code>) serializes concurrent <code>apply</code> on the
+same node, which is what makes the whole scheme safe without
+per-gradient locks.</p>
+</li>
+<li><p><strong>Failure: poison the task, not the thread.</strong> A throwing node&#39;s
+exception is captured into the GraphTask
+(<code>graph_task.h:set_exception</code>), <code>has_error_</code> flips, other
+workers drain the queue without executing further nodes, and
+the exception is rethrown to the caller when the future is
+joined in <code>Engine::execute</code>. A Python exception raised in a
+Python-side node crosses this boundary through
+<code>PythonEngine::execute</code>&#39;s <code>python_error</code> restore path
+(<code>python_engine.cpp:120</code>). CUDA kernels failing asynchronously
+surface at the next synchronization point — by design, the
+engine never polls the GPU.</p>
+</li>
+<li><p><strong>Reentrant backwards are a bounded recursion.</strong> A <code>Node::apply</code>
+that itself calls <code>backward()</code> would recurse through
+<code>Engine::execute</code>; beyond <code>MAX_DEPTH = 60</code> levels
+(<code>engine.h:38</code>) the engine stops recursing and hands the new
+GraphTask to a small standby thread pool (<code>Note [Reentrant backwards]</code>, <code>engine.cpp:146</code>). The constant is honest about
+why: TSAN deadlocks past ~65 held mutexes.</p>
+</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><p><strong>The public surface is schema-first.</strong> An operator exists once
+in <code>aten/src/ATen/native/native_functions.yaml</code> (with aliasing
+and mutation annotations like <code>Tensor(a!)</code>), and codegen emits:
+C++ declarations, Python bindings, <code>out=</code> variants, structured
+kernel scaffolding, meta (shape) kernels, the dispatch
+registrations — and, paired with a <code>derivatives.yaml</code> entry,
+the autograd kernel and the <code>Node</code> class. The yaml <em>is</em> the API
+reference; the <a href="../redis/">Redis</a> commands.json pattern at
+2,000-op scale.</p>
+</li>
+<li><p><strong>Five extension seams, all funnels into one table.</strong> (1)
+<code>torch.library</code> / <code>TORCH_LIBRARY</code>
+(<code>torch/library.h:974</code>): register a new operator and kernels at
+<em>any</em> dispatch key — Python&#39;s <code>torch._library.custom_ops.py:272 CustomOpDef</code> wraps it with schema inference and a pt2-compliance
+tag. (2) Custom <code>autograd.Function</code> — a Python <code>Node</code> subclass
+the engine runs with the GIL held just for it. (3) <code>PrivateUse1</code>
+— a reserved dispatch key so out-of-tree backends (TPUs, NPUs)
+plug in without forking. (4) TorchDispatch/TorchFunction modes
+— thread-local interceptors that see every op call (how
+functionalization, functorch, and profiling are built). (5)
+<code>torch.compile</code> backends — a registry of graph handlers
+receiving the FX graph Dynamo extracted. All five converge on
+the same dispatcher; there is no second system.</p>
+</li>
+<li><p><strong>torch.compile is the eager design&#39;s honest sequel, not a
+replacement.</strong> Dynamo installs a CPython frame-evaluation hook
+(PEP 523; <code>torch/csrc/dynamo/eval_frame.c:329 enable_eval_frame_shim</code> → <code>_PyInterpreterState_SetEvalFrameFunc</code>),
+rewrites bytecode to trace tensor ops into an FX graph guarded
+on shapes/properties (<code>torch/_dynamo/convert_frame.py:1703 _compile</code>), and lowers through AOTAutograd and Inductor&#39;s
+generated Triton/C++ (<code>torch/_inductor/compile_fx.py:3130</code>).
+Because ops were already funneled through one dispatcher with
+schema and meta kernels, capture did not require a new runtime —
+the same seams that gave custom backends gave the compiler.</p>
+</li>
+<li><p><strong>Honest warts.</strong> The generated layer is invisible in a fresh
+clone: <code>torch/csrc/autograd/generated/</code> exists only after a
+build, so reading the &quot;real&quot; autograd kernel means reading
+Python generators — and the codebase knows it (the generated
+<code>VariableTypeEverything.cpp</code> exists &quot;for ease of inspection...
+only for convenience; not actually used in the build,&quot; per the
+sharding note in <code>tools/autograd/templates/VariableType.cpp</code>).
+Schema-string overload sprawl (<code>mul.Tensor</code> / <code>mul.Scalar</code> /
+<code>mul.out</code> / <code>mul_.Tensor</code>...) is the price of uniformity. And
+the compile stack&#39;s depth (Dynamo → AOTAutograd → Inductor)
+makes failure diagnosis a genuinely hard skill — the flexibility
+that won research is exactly what capture must fight to
+recover.</p>
+</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-define-by-run-recording-over-pre-declared-static-graphs">Trade-off 1: define-by-run recording over pre-declared static graphs</h3>
+<ul>
+<li><strong>Tension:</strong> ML frameworks before PyTorch made you declare the
+graph, then run it — enabling whole-graph optimization but
+breaking Python control flow, debugging, and shape dynamism.</li>
+<li><strong>Choice:</strong> make execution the graph builder. The generated
+Autograd kernel records while computing; the &quot;graph&quot; is never
+materialized anywhere else but the live tensors&#39; <code>grad_fn</code>
+chain.</li>
+<li><strong>Evidence:</strong> <code>tools/autograd/gen_variable_type.py:664</code>
+<code>CALL_REDISPATCH</code> and <code>:704</code> <code>SET_HISTORY</code> templates — the
+generated kernel <em>first</em> computes with the backend kernel,
+<em>then</em> attaches the node; <code>tools/autograd/derivatives.yaml:1251</code>
+supplies the backward formula as data; <code>functions/utils.h:67 set_history</code> is the staple. The bill for the choice is paid
+later: no eager pass can fuse ops, so the codebase eventually
+built a tracing compiler on top (<code>eval_frame.c:329</code>) to recover
+the static graphs it deliberately never had.</li>
+<li><strong>Given up:</strong> whole-graph optimization in the default path
+(fused kernels, memory planning), plus per-op dispatch cost —
+both recovered only partially, and ten years later, by
+torch.compile.</li>
+<li><strong>Verdict:</strong> right for the research workload that made PyTorch
+dominant — models whose structure changes with every run, where
+the value of printing/branching/debugging mid-graph exceeds
+fused-kernel throughput. Wrong when your model is fixed and
+shapes are static — ship the compiled artifact (the same
+codebase&#39;s <code>torch.compile</code>/<code>torch.export</code> exist precisely for
+that phase transition).</li>
+</ul>
+<h3 id="trade-off-2-thin-generated-bindings-over-a-c-dispatcher-core">Trade-off 2: thin generated bindings over a C++ dispatcher core</h3>
+<ul>
+<li><strong>Tension:</strong> the frontend everyone wanted was Python, but the
+kernels needed C++ speed and vendors needed a Python-free
+path; per-call overhead of crossing CPython is real.</li>
+<li><strong>Choice:</strong> Python bindings exist only as generated stubs over
+<code>at::</code> functions; all real logic sits behind one dispatcher
+reachable identically from C++ (libtorch) and Python.</li>
+<li><strong>Evidence:</strong> the cost side is visible at
+<code>gen_python_functions.py:835</code> (every call parses Python objects
+against compiled signature strings) and <code>Dispatcher.h:784 call</code> → <code>OperatorEntry.h:182 lookup</code> (keyset computation and
+one more indirect call per op); the payoff side is that
+<code>autograd_not_implemented_fallback.cpp</code>, TorchDispatch modes,
+profiling, and torch.compile all hook the <em>same</em> single point —
+and libtorch ships the whole engine with no CPython linked.</li>
+<li><strong>Given up:</strong> a hand-tuned Python-first fast path; the per-op
+constant factor that frameworks like <a href="../llama-cpp/">llama.cpp</a>
+eliminate by having no frontend at all — PyTorch pays it on
+every call and eventually attacks it with a bytecode-level JIT.</li>
+<li><strong>Verdict:</strong> right when many frontends and many backends must
+meet at one semantic core, and ops are heavy enough (real
+matmuls) that a few hundred ns of dispatch vanish in the
+kernel. Wrong for tiny-op-dominated workloads — which is a
+large part of why torch.compile exists.</li>
+</ul>
+<h3 id="trade-off-3-generate-everything-from-two-yaml-schemas">Trade-off 3: generate everything from two YAML schemas</h3>
+<ul>
+<li><strong>Tension:</strong> 2,000+ operators × 4–6 artifacts each (C++ decl,
+Python binding, dispatch registration, autograd kernel, Node
+class, meta kernel) — hand-maintaining them guarantees drift.</li>
+<li><strong>Choice:</strong> <code>native_functions.yaml</code> + <code>derivatives.yaml</code> are
+the single source; <code>torchgen/</code> and <code>tools/autograd/</code> generate
+everything (the <code>VariableType.cpp</code> template even splits itself
+into compile-parallel shards because the unsplit file was
+36,000 lines — the template&#39;s own sharding note).</li>
+<li><strong>Evidence:</strong> <code>native_functions.yaml:4246</code> declares all four
+<code>mul</code> overloads in 40 lines, including sparse/Mkldnn dispatch
+map entries; <code>tools/autograd/gen_autograd.py</code>&#39;s header states
+the build destination (<code>torch/csrc/autograd/generated/</code>);
+<code>torchgen/gen.py:2606-2646</code> writes <code>RegisterBackendSelect.cpp</code>,
+<code>RegisterSchema.cpp</code>, <code>Operators.cpp</code>, <code>Functions.cpp</code> from the
+same parse.</li>
+<li><strong>Given up:</strong> a readable, greppable implementation — the &quot;real&quot;
+autograd code for <code>mul</code> does not exist as a committed file,
+and reviewing a PR means reading generator templates plus
+imagined output. Build complexity and a Python-based build
+step are permanent tenants.</li>
+<li><strong>Verdict:</strong> right at this scale — the alternative is the
+pre-2017 framework world where bindings, docs, and autograd
+drifted apart per-op. Wrong below a few dozen ops, where
+codegen is ceremony (<a href="../curl/">curl</a> hand-writes its surface
+and stays coherent). This is PATTERNS.md&#39;s &quot;generate the
+surface from data,&quot; taken to its maximum credible extent.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>torch/csrc/autograd/variable.h:53</code> — the Variable doc block:
+leaf vs. interior, <code>grad_fn</code> vs. <code>grad_accumulator</code>, versions,
+views. The densest design document in the codebase; do not
+skip it.</li>
+<li><code>torch/csrc/autograd/edge.h</code> then <code>torch/csrc/autograd/node.h</code>
+— <code>Edge</code> is <code>(Node, input_nr)</code>; read <code>Node</code>&#39;s <code>next_edges_</code>,
+<code>sequence_nr</code>, <code>topological_nr</code>, the <code>mutex_</code> contract at
+<code>:682</code>, and <code>operator()</code> at <code>:172</code>.</li>
+<li><code>aten/src/ATen/native/native_functions.yaml:4246</code> — the four
+<code>mul</code> overloads; notice <code>Tensor(a!)</code> mutation annotations,
+<code>structured: True</code> on <code>mul.out</code>, and per-backend dispatch
+entries. Then <code>tools/autograd/derivatives.yaml:1251</code> — the
+backward formulas as data.</li>
+<li><code>tools/autograd/gen_variable_type.py:614-726</code> — the templates
+that <em>are</em> the autograd kernels (<code>SETUP_DERIVATIVE</code>,
+<code>CALL_REDISPATCH</code> at <code>:664</code>, <code>SET_HISTORY</code> at <code>:704</code>); then
+<code>:912</code> for the <code>TORCH_LIBRARY_IMPL(aten, Autograd)</code> wrapper
+generation. Optionally run <code>python -m tools.autograd.gen_autograd</code>
+(its docstring shows the invocation) to materialize
+<code>torch/csrc/autograd/generated/</code> and read the real
+<code>VariableTypeEverything.cpp</code>.</li>
+<li><code>torch/csrc/autograd/functions/utils.h:67 set_history</code> — the
+staple: <code>add_input_metadata</code> + <code>set_gradient_edge</code>. Three
+lines that make every differentiable op &quot;record.&quot;</li>
+<li><code>torch/csrc/autograd/python_variable.cpp:408 THPVariable_WrapWithType</code> and <code>torch/csrc/utils/ python_arg_parser.h:212 PythonArgParser</code> — the CPython
+boundary in two structures; note the PyObject/TensorImpl
+co-ownership and the overload-matching gotchas in the header
+comment.</li>
+<li><code>aten/src/ATen/core/dispatch/Dispatcher.h:784 call</code> +
+<code>OperatorEntry.h:182 lookup</code> + <code>c10/core/DispatchKeySet.h:50</code>
+— the O(1) heart: bitset OR, one array index. Then
+<code>DispatchKeyExtractor.h:39</code> for how TLS guards
+(<code>no_grad</code>, inference mode) mask keys in and out.</li>
+<li><code>aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC (mul_out)</code> → <code>aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:126 mul_kernel</code> → <code>aten/src/ATen/native/DispatchStub.h</code> — the
+kernel side: structured op → arch-dispatched stub → a
+two-lambda loop body. Read <code>cpu/Loops.h</code>&#39;s <code>basic_loop</code> next.</li>
+<li><code>aten/src/ATen/TensorIterator.cpp:1467 build</code> — walk one call:
+<code>compute_shape</code>, <code>compute_types</code>, <code>reorder_dimensions</code> at
+<code>:226</code>, <code>coalesce_dimensions</code> at <code>:602</code>. This is where
+NumPy semantics are actually implemented.</li>
+<li><code>torch/autograd/graph.py:1100 _engine_run_backward</code> →
+<code>torch/csrc/autograd/python_engine.cpp:179 THPEngine_run_backward</code> and <code>:120 PythonEngine::execute</code> —
+backward&#39;s front door, and the GIL discipline around it.</li>
+<li><code>torch/csrc/autograd/engine.cpp</code> in this order: <code>:1428 execute</code> (GraphTask, GraphRoot, dependencies) → <code>:1360 compute_dependencies</code> → <code>:234 ReadyQueue::push</code> → <code>:575 thread_main</code> → <code>:1168 evaluate_function</code> (the countdown, the
+InputBuffer staging, the stream guards) → <code>:1114 call_function</code>. This file is the best-written ~2,000 lines of
+scheduling code you will read this year.</li>
+<li><code>torch/csrc/autograd/functions/accumulate_grad.cpp:92 AccumulateGrad::apply</code> — steal-vs-clone refcount logic, the
+<code>sequence_nr = UINT64_MAX</code> trick (constructor at <code>:87</code>), the mutex; then
+<code>torch/csrc/autograd/saved_variable.cpp:166</code> — the version
+check every &quot;modified by an inplace operation&quot; error comes
+from.</li>
+<li><code>torch/csrc/dynamo/eval_frame.c:329 enable_eval_frame_shim</code>
+and <code>torch/_dynamo/convert_frame.py:1703 _compile</code> — the
+sequel: how the codebase later recovered static graphs
+without breaking the eager contract from steps 1–12.</li>
+</ol>
+<p>You have now traced one multiply from a Python call through the
+generated binding, the dispatcher, a recorded autograd node, a
+vectorized CPU kernel, and back — and then the entire backward
+pass that the recorded tape made possible.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make execution the recorder</strong> — when users can&#39;t or won&#39;t
+describe the structure up front (control-flow-dependent work,
+debugging workflows), build the trace as a side effect of the
+real path, one receipt at a time. Seen at
+<code>gen_variable_type.py</code>&#39;s SET_HISTORY template: three lines
+after every compute.</li>
+<li><strong>Nullable capability fields on hot objects</strong> — a tensor that
+doesn&#39;t need autograd stores null <code>AutogradMeta</code> and pays
+nothing; a tensor Python never touches stores no PyObject.
+Zero-cost abstractions via optional slots, not subclass trees
+(<code>TensorImpl.h:569</code>).</li>
+<li><strong>Schedule DAGs with counters and buffers, not a scheduler</strong> —
+in-degree map + staged input buffers + per-worker queues +
+one atomic outstanding counter as the barrier: no scheduler
+thread, no graph locks, naturally parallel across devices
+(<code>engine.cpp:1168 evaluate_function</code>).</li>
+<li><strong>Version counters to make cheap snapshots safe</strong> — share one
+atomic counter between an object and its views; snapshots pin
+the version and refuse to run if it moved (<code>saved_variable.cpp:166</code>).</li>
+<li><strong>Generate the API surface from schema data</strong> — one yaml
+entry becomes bindings, kernels, autograd, docs, and compile
+metadata; drift between them becomes structurally impossible
+(<code>native_functions.yaml</code>, the <a href="../redis/">Redis</a> pattern at
+100× scale).</li>
+<li><strong>Put every extension point at the same dispatch table</strong> —
+custom ops, custom backends, tracing modes, and compilers all
+register at one seam (<code>torch/library.h:974</code>), so the ecosystem
+never forks the core — the placement decision that made
+PyTorch a platform rather than a library.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 9–12 hours for this
+path. The C++ is modern and heavily commented, but two
+genuinely hard things await: the generated-code indirection
+(much of what runs does not exist as committed source — budget
+an hour to run the codegen or read generators fluently) and
+the engine&#39;s synchronization reasoning (read it twice).</li>
+<li>Prerequisites: what a gradient and the chain rule are;
+comfortable C++ (templates, <code>intrusive_ptr</code> refcounting);
+Python C API at the level of &quot;a <code>PyObject*</code> wraps our object&quot;;
+DAG vocabulary (topological order, in-degree). CUDA streams
+only for section 3&#39;s depth — the CPU path tells the full story.
+<a href="../cpython/">CPython</a> is the natural companion dive; bring
+<a href="../llama-cpp/">llama.cpp</a> as the deliberately opposite design
+(no frontend, no dispatcher) for contrast.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The upstream <em>Autograd mechanics</em> note and <em>The dispatcher</em>
+notes on docs.pytorch.org — the public version of what section
+1 walks.</li>
+<li>In the clone: <code>GLOSSARY.md</code> (operation/kernel/node vocabulary),
+<code>aten/src/ATen/core/dispatch/README.md</code>, and the notes
+referenced in <code>engine.cpp</code> (Note [Reentrant backwards],
+Note [Streaming backwards]).</li>
+<li><em>PyTorch: An Imperative Style, High-Performance Deep Learning
+Library</em> (Paszke et al., NeurIPS 2019) — the design rationale
+in the authors&#39; words, including the eager-over-static
+argument this dive&#39;s Trade-off 1 reconstructs.</li>
+<li><em>Automatic Differentiation in Machine Learning: a Survey</em>
+(Baydin et al., 2018) — where &quot;define-by-run&quot; vs
+&quot;define-and-run&quot; got their names.</li>
+<li><em>Deep Learning Compiler PyTorch 2.0</em> (Ansel et al., 2023,
+arXiv 2309.06180) — what torch.compile (section 4) does with
+the tape-less eager design once graphs are recovered.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../ffmpeg/"><span class="dir">← Previous dive</span>FFmpeg: two thousand components behind four boring interfaces</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 26 of 26 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

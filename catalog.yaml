@@ -490,7 +490,7 @@ projects:
     license: BSD-3-Clause
     domains: [ml-framework]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
     why: >
       A tensor library that became the dominant training framework via one

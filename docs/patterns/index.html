@@ -215,7 +215,10 @@ N-API C ABI that lets precompiled native addons outlive engine
 upgrades; <a href="../dive/ffmpeg/">FFmpeg</a> — codecs, demuxers, muxers,
 and filters as plain C structs behind one callback contract each
 (with per-arch SIMD as a second dispatch seam), which is how 880
-compatible implementations coexist in one program.</p>
+compatible implementations coexist in one program;
+<a href="../dive/pytorch/">PyTorch</a> — every extension (custom
+ops, backends, interceptors, compilers) registers at the one
+dispatch table, which is how eager Python stayed a platform.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -245,7 +248,11 @@ schemas → typed clients for unknown future types;
 interpreter and its metadata; <a href="../dive/ffmpeg/">FFmpeg</a> —
 configure generates codec_list.c / filter_list.c from its component
 lists, so the &quot;plugin registry&quot; is a static C array at link time
-(print_enabled_components in configure:8774).</p>
+(print_enabled_components in configure:8774);
+<a href="../dive/pytorch/">PyTorch</a> —
+native_functions.yaml + derivatives.yaml generate the bindings,
+autograd kernels, backward nodes, and dispatch registrations for
+2,000+ operators from one schema pair.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>

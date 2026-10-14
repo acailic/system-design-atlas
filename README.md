@@ -95,8 +95,9 @@ Deep-dives (the exemplars — more added over time):
 - [llama.cpp](deep-dives/llama-cpp.md) — framework-free LLM inference: ggml tensor graphs, quantization-first, mmap weights
 - [Node.js](deep-dives/nodejs.md) — V8 + libuv wrapped into one platform: the C++/JS boundary as the core design
 - [FFmpeg](deep-dives/ffmpeg.md) — thousands of components behind four uniform C-struct contracts, refcounted zero-copy data, DTS-paced thread-per-component scheduler
+- [PyTorch](deep-dives/pytorch.md) — define-by-run autograd: the eager pass records its own tape over a C++ dispatcher
 
-The catalog tracks 9 further heavyweight and high-teaching-value
+The catalog tracks 8 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — the Linux kernel, RocksDB, V8,
 Caddy/haproxy-class proxies and more —
 across databases, queues, runtimes, containers, ML, browser engines,
