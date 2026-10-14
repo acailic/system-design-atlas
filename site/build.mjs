@@ -403,7 +403,7 @@ function homePage() {
   const domainSet = [...new Set(dives.flatMap((d) => d.meta.domains))].sort();
   const cards = ordered
     .map(
-      (d) => `<a class="dive-card" href="dive/${d.id}/" data-domains="${d.meta.domains.join(' ')}">
+      (d) => `<a class="dive-card" href="dive/${d.id}/" data-domains="${escapeAttr(d.meta.domains.join(' '))}" data-search="${escapeAttr(d.title.toLowerCase())}">
   <span class="dc-name">${escapeAttr(d.title.split(':')[0])}</span>
   <span class="dc-headline">${escapeAttr(d.headline)}</span>
   ${d.eliTeaser ? `<span class="dc-eli"><b>Like you're 10:</b> ${escapeAttr(d.eliTeaser)}</span>` : ''}
@@ -460,10 +460,14 @@ ${rewriteLinks(whySection, '')}
 
 <section class="home-section" id="dives">
   <h2>The deep-dives</h2>
-  <div class="filter-row" role="group" aria-label="Filter by domain">
-    <button type="button" class="filter-chip" aria-pressed="true">All</button>
-    ${domainSet.map((d) => `<button type="button" class="filter-chip" data-domain="${escapeAttr(d)}" aria-pressed="false">${escapeAttr(d)}</button>`).join('\n    ')}
+  <div class="filter-bar">
+    <div class="filter-row" role="group" aria-label="Filter by domain">
+      <button type="button" class="filter-chip" aria-pressed="true">All</button>
+      ${domainSet.map((d) => `<button type="button" class="filter-chip" data-domain="${escapeAttr(d)}" aria-pressed="false">${escapeAttr(d)}</button>`).join('\n      ')}
+    </div>
+    <input type="search" class="filter-search" id="dive-search" placeholder="Search by name…" aria-label="Search deep-dives by name" autocomplete="off">
   </div>
+  <p class="filter-status" aria-live="polite"></p>
   <div class="dive-grid">
 ${cards}
   </div>

@@ -54,178 +54,182 @@ alongside it. That is the whole method.</p>
 
 <section class="home-section" id="dives">
   <h2>The deep-dives</h2>
-  <div class="filter-row" role="group" aria-label="Filter by domain">
-    <button type="button" class="filter-chip" aria-pressed="true">All</button>
-    <button type="button" class="filter-chip" data-domain="cache" aria-pressed="false">cache</button>
-    <button type="button" class="filter-chip" data-domain="container" aria-pressed="false">container</button>
-    <button type="button" class="filter-chip" data-domain="database" aria-pressed="false">database</button>
-    <button type="button" class="filter-chip" data-domain="distributed" aria-pressed="false">distributed</button>
-    <button type="button" class="filter-chip" data-domain="editor" aria-pressed="false">editor</button>
-    <button type="button" class="filter-chip" data-domain="language" aria-pressed="false">language</button>
-    <button type="button" class="filter-chip" data-domain="media" aria-pressed="false">media</button>
-    <button type="button" class="filter-chip" data-domain="ml-framework" aria-pressed="false">ml-framework</button>
-    <button type="button" class="filter-chip" data-domain="networking" aria-pressed="false">networking</button>
-    <button type="button" class="filter-chip" data-domain="orchestration" aria-pressed="false">orchestration</button>
-    <button type="button" class="filter-chip" data-domain="proxy-lb" aria-pressed="false">proxy-lb</button>
-    <button type="button" class="filter-chip" data-domain="queue-log" aria-pressed="false">queue-log</button>
-    <button type="button" class="filter-chip" data-domain="runtime" aria-pressed="false">runtime</button>
-    <button type="button" class="filter-chip" data-domain="search-engine" aria-pressed="false">search-engine</button>
-    <button type="button" class="filter-chip" data-domain="storage-engine" aria-pressed="false">storage-engine</button>
-    <button type="button" class="filter-chip" data-domain="vcs" aria-pressed="false">vcs</button>
-    <button type="button" class="filter-chip" data-domain="web-server" aria-pressed="false">web-server</button>
+  <div class="filter-bar">
+    <div class="filter-row" role="group" aria-label="Filter by domain">
+      <button type="button" class="filter-chip" aria-pressed="true">All</button>
+      <button type="button" class="filter-chip" data-domain="cache" aria-pressed="false">cache</button>
+      <button type="button" class="filter-chip" data-domain="container" aria-pressed="false">container</button>
+      <button type="button" class="filter-chip" data-domain="database" aria-pressed="false">database</button>
+      <button type="button" class="filter-chip" data-domain="distributed" aria-pressed="false">distributed</button>
+      <button type="button" class="filter-chip" data-domain="editor" aria-pressed="false">editor</button>
+      <button type="button" class="filter-chip" data-domain="language" aria-pressed="false">language</button>
+      <button type="button" class="filter-chip" data-domain="media" aria-pressed="false">media</button>
+      <button type="button" class="filter-chip" data-domain="ml-framework" aria-pressed="false">ml-framework</button>
+      <button type="button" class="filter-chip" data-domain="networking" aria-pressed="false">networking</button>
+      <button type="button" class="filter-chip" data-domain="orchestration" aria-pressed="false">orchestration</button>
+      <button type="button" class="filter-chip" data-domain="proxy-lb" aria-pressed="false">proxy-lb</button>
+      <button type="button" class="filter-chip" data-domain="queue-log" aria-pressed="false">queue-log</button>
+      <button type="button" class="filter-chip" data-domain="runtime" aria-pressed="false">runtime</button>
+      <button type="button" class="filter-chip" data-domain="search-engine" aria-pressed="false">search-engine</button>
+      <button type="button" class="filter-chip" data-domain="storage-engine" aria-pressed="false">storage-engine</button>
+      <button type="button" class="filter-chip" data-domain="vcs" aria-pressed="false">vcs</button>
+      <button type="button" class="filter-chip" data-domain="web-server" aria-pressed="false">web-server</button>
+    </div>
+    <input type="search" class="filter-search" id="dive-search" placeholder="Search by name…" aria-label="Search deep-dives by name" autocomplete="off">
   </div>
+  <p class="filter-status" aria-live="polite"></p>
   <div class="dive-grid">
-<a class="dive-card" href="dive/redis/" data-domains="cache database networking">
+<a class="dive-card" href="dive/redis/" data-domains="cache database networking" data-search="redis: an event loop plus data structures built like they're the product">
   <span class="dc-name">Redis</span>
   <span class="dc-headline">an event loop plus data structures built like they're the product</span>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant with exactly one chef. Redis is a kitchen with one chef (one thread runs all commands) and a doorbell — the event loop — that rings whenever a table needs something or a timer goes…</span>
   <span class="dc-meta"><span class="chip domain">cache</span><span class="chip domain">database</span><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/sqlite/" data-domains="database storage-engine">
+<a class="dive-card" href="dive/sqlite/" data-domains="database storage-engine" data-search="sqlite: a database as a layered library — and a query as compiled bytecode">
   <span class="dc-name">SQLite</span>
   <span class="dc-headline">a database as a layered library — and a query as compiled bytecode</span>
   <span class="dc-eli"><b>Like you're 10:</b> A magic cookbook that lives inside your toy box. Most databases are restaurants: you phone a waiter (a server process) who talks to the kitchen. SQLite is a cookbook that lives in YOUR box —…</span>
   <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/git/" data-domains="vcs storage-engine">
+<a class="dive-card" href="dive/git/" data-domains="vcs storage-engine" data-search="git: the version control that is really a content-addressed database">
   <span class="dc-name">git</span>
   <span class="dc-headline">the version control that is really a content-addressed database</span>
   <span class="dc-eli"><b>Like you're 10:</b> A photo album where nothing is ever erased. Every time you save your drawing, git takes a brand-new photo of each changed file (a blob ), a new photo of each folder's list of contents (a tree ),…</span>
   <span class="dc-meta"><span class="chip domain">vcs</span><span class="chip domain">storage-engine</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/leveldb/" data-domains="storage-engine">
+<a class="dive-card" href="dive/leveldb/" data-domains="storage-engine" data-search="leveldb: the lsm-tree in its teachable form — logs, levels, and immutable tables">
   <span class="dc-name">LevelDB</span>
   <span class="dc-headline">the LSM-tree in its teachable form — logs, levels, and immutable tables</span>
   <span class="dc-eli"><b>Like you're 10:</b> A diary, a scratch page, and a tidy-up robot. When you tell LevelDB something ( Put ), it does two fast things: writes the fact in pen in a diary you never re-read (the WAL — its only job is to…</span>
   <span class="dc-meta"><span class="chip domain">storage-engine</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/nginx/" data-domains="web-server proxy-lb">
+<a class="dive-card" href="dive/nginx/" data-domains="web-server proxy-lb" data-search="nginx: shared-nothing processes, state machines, and ownership by lifetime">
   <span class="dc-name">nginx</span>
   <span class="dc-headline">shared-nothing processes, state machines, and ownership by lifetime</span>
   <span class="dc-eli"><b>Like you're 10:</b> An ice cream shop where every order gets a tray. nginx is a shop with one manager (the master process) who never scoops ice cream — the manager's whole job is hiring, watching, and replacing scoop…</span>
   <span class="dc-meta"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/postgresql/" data-domains="database storage-engine">
+<a class="dive-card" href="dive/postgresql/" data-domains="database storage-engine" data-search="postgresql: the relational server as a federation of cooperating processes">
   <span class="dc-name">PostgreSQL</span>
   <span class="dc-headline">the relational server as a federation of cooperating processes</span>
   <span class="dc-eli"><b>Like you're 10:</b> A bank where every customer gets their own clerk — and receipts are never erased. Walk in (connect) and the bank manager (the postmaster) assigns you a personal clerk (a backend process) who stays…</span>
   <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/kafka/" data-domains="queue-log distributed storage-engine">
+<a class="dive-card" href="dive/kafka/" data-domains="queue-log distributed storage-engine" data-search="kafka: the append-only log as an operating system for data">
   <span class="dc-name">Kafka</span>
   <span class="dc-headline">the append-only log as an operating system for data</span>
   <span class="dc-eli"><b>Like you're 10:</b> A conveyor belt of numbered boxes. Kafka is a very long belt that only moves forward (the append-only log). Senders drop sealed boxes onto it (batches of records), and each box gets a number as it…</span>
   <span class="dc-meta"><span class="chip domain">queue-log</span><span class="chip domain">distributed</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/kubernetes/" data-domains="orchestration container distributed">
+<a class="dive-card" href="dive/kubernetes/" data-domains="orchestration container distributed" data-search="kubernetes: desired state + reconcile loops — an operating system as a control system">
   <span class="dc-name">Kubernetes</span>
   <span class="dc-headline">desired state + reconcile loops — an operating system as a control system</span>
   <span class="dc-eli"><b>Like you're 10:</b> A wish list pinned to the fridge, and a helper robot that keeps comparing. You never tell the house what to do step by step — you pin a wish to the fridge: &quot;5 cupcakes on the table&quot; (a spec:…</span>
   <span class="dc-meta"><span class="chip domain">orchestration</span><span class="chip domain">container</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/cpython/" data-domains="runtime language">
+<a class="dive-card" href="dive/cpython/" data-domains="runtime language" data-search="cpython: the interpreter that won by making extensions easy">
   <span class="dc-name">CPython</span>
   <span class="dc-headline">the interpreter that won by making extensions easy</span>
   <span class="dc-eli"><b>Like you're 10:</b> A puppet theater where every puppet wears a name tag. Every puppet (every value) wears a tag that counts how many hands are holding it (the reference count). The moment the count reaches zero,…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/moby/" data-domains="container">
+<a class="dive-card" href="dive/moby/" data-domains="container" data-search="moby/docker: images as content-addressed layers, execution as delegation">
   <span class="dc-name">Moby/Docker</span>
   <span class="dc-headline">images as content-addressed layers, execution as delegation</span>
   <span class="dc-eli"><b>Like you're 10:</b> A program shipped as a stack of clear plastic sheets. Instead of mailing someone a whole heavy toy box (a whole computer disk image), Docker ships a stack of clear sheets: each sheet has part of…</span>
   <span class="dc-meta"><span class="chip domain">container</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/vscode/" data-domains="editor">
+<a class="dive-card" href="dive/vscode/" data-domains="editor" data-search="vs code: extension architecture as the product — process isolation and protocol seams">
   <span class="dc-name">VS Code</span>
   <span class="dc-headline">extension architecture as the product — process isolation and protocol seams</span>
   <span class="dc-eli"><b>Like you're 10:</b> A school where guest teachers get their own room — never the office. VS Code is a school. The front office (the workbench — the UI you see) never lets guest teachers (extensions) teach from inside…</span>
   <span class="dc-meta"><span class="chip domain">editor</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/etcd/" data-domains="distributed database">
+<a class="dive-card" href="dive/etcd/" data-domains="distributed database" data-search="etcd: raft as a deterministic state machine, keyspace as mvcc history">
   <span class="dc-name">etcd</span>
   <span class="dc-headline">Raft as a deterministic state machine, keyspace as MVCC history</span>
   <span class="dc-eli"><b>Like you're 10:</b> A club notebook that most members must agree on. etcd is a club with one precious notebook (the keyspace). Any important note (a Put) is only written after MOST members agree on the next line (a…</span>
   <span class="dc-meta"><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/elasticsearch/" data-domains="search-engine distributed database">
+<a class="dive-card" href="dive/elasticsearch/" data-domains="search-engine distributed database" data-search="elasticsearch: a search engine behind a friendly distributed façade">
   <span class="dc-name">Elasticsearch</span>
   <span class="dc-headline">a search engine behind a friendly distributed façade</span>
   <span class="dc-eli"><b>Like you're 10:</b> A library with a &quot;today&quot; drawer. When a new book's index card arrives, the librarian drops it into a &quot;today&quot; pile (the in-memory buffer) — writing to the pile is instant, so nobody waits. Every…</span>
   <span class="dc-meta"><span class="chip domain">search-engine</span><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/memcached/" data-domains="cache">
+<a class="dive-card" href="dive/memcached/" data-domains="cache" data-search="memcached: the cache that kept the server dumb">
   <span class="dc-name">Memcached</span>
   <span class="dc-headline">the cache that kept the server dumb</span>
   <span class="dc-eli"><b>Like you're 10:</b> A wall of mail slots in fixed sizes. Memcached is a post office wall where every slot is one of a few fixed sizes (slab classes): small, medium, large. When a letter arrives (a SET ), the clerk…</span>
   <span class="dc-meta"><span class="chip domain">cache</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/httpd/" data-domains="web-server">
+<a class="dive-card" href="dive/httpd/" data-domains="web-server" data-search="apache httpd: the web server as a hook-running extension platform">
   <span class="dc-name">Apache httpd</span>
   <span class="dc-headline">the web server as a hook-running extension platform</span>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant where the conveyor belt is the restaurant. In Apache's kitchen there is no head chef doing everything — there is a conveyor belt (the filter chain: buckets of soup/bytes pass from…</span>
   <span class="dc-meta"><span class="chip domain">web-server</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/zookeeper/" data-domains="distributed database">
+<a class="dive-card" href="dive/zookeeper/" data-domains="distributed database" data-search="zookeeper: consensus wrapped in a tiny ordered filesystem">
   <span class="dc-name">ZooKeeper</span>
   <span class="dc-headline">consensus wrapped in a tiny ordered filesystem</span>
   <span class="dc-eli"><b>Like you're 10:</b> A notebook copied identically across several offices. Every office (an ensemble server) keeps the exact same notebook of pages (znodes: /app1/leader, /jobs/17/status ). Writes always go to head…</span>
   <span class="dc-meta"><span class="chip domain">distributed</span><span class="chip domain">database</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/nats/" data-domains="queue-log networking">
+<a class="dive-card" href="dive/nats/" data-domains="queue-log networking" data-search="nats: a subject trie with a wire protocol small enough to memorize">
   <span class="dc-name">NATS</span>
   <span class="dc-headline">a subject trie with a wire protocol small enough to memorize</span>
   <span class="dc-eli"><b>Like you're 10:</b> A switchboard for mail addressed by topic. Anyone can shout &quot;letter for orders.new.eu!&quot; (PUB) and hand it to the operator; anyone can say &quot;I want everything about orders.*.eu &quot; or &quot;everything…</span>
   <span class="dc-meta"><span class="chip domain">queue-log</span><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/libuv/" data-domains="runtime networking">
+<a class="dive-card" href="dive/libuv/" data-domains="runtime networking" data-search="libuv: the event loop distilled into a portable, embeddable library">
   <span class="dc-name">libuv</span>
   <span class="dc-headline">the event loop distilled into a portable, embeddable library</span>
   <span class="dc-eli"><b>Like you're 10:</b> A receptionist who never watches anything for long. The receptionist (the event loop) keeps a wall of numbered mailboxes — one per thing she watches (a socket, a timer) — and a big board that…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/runc/" data-domains="container">
+<a class="dive-card" href="dive/runc/" data-domains="container" data-search="runc: a container is a config file plus a choreographed chain of syscalls">
   <span class="dc-name">runc</span>
   <span class="dc-headline">a container is a config file plus a choreographed chain of syscalls</span>
   <span class="dc-eli"><b>Like you're 10:</b> A porter who builds you a hotel room and then quits. The hotel is the Linux kernel (it owns all the rooms forever). The porter (the runc run you type) reads your wishlist ( config.json: one room,…</span>
   <span class="dc-meta"><span class="chip domain">container</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/lua/" data-domains="language runtime">
+<a class="dive-card" href="dive/lua/" data-domains="language runtime" data-search="lua: one tagged union, a register vm, and the friendliest embedding api in the business">
   <span class="dc-name">Lua</span>
   <span class="dc-headline">one tagged union, a register VM, and the friendliest embedding API in the business</span>
   <span class="dc-eli"><b>Like you're 10:</b> A craftsman's workshop that fits inside anyone's garage. The big machine (your game, your server — the host program, written in C) installs a small workbench (the Lua interpreter, lua_State ) in…</span>
   <span class="dc-meta"><span class="chip domain">language</span><span class="chip domain">runtime</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/envoy/" data-domains="proxy-lb distributed">
+<a class="dive-card" href="dive/envoy/" data-domains="proxy-lb distributed" data-search="envoy: a fleet of single-threaded proxies steered by an api">
   <span class="dc-name">Envoy</span>
   <span class="dc-headline">a fleet of single-threaded proxies steered by an API</span>
   <span class="dc-eli"><b>Like you're 10:</b> A sorting facility where every sorter has their own manual — and head office rewrites the manuals by phone. Letters (connections) arrive at loading docks (listeners) and ride conveyor belts…</span>
   <span class="dc-meta"><span class="chip domain">proxy-lb</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/curl/" data-domains="networking">
+<a class="dive-card" href="dive/curl/" data-domains="networking" data-search="curl: a transfer state machine designed to live inside someone else's event loop">
   <span class="dc-name">curl</span>
   <span class="dc-headline">a transfer state machine designed to live inside someone else's event loop</span>
   <span class="dc-eli"><b>Like you're 10:</b> A travel agency that never insists on driving you there. You can say &quot;get me this webpage&quot; (the easy interface: curl_easy_perform ) and the agency does everything while you wait outside. But you…</span>
   <span class="dc-meta"><span class="chip domain">networking</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/llama-cpp/" data-domains="ml-framework">
+<a class="dive-card" href="dive/llama-cpp/" data-domains="ml-framework" data-search="llama.cpp: llm inference with no framework — tensors, a graph, and quantization as the product">
   <span class="dc-name">llama.cpp</span>
   <span class="dc-headline">LLM inference with no framework — tensors, a graph, and quantization as the product</span>
   <span class="dc-eli"><b>Like you're 10:</b> A bakery that rebuilds its conveyor belt for every cookie — and stores flour in tiny compressed jars. The recipe (the model architecture, one C++ builder per model family) says: mix, shape, bake,…</span>
   <span class="dc-meta"><span class="chip domain">ml-framework</span><span class="chip diff-moderate">moderate</span></span>
 </a>
-<a class="dive-card" href="dive/nodejs/" data-domains="runtime">
+<a class="dive-card" href="dive/nodejs/" data-domains="runtime" data-search="node.js: the boundary is the platform — an engine and a loop behind one js-facing seam">
   <span class="dc-name">Node.js</span>
   <span class="dc-headline">the boundary is the platform — an engine and a loop behind one JS-facing seam</span>
   <span class="dc-eli"><b>Like you're 10:</b> A factory with one translator's desk. The factory floor is full of machines that only speak Machine — sockets, files, clocks (libuv handles and OS syscalls) — and one brilliant engineer who only…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/ffmpeg/" data-domains="media networking">
+<a class="dive-card" href="dive/ffmpeg/" data-domains="media networking" data-search="ffmpeg: two thousand components behind four boring interfaces">
   <span class="dc-name">FFmpeg</span>
   <span class="dc-headline">two thousand components behind four boring interfaces</span>
   <span class="dc-eli"><b>Like you're 10:</b> A factory where every machine speaks the same plug. Packages arrive from trucks (the demuxers take containers apart into packets — still-wrapped presents). Unwrapping machines ( decoders ) open…</span>
   <span class="dc-meta"><span class="chip domain">media</span><span class="chip domain">networking</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/pytorch/" data-domains="ml-framework">
+<a class="dive-card" href="dive/pytorch/" data-domains="ml-framework" data-search="pytorch: the forward pass that records its own graph">
   <span class="dc-name">PyTorch</span>
   <span class="dc-headline">the forward pass that records its own graph</span>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every cook writes a receipt for what they made, and at closing time a cleanup crew walks the receipts backwards to pay everyone back. When you order (call torch.mul in Python),…</span>
