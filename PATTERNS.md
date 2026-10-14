@@ -87,7 +87,11 @@ postmaster forks backends, one connection per process;
 expendable snapshotter over copy-on-write memory;
 [Apache httpd](deep-dives/httpd.md) — the MPM parent supervises score-
 board-tracked children and respawns them while a graceful restart
-drains the old generation.
+drains the old generation;
+[Servo](deep-dives/servo.md) — the
+constellation thread supervises expendable pipelines (script
+threads or sandboxed child processes) and is chaos-tested against
+random pipeline death.
 
 **Why it recurs:** crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.
@@ -113,7 +117,10 @@ library: phases, watcher queues, and a poller backend per OS;
 [Envoy](deep-dives/envoy.md) — one dispatcher per worker thread over
 thread-local config snapshots;
 [curl](deep-dives/curl.md) — the tenant's side of the same contract:
-a transfer state machine that rents any foreign loop via pollsets.
+a transfer state machine that rents any foreign loop via pollsets;
+[Servo](deep-dives/servo.md) — one task-queue event loop per
+site-instance script thread implements the WHATWG event-loop
+processing model, so one page's hang cannot stall another site.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -238,7 +245,10 @@ and filters as plain C structs behind one callback contract each
 compatible implementations coexist in one program;
 [PyTorch](deep-dives/pytorch.md) — every extension (custom
 ops, backends, interceptors, compilers) registers at the one
-dispatch table, which is how eager Python stayed a platform.
+dispatch table, which is how eager Python stayed a platform;
+[Servo](deep-dives/servo.md) — the engine grew an embedding API
+(ServoBuilder/WebView delegates, protocol registry, factory traits)
+so shells and C hosts (servoshell, ffi/capi) extend without forking.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -282,7 +292,10 @@ lists, so the "plugin registry" is a static C array at link time
 [PyTorch](deep-dives/pytorch.md) —
 native_functions.yaml + derivatives.yaml generate the bindings,
 autograd kernels, backward nodes, and dispatch registrations for
-2,000+ operators from one schema pair.
+2,000+ operators from one schema pair;
+[Servo](deep-dives/servo.md) — 576 WebIDL files are code-generated
+into Rust DOM bindings and JS glue, so the web API surface cannot
+drift from its implementations.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems

@@ -526,7 +526,7 @@ projects:
     license: MPL-2.0
     domains: [browser-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 4, teachability: 3, domain_fit: 3 }
     why: >
       A browser engine built as independent crates (html5ever parser,

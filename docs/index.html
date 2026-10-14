@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">26 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">27 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -57,6 +57,7 @@ alongside it. That is the whole method.</p>
   <div class="filter-bar">
     <div class="filter-row" role="group" aria-label="Filter by domain">
       <button type="button" class="filter-chip" aria-pressed="true">All</button>
+      <button type="button" class="filter-chip" data-domain="browser-engine" aria-pressed="false">browser-engine</button>
       <button type="button" class="filter-chip" data-domain="cache" aria-pressed="false">cache</button>
       <button type="button" class="filter-chip" data-domain="container" aria-pressed="false">container</button>
       <button type="button" class="filter-chip" data-domain="database" aria-pressed="false">database</button>
@@ -235,6 +236,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every cook writes a receipt for what they made, and at closing time a cleanup crew walks the receipts backwards to pay everyone back. When you order (call torch.mul in Python),…</span>
   <span class="dc-meta"><span class="chip domain">ml-framework</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/servo/" data-domains="browser-engine" data-search="servo: a browser engine as a supervised graph of message-passing pipelines">
+  <span class="dc-name">Servo</span>
+  <span class="dc-headline">a browser engine as a supervised graph of message-passing pipelines</span>
+  <span class="dc-eli"><b>Like you're 10:</b> An office building where each website gets a workroom, run by a building manager who never does any of the tenants' work herself. The building manager (the Constellation thread) assigns rooms…</span>
+  <span class="dc-meta"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -266,7 +273,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 26 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 27 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -363,7 +370,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>browser-engine <span class="count">(2)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/servo/servo" rel="noopener">Servo ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/servo/">Servo</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A browser engine built as independent crates (html5ever parser, stylo style system, WR/WebRender compositor) with task-based parallelism instead of one monolithic main thread. Teaches how to decompose a gigantic…</div></li>
 <li><span class="cat-name"><a href="https://github.com/chromium/chromium" rel="noopener">Chromium ↗</a></span><span class="cat-status cataloged">cataloged</span>
   <div class="cat-why">The most dominant browser engine ever and the codebase behind Chrome/Edge/Opera: multiprocess sandboxing (browser vs renderer vs utility processes), Mojo IPC, the V8/Blink split. Its process architecture — splitting…</div></li></ul>
