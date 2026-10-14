@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">23 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">24 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -212,6 +212,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A bakery that rebuilds its conveyor belt for every cookie — and stores flour in tiny compressed jars. The recipe (the model architecture, one C++ builder per model family) says: mix, shape, bake,…</span>
   <span class="dc-meta"><span class="chip domain">ml-framework</span><span class="chip diff-moderate">moderate</span></span>
 </a>
+<a class="dive-card" href="dive/nodejs/" data-domains="runtime">
+  <span class="dc-name">Node.js</span>
+  <span class="dc-headline">the boundary is the platform — an engine and a loop behind one JS-facing seam</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A factory with one translator's desk. The factory floor is full of machines that only speak Machine — sockets, files, clocks (libuv handles and OS syscalls) — and one brilliant engineer who only…</span>
+  <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -243,7 +249,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 23 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 24 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -300,7 +306,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>runtime <span class="count">(4)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/nodejs/node" rel="noopener">Node.js ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/nodejs/">Node.js</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">V8 + libuv + a module system, glued so that JavaScript became a server language. Teaches the embedding lesson: how you wrap an engine (handles/scopes/contexts in V8) and an event loop (libuv) into a coherent…</div></li>
 <li><span class="cat-name"><a href="dive/cpython/">CPython</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The most widely run language implementation on earth, and it won that position through design decisions that predate its hype: a stable C API + reference-counted PyObject model that made native extensions…</div></li>

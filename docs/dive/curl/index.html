@@ -47,7 +47,7 @@ wire, client writers for bytes to the application — let TLS, proxies,
 HTTP/2, and decompression stack like envelopes without any protocol
 knowing about the others. Portability and API stability are treated as
 architectural commitments, not packaging chores.</p>
-<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/nginx.md">nginx</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a> dives:
+<p>Read it against the <a href="../nginx/">nginx</a> and <a href="../envoy/">Envoy</a> dives:
 those own the process and the event loop; curl is the inversion — a
 network engine that must <em>rent</em> concurrency from whatever loop,
 thread, or coroutine the embedding application already has.</p>
@@ -238,7 +238,7 @@ easy per invocation.
 <strong>Why:</strong> no threads, no timers of its own — every blocking
 decision is exported as pollsets and timeout hints. This is what
 lets libevent/libuv/epoll hosts embed curl as <em>one more fd source</em>
-(the same &quot;rent your clock&quot; contract as <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv&#39;s</a>
+(the same &quot;rent your clock&quot; contract as <a href="../libuv/">libuv&#39;s</a>
 loop, offered from the tenant side).</p>
 </li>
 <li><p><strong><code>Curl_cfilter</code> + <code>Curl_cftype</code> — the wire-side vtable chain.</strong>
@@ -345,7 +345,7 @@ must itself be pollset-driven.</li>
 <li><strong>Verdict:</strong> unambiguously right for a library — this is why curl
 embeds everywhere from PostgreSQL extensions to games. Your
 <em>application</em> server should invert it and own the loop
-(<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/nginx.md">nginx</a>); a tenant must rent.</li>
+(<a href="../nginx/">nginx</a>); a tenant must rent.</li>
 </ul>
 <h3 id="trade-off-2-filter-vtable-chains-over-monolithic-protocol-code">Trade-off 2: filter vtable chains over monolithic protocol code</h3>
 <ul>
@@ -359,7 +359,7 @@ wire, client writers toward the app — each node a small vtable.</li>
 traces that need <code>CURL_TRC</code> tracing to follow; a naive single-file
 HTTP fetch is genuinely simpler to read.</li>
 <li><strong>Verdict:</strong> right once the matrix exceeds ~2×2, which it did by<ol start="2001">
-<li>The same reasoning produced HTTP/2&#39;s layering in <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a>;
+<li>The same reasoning produced HTTP/2&#39;s layering in <a href="../envoy/">Envoy</a>;
 curl&#39;s version is notable for doing it in C with zero
 allocation churn per call.</li>
 </ol>
@@ -447,7 +447,7 @@ links&quot; is a feature users can build businesses on.</li>
 add 2 if you also read a vtls backend.</li>
 <li>Prerequisites: solid C (structs of function pointers, <code>poll(2)</code>);
 comfort with non-blocking sockets and <code>epoll</code>-style thinking —
-the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv</a> dive is the perfect companion read; HTTP/1.1
+the <a href="../libuv/">libuv</a> dive is the perfect companion read; HTTP/1.1
 verbs at the level of &quot;GET has headers&quot; (RFC 9110 skim, 20 min).</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -458,7 +458,7 @@ and connection filters (see also <code>docs/internals/CLIENT-WRITERS.md</code>).
 <li>Daniel Stenberg, <em>Everything curl</em> — <a href="https://everything.curl.dev/">https://everything.curl.dev/</a>
 (chapters on the multi API and connection filters).</li>
 <li>RFC 8305 (Happy Eyeballs) — what <code>cf-ip-happy.c</code> implements.</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/libuv.md">libuv</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/curl/envoy.md">Envoy</a> dives in this atlas —
+<li>The <a href="../libuv/">libuv</a> and <a href="../envoy/">Envoy</a> dives in this atlas —
 the loop-owner perspective this design deliberately rents from.</li>
 </ul>
 
@@ -467,7 +467,7 @@ the loop-owner perspective this design deliberately rents from.</li>
   <a href="../envoy/"><span class="dir">← Previous dive</span>Envoy: a fleet of single-threaded proxies steered by an API</a>
   <a href="../llama-cpp/" style="text-align:right"><span class="dir">Next dive →</span>llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 22 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 22 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

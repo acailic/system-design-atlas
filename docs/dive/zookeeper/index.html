@@ -45,7 +45,7 @@ split, the request-processor pipeline that makes it real, and the
 trade-offs (strict ordering over throughput, one-shot watches over
 persistent streams, local reads over linearizable ones) that later
 systems — etcd, Consul — inherited or corrected.</p>
-<p>Read it after <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a>: the same problem (a small, strongly
+<p>Read it after <a href="../etcd/">etcd</a>: the same problem (a small, strongly
 consistent, watchable store), solved a decade earlier with a bespoke
 protocol (ZAB instead of Raft) and a tree instead of a flat keyspace.</p>
 <section class="eli10">
@@ -457,7 +457,7 @@ systems vocabulary; the hard parts are protocol invariants, not the
 code.</li>
 <li>Budget: ~8 hours for the reading path; the election/sync path
 (stops 11-12) deserves a second pass with the ZAB papers open.</li>
-<li>Prerequisites: what a WAL gives you (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a> dive
+<li>Prerequisites: what a WAL gives you (the <a href="../etcd/">etcd</a> dive
 builds the same background with Raft); quorum arithmetic (2f+1);
 sessions/leases as a concept. The original ZooKeeper paper (Hunt et
 al., 2008 — see below) is a genuine prerequisite, not decoration.</li>
@@ -472,7 +472,7 @@ implements.</li>
 <li>Apache ZooKeeper documentation — <a href="https://zookeeper.apache.org/doc/">https://zookeeper.apache.org/doc/</a> —
 especially the &quot;ZooKeeper Internals&quot; and &quot;Guarantees&quot; pages (the
 read-consistency caveats are documented there, honestly).</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/zookeeper/etcd.md">etcd</a> deep-dive in this atlas — the same store, one
+<li>The <a href="../etcd/">etcd</a> deep-dive in this atlas — the same store, one
 protocol generation later.</li>
 </ul>
 
@@ -481,7 +481,7 @@ protocol generation later.</li>
   <a href="../httpd/"><span class="dir">← Previous dive</span>Apache httpd: the web server as a hook-running extension platform</a>
   <a href="../nats/" style="text-align:right"><span class="dir">Next dive →</span>NATS: a subject trie with a wire protocol small enough to memorize</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 16 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 16 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

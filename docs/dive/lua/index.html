@@ -45,7 +45,7 @@ value type (<code>TValue</code>), one table structure doing duty as object,
 package and namespace, one metamethod protocol replacing class
 systems, and one <em>virtual stack</em> between host and VM that makes the
 embedding boundary safe without ever exposing a pointer.</p>
-<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/cpython.md">CPython</a> dive: same problem domain,
+<p>Read it against the <a href="../cpython/">CPython</a> dive: same problem domain,
 inverted priorities. CPython optimizes for being a platform (batteries,
 C extensions reaching <em>into</em> objects); Lua optimizes for being a
 tenant (tiny, reentrant, no global state beyond one <code>lua_State</code>
@@ -341,8 +341,8 @@ keep steps valid.</li>
 <li><strong>Given up:</strong> the simple two-line &quot;mark all, sweep all&quot; collector,
 and some throughput — incremental collectors do more total work.</li>
 <li><strong>Verdict:</strong> right whenever you are a guest in someone else&#39;s
-latency budget — the same reasoning that drove <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/redis.md">Redis&#39;s</a>
-incremental rehash and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/zookeeper.md">ZooKeeper&#39;s</a> steady-state
+latency budget — the same reasoning that drove <a href="../redis/">Redis&#39;s</a>
+incremental rehash and <a href="../zookeeper/">ZooKeeper&#39;s</a> steady-state
 design. Wrong for short-lived CLI processes where a sweep at exit
 is free.</li>
 </ul>
@@ -441,7 +441,7 @@ especially the stack-protocol chapters and the C API part.</li>
 behind &quot;small core, embed everywhere.&quot;</li>
 <li><code>lua-users.org</code> wiki — the C/Lua binding idioms and <code>luaL_ref</code>
 patterns this dive cites.</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/lua/cpython.md">CPython</a> dive in this atlas for the contrasting
+<li>The <a href="../cpython/">CPython</a> dive in this atlas for the contrasting
 &quot;language as platform&quot; design.</li>
 </ul>
 
@@ -450,7 +450,7 @@ patterns this dive cites.</li>
   <a href="../runc/"><span class="dir">← Previous dive</span>runc: a container is a config file plus a choreographed chain of syscalls</a>
   <a href="../envoy/" style="text-align:right"><span class="dir">Next dive →</span>Envoy: a fleet of single-threaded proxies steered by an API</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 20 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 20 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

@@ -46,7 +46,7 @@ Go program. The design lesson: a &quot;container runtime&quot; is not a
 technology — it is a <em>specification made executable</em>, and the hardest
 engineering is not the syscalls but the two-process bootstrap protocol
 that must be safe across privilege boundaries.</p>
-<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/moby.md">Moby</a> dive: Moby wraps images, layers,
+<p>Read it against the <a href="../moby/">Moby</a> dive: Moby wraps images, layers,
 volumes and networks around a daemon; runc is the bottom turtle — the
 place where &quot;container&quot; finally resolves into <code>clone(2)</code>, <code>pivot_root(2)</code>
 and <code>execve(2)</code>.</p>
@@ -475,7 +475,7 @@ and <em>Linux-specific</em> first).</li>
 are visibly scar tissue from these.</li>
 <li><code>man 7 namespaces</code>, <code>man 7 user_namespaces</code>, <code>man 2 pivot_root</code>,
 <code>man 7 cgroups</code> — the syscall-level ground truth.</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/moby.md">Moby</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/runc/libuv.md">libuv</a> dives in this atlas —
+<li>The <a href="../moby/">Moby</a> and <a href="../libuv/">libuv</a> dives in this atlas —
 the layers above (image/daemon) and below (portable event loop)
 of the same stack.</li>
 </ul>
@@ -485,7 +485,7 @@ of the same stack.</li>
   <a href="../libuv/"><span class="dir">← Previous dive</span>libuv: the event loop distilled into a portable, embeddable library</a>
   <a href="../lua/" style="text-align:right"><span class="dir">Next dive →</span>Lua: one tagged union, a register VM, and the friendliest embedding API in the business</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 19 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 19 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

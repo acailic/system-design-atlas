@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Node.js: the boundary is the platform — an engine and a loop behind one JS-facing seam — System Design Atlas</title>
+<meta name="description" content="Node.js is V8 plus libuv plus a glue layer — and the glue layer is the product. Its design thesis is the language boundary as the architecture: the C++ core ( src/*.cc ) contains no HTTP, no">
+<meta property="og:title" content="Node.js: the boundary is the platform — an engine and a loop behind one JS-facing seam — System Design Atlas">
+<meta property="og:description" content="Node.js is V8 plus libuv plus a glue layer — and the glue layer is the product. Its design thesis is the language boundary as the architecture: the C++ core ( src/*.cc ) contains no HTTP, no">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/nodejs/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/nodejs/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-http-request-kernel-to-user-callback-and-back">Walkthrough: one HTTP request, kernel to user callback and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Node.js: the boundary is the platform — an engine and a loop behind one JS-facing seam</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/nodejs/node" rel="noopener">MIT</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>dd7235cb6a55e9987551719ee57de9c3ff59d115</code> · 2026-10-14 · <a href="https://github.com/nodejs/node" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Node.js is V8 plus libuv plus a glue layer — and the glue layer is
+the product. Its design thesis is <strong>the language boundary as the
+architecture</strong>: the C++ core (<code>src/*.cc</code>) contains no HTTP, no
+streams-as-API, no <code>require</code> — only the machinery that turns C++
+events into JavaScript calls (lifetimes, contexts, one callback
+choke point), while almost the entire standard library lives on the
+JS side (<code>lib/*.js</code>), <em>on top of</em> the boundary, calling back into C++
+through narrow, unstable &quot;internal bindings.&quot; This deep-dive teaches
+how an embeddable engine (V8 isolates, contexts, handle scopes) and
+an embeddable event loop (the <a href="../libuv/">libuv</a> loop) are assembled
+into a coherent platform: the bootstrap chain, the single
+<code>MakeCallback</code> door every I/O event walks through, the startup
+snapshot that skips it all, and the two-tier ABI (private
+<code>internalBinding</code> vs stable N-API) that let the core churn while
+native addons survived — the decision that made <code>npm</code> possible.</p>
+<p>Read it after <a href="../libuv/">libuv</a> (what the loop underneath does) and
+alongside <a href="../cpython/">CPython</a> (the other great &quot;wrap an engine
+into a platform&quot; story, with the opposite ABI instincts) and
+<a href="../lua/">Lua</a> (a boundary designed as a virtual-stack C API):
+Node is what an embedding looks like when the stdlib itself lives on
+the guest side of the seam.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A factory with one translator&#39;s desk.</strong> The factory floor is full
+of machines that only speak Machine — sockets, files, clocks (libuv
+handles and OS syscalls) — and one brilliant engineer who only
+speaks Human (your JavaScript, running on V8). The translator (the
+C++ core) never designs the engineer&#39;s projects and never runs the
+machines; he only translates. When a machine finishes, the
+management (the event loop) taps the translator, who walks to
+<strong>one single desk</strong> (InternalMakeCallback in <code>src/api/callback.cc</code>),
+stamps the logbook (async_hooks bookkeeping), hands the report to
+the engineer, and — crucially — waits until she is done to flush her
+inbox (microtask checkpoint: resolved promises, queued <code>then</code>s)
+before letting anything else through. A second workroom (a
+<code>worker_threads</code> isolate) never shares tools with the first; the two
+pass notes through pneumatic tubes (MessagePort, an
+<code>uv_async_t</code> doorbell) — copies, never shared tools. And the best
+part: the factory&#39;s own instruction manual (the standard library,
+<code>lib/*.js</code>) is written in the engineer&#39;s language, not Machine — so
+any engineer can read how her factory works, and even fix it.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> one serial desk keeps all
+JavaScript single-threaded and hookable in one place, while a
+guest-language stdlib turned every Node user into a potential Node
+developer — which is how an ecosystem of a million packages grew.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph proc[&quot;per process (one)&quot;]
+        PLAT[&quot;NodePlatform : MultiIsolatePlatform&lt;br/&gt;src/node_platform.cc:227&lt;br/&gt;V8 background threads + foreground&lt;br/&gt;task runners woken by uv_async_t&quot;]
+        SRC[&quot;embedded JS sources&lt;br/&gt;tools/js2c.cc → node_javascript.cc&lt;br/&gt;BuiltinSourceMap (copy-on-write)&quot;]
+        SNAP[&quot;startup snapshot blob&lt;br/&gt;SnapshotBuilder::Generate&lt;br/&gt;src/node_snapshotable.cc:1175&quot;]
+        BIND[&quot;internal binding registry&lt;br/&gt;NODE_BUILTIN_* macro lists&lt;br/&gt;src/node_binding.cc:48&quot;]
+    end
+
+    subgraph iso[&quot;per isolate (main + each worker)&quot;]
+        ID[&quot;IsolateData  src/env.h:138&lt;br/&gt;per-isolate templates, external refs&quot;]
+    end
+
+    subgraph envr[&quot;per Environment/Realm (one per context)&quot;]
+        ENV[&quot;Environment  src/env.h:720&lt;br/&gt;uv loop, immediates on uv_check,&lt;br/&gt;task_queues_async_, cleanup queue&quot;]
+        REALM[&quot;PrincipalRealm  src/node_realm.h:197&lt;br/&gt;module registry, bootstrap state&quot;]
+    end
+
+    subgraph native[&quot;C++ side of the boundary — src/*.cc&quot;]
+        CONN[&quot;connection_wrap.cc:33 OnConnection&quot;]
+        STRM[&quot;stream_base.cc:483 CallJSOnreadMethod&quot;]
+        PARS[&quot;node_http_parser.cc:870 Execute (llhttp)&quot;]
+        WKR[&quot;node_worker.cc:308 Worker::Run&quot;]
+    end
+
+    subgraph jslib[&quot;JS side of the boundary — lib/*.js (compiled into the binary)&quot;]
+        BTR[&quot;bootstrap/realm.js:169 internalBinding&quot;]
+        NET[&quot;net.js:2899 onconnection&quot;]
+        HTTP[&quot;_http_common.js:31 HTTPParser&quot;]
+        MAIN[&quot;internal/main/run_main_module.js&quot;]
+    end
+
+    subgraph loop[&quot;libuv loop (see the libuv dive)&quot;]
+        UV[&quot;uv__io_poll → callbacks → C++ wraps&quot;]
+    end
+
+    PLAT --&gt; ID --&gt; ENV --&gt; REALM
+    SRC --&gt; BTR
+    SNAP --&gt; ENV
+    BIND --&gt;|GetInternalBinding node_binding.cc:997| BTR
+    UV --&gt; CONN --&gt;|&quot;MakeCallback(onconnection)&quot;| NET
+    UV --&gt; STRM --&gt;|&quot;MakeCallback(onread)&quot;| HTTP
+    MAIN --&gt; HTTP
+    WKR --&gt;|&quot;new isolate + MessagePort&quot;| jslib
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><p><strong>Three nested lifetimes.</strong> A process owns the V8 platform and the
+embedded JS sources; an isolate owns V8-level state
+(<code>IsolateData</code>, <code>src/env.h:138</code>); an <code>Environment</code> owns one event
+loop, its context, and all per-context state (<code>src/env.h:720</code>) —
+with <code>Realm</code> (<code>src/node_realm.h:78</code>) now separating per-context
+module registries from the Environment itself, because <code>vm</code> and
+ShadowRealms create several per Environment. This layering <em>is</em>
+the embedding API: one process, many isolates, one Environment per
+(isolate, context) pair.</p>
+</li>
+<li><p><strong>The C++ core is boundary machinery, not features.</strong> Look at what
+<code>src/</code> contains: wrapping (<code>stream_wrap</code>, <code>connection_wrap</code>),
+lifetime (<code>base_object</code>, <code>async_wrap</code>, <code>cleanup_queue</code>), bootstrap
+(<code>node</code>, <code>env</code>, <code>node_realm</code>, <code>node_builtins</code>, <code>node_binding</code>),
+and per-syscall bindings (<code>node_fs</code>, <code>node_tcp_wrap</code>...). HTTP
+routing, streams-as-API, the module loader, <code>EventEmitter</code> — the
+<em>product</em> features — are JS files under <code>lib/</code>, loaded like user
+code but embedded into the binary at build time.</p>
+</li>
+<li><p><strong>The spine of every event</strong> (the walkthrough below walks it in
+detail): libuv callback → a C++ <code>AsyncWrap</code> subclass calls
+<code>MakeCallback</code> (<code>src/async_wrap.cc:672</code>) → <code>InternalMakeCallback</code>
+(<code>src/api/callback.cc:215</code>) enters an <code>InternalCallbackScope</code>,
+calls the JS function, and on unwind drains microtasks and runs
+the tick callback → back in C++, the next libuv event proceeds.
+Every crossing — socket read, timer, threadpool completion,
+worker message — passes through that one function.</p>
+</li>
+<li><p><strong>Bootstrap is a chain of scripts, not a C++ init sequence.</strong>
+<code>main</code> (<code>src/node_main.cc:96</code>) → <code>node::Start</code>
+(<code>src/node.cc:1876</code>) → <code>StartInternal</code> (<code>:1804</code>: platform init,
+snapshot load) → <code>NodeMainInstance::Run</code>
+(<code>src/node_main_instance.cc:89</code>: isolate + Environment +
+<code>CreateEnvironment</code> deserializing the bootstrapped context from
+the snapshot, <code>src/api/environment.cc:470</code>) → <code>LoadEnvironment</code>
+(<code>src/api/environment.cc:597</code>) → <code>StartExecution</code> selects a main
+script (<code>src/node.cc:407</code> routes CLI flags to e.g.
+<code>internal/main/run_main_module</code>) → CJS/ESM loaders run your file.
+In release builds most of the bootstrap has already happened — at
+build time, inside the snapshot.</p>
+</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-http-request-kernel-to-user-callback-and-back">Walkthrough: one HTTP request, kernel to user callback and back</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant K as epoll (libuv backend)
+    participant C as C++ core (src/)
+    participant MC as MakeCallback (api/callback.cc:215)
+    participant L as JS stdlib (lib/)
+    participant U as user code
+    K-&gt;&gt;C: connection ready → OnConnection (connection_wrap.cc:33)
+    C-&gt;&gt;C: TCPWrap::Instantiate + uv_accept
+    MC-&gt;&gt;L: onconnection (net.js:2899) → new Socket
+    K-&gt;&gt;C: readable → uv__read → OnStreamRead (stream_base.cc:731)
+    C-&gt;&gt;MC: CallJSOnreadMethod → onread (kOnReadFunctionField)
+    MC-&gt;&gt;L: socket &#39;data&#39; → parser.execute
+    L-&gt;&gt;C: HTTPParser binding Execute → llhttp_execute (node_http_parser.cc:870)
+    C-&gt;&gt;C: on_header_field/value batched (32-slot buffers)
+    C-&gt;&gt;MC: on_headers_complete → parserOnHeadersComplete (_http_common.js:77)
+    MC--&gt;&gt;C: returns 0/1 — control flows back INTO llhttp
+    MC-&gt;&gt;L: onMessageComplete → server.emit(&#39;request&#39;, req, res)
+    L-&gt;&gt;U: user handler runs, res.end(...)
+    U--&gt;&gt;MC: stack unwinds → microtask checkpoint + tick
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-kernel-wakes-libuv-not-node">The kernel wakes libuv, not Node</h3>
+<p>A TCP connection
+completes the handshake; epoll reports the listening socket readable
+and libuv&#39;s accept machinery fires (all of this is the
+<a href="../libuv/">libuv</a> dive&#39;s loop). The callback registered for that
+socket is <code>ConnectionWrap&lt;TCPWrap, uv_tcp_t&gt;::OnConnection</code>
+(<code>src/connection_wrap.cc:33</code>) — Node-specific C++ begins here.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="accept-and-wrap-then-cross-once">Accept and wrap, then cross once</h3>
+<p><code>OnConnection</code>
+instantiates a fresh <code>TCPWrap</code> (a C++ object with a persistent V8
+handle), calls <code>uv_accept</code> into it, and crosses the boundary with
+one call: <code>wrap_data-&gt;MakeCallback(env-&gt;onconnection_string(), ...)</code>
+— invoking the <code>onconnection</code> function stored on the JS server
+handle (<code>lib/net.js:2495</code> assigns it, <code>lib/net.js:2899</code> implements
+it). That function builds a <code>net.Socket</code> around the C++ handle and
+emits <code>&#39;connection&#39;</code> — the HTTP server&#39;s listener attaches the
+parser. Note the pattern: the C++ side created the resource; the JS
+side gets a ready-made object.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="reads-arrive-as-buffers-via-one-internal-field">Reads arrive as buffers via one internal field</h3>
+<p>The
+socket is registered for reads; libuv allocates/readies a buffer
+(Node now uses a per-Environment read slab — <code>stream_read_slab</code>),
+reads into it, and <code>EmitToJSStreamListener::OnStreamRead</code>
+(<code>src/stream_base.cc:731</code>) commits exactly the bytes read into an
+<code>ArrayBuffer</code>, then <code>CallJSOnreadMethod</code> (<code>:483</code>) fetches the JS
+<code>onread</code> function from internal field <code>kOnReadFunctionField</code> and
+fires it through <code>MakeCallback</code> with <code>(nread, buffer)</code> smuggled via
+the aliased <code>stream_base_state</code>. Net cost of the crossing: one JS
+call per chunk of I/O, zero copies beyond the slab.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="js-asks-c-to-parse-and-the-boundary-goes-bidirectional">JS asks C++ to parse, and the boundary goes
+bidirectional</h3>
+<p>The socket feeds <code>HTTPParser</code> — a thin JS wrapper
+(<code>lib/_http_common.js:31</code>) over the C binding in
+<code>src/node_http_parser.cc</code>, which drives llhttp (C). <code>Execute</code>
+(<code>:870</code>) calls <code>llhttp_execute</code>, and llhttp&#39;s C callbacks
+(<code>on_header_field</code>, <code>on_header_value</code> at <code>:377</code>) <em>batch</em> header
+fragments into fixed 32-slot buffers (<code>kMaxHeaderFieldsCount</code>,
+<code>:85</code>), crossing into JS only on <code>Flush</code> — when a header chunk is
+big or the message completes. The design lesson: batch at the seam,
+don&#39;t cross per fragment.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="a-js-function-returns-a-value-into-the-c-parser">A JS function returns a value into the C parser</h3>
+<p>At
+<code>on_headers_complete</code> (<code>src/node_http_parser.cc</code>, the
+<code>on_headers_complete()</code> method around <code>:430</code>), C++ builds the full
+argument vector and calls <code>parserOnHeadersComplete</code>
+(<code>lib/_http_common.js:77</code>) <em>synchronously</em> — inside
+<code>InternalCallbackScope::kSkipTaskQueues</code> — and reads back an
+integer that llhttp itself uses (should the parser skip the request
+body?). Control flows C → JS → C inside one parse call. The
+boundary is a function-call interface, not just a callback faucet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-user-s-handler-runs-on-the-js-side-of-everything">The user&#39;s handler runs on the JS side of everything</h3>
+<p><code>onMessageComplete</code> completes <code>IncomingMessage</code>/<code>ServerResponse</code>
+objects (all JS classes in <code>lib/_http_*.js</code>) and the server emits
+<code>&#39;request&#39;</code>. Your handler runs; <code>res.end(...)</code> walks the same
+boundary in reverse — JS stream machinery ends up in
+<code>LibuvStreamWrap::DoWrite</code> → <code>uv_write</code> → the kernel. At no point
+did user code see C++; at no point did C++ see your code.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="the-unwind-is-a-checkpoint">The unwind is a checkpoint</h3>
+<p>When the callback stack
+that entered via <code>InternalMakeCallback</code> unwinds,
+<code>InternalCallbackScope::Close</code> (<code>src/api/callback.cc:138</code>) fires
+<code>after</code> async hooks, pops the async-context stack, runs a
+<strong>microtask checkpoint</strong> (<code>PerformCheckpoint</code> — resolved promise
+callbacks), and if ticks are scheduled, the tick callback. This is
+why <code>.then</code> callbacks &quot;just run&quot; between I/O events without anyone
+calling into JS: the checkpoint is bolted to the same choke point
+every event already crosses.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-desk-two-directions-single-threaded-js">One desk, two directions, single-threaded JS</h3>
+<p>The
+request crossed the C++/JS boundary exactly where the platform
+decided — accept, per-chunk read, batched headers, one completion —
+and every crossing paid for async context tracking, microtasks, and
+hooks by passing through the same function.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="environment-realm-the-platform-s-unit-of-embedding">Environment + Realm — the platform&#39;s unit of embedding</h3>
+<p><strong>What:</strong> <code>Environment</code> (<code>src/env.h:720</code>) owns the uv loop, the
+timer/immediate handles, async-hook state, the cleanup queue, and
+module-registry state for one context; <code>Realm</code> (<code>src/node_realm.h:78</code>)
+holds the per-context parts (builtins cache, binding data), with
+<code>PrincipalRealm</code> (<code>:197</code>) as the default. <strong>Where:</strong>
+<code>src/api/environment.cc:438</code> <code>CreateEnvironment</code> builds it — from a
+deserialized snapshot context when one exists. <strong>Why:</strong> one struct
+per (isolate, context) is what makes embedding the <em>contract</em>:
+workers, <code>vm.createContext</code>, and embedders
+(<code>CommonEnvironmentSetup</code>, <code>src/node.h:1044</code>) all create
+Environments instead of globals. The CPython parallel is the
+interpreter state vs <code>PyThreadState</code> split; Node&#39;s version leans on
+V8&#39;s isolate/context model so the GC does the isolation.</p>
+<h3 id="baseobject-asyncwrap-the-dual-citizenship-object">BaseObject → AsyncWrap — the dual citizenship object</h3>
+<p><strong>What:</strong> <code>BaseObject</code> (<code>src/base_object.h:46</code>) pairs a C++ object
+with a JS object: it <em>is</em> the JS object&#39;s internal field, holding a
+persistent handle; <code>AsyncWrap</code> (<code>src/async_wrap.h:120</code>) adds an
+async-resource identity (<code>provider_type</code>, <code>async_id</code>, trigger id)
+and the <code>MakeCallback</code> entry. Every I/O object — <code>TCPWrap</code>,
+<code>FSReqPromise</code>, <code>MessagePort</code> — is an <code>AsyncWrap</code>. <strong>Why:</strong> the
+boundary needs bidirectional identity lookup cheap: C++ reaches the
+JS object via the persistent handle, JS-land reaches C++ via
+<code>UNWRAP</code> on the internal field, and lifetime is explicit (<code>BaseObjectPtr</code>
+ref counting) rather than fighting the GC. The async ids carried on
+the same object are what <code>async_hooks</code> and stack traces later read.</p>
+<h3 id="aliasedbuffer-shared-state-as-a-typed-array">AliasedBuffer — shared state as a typed array</h3>
+<p><strong>What:</strong> <code>AliasedBufferBase&lt;T&gt;</code> (<code>src/aliased_buffer.h:33</code>) wraps
+one native <code>T[]</code> and one V8 <code>ArrayBuffer</code> view of the <em>same</em>
+memory; sub-buffers can alias regions of a parent. <strong>Where:</strong> the
+whole <code>AsyncHooks</code> state machine (<code>src/env.h:378</code>): hook counters
+in a <code>Uint32Array</code>, async-id stack in a <code>Float64Array</code>; the JS side
+literally reads/writes the same array (<code>lib/internal/async_hooks.js</code>,
+whose header comment documents the aliasing). <strong>Why:</strong> counters
+crossed per operation would make the hottest state in the runtime
+pay an FFI-style toll; a typed array gives C++ and JS zero-copy
+shared mutable state with no API calls, and the enum-indexed layout
+(<code>kInit</code>, <code>kBefore</code>, ...) is the de facto ABI between the two
+sides. The cost — layouts must be versioned in lockstep — is
+accepted because both sides ship in one binary.</p>
+<h3 id="the-embedded-source-table-builtinmodule-stdlib-as-data">The embedded source table + BuiltinModule — stdlib as data</h3>
+<p><strong>What:</strong> at build time, <code>tools/js2c.cc</code> emits <code>node_javascript.cc</code>
+containing every <code>lib/*.js</code> as static byte arrays in a
+<code>ThreadsafeCopyOnWrite&lt;BuiltinSourceMap&gt;</code> (the template for the
+generated file is the <code>kTemplate</code> string in <code>tools/js2c.cc</code>; the
+generated <code>BuiltinLoader::LoadJavaScriptSource</code> just assigns it).
+At runtime, <code>lib/internal/bootstrap/realm.js:245</code> (<code>class BuiltinModule</code>) compiles them lazily via the C++ <code>compileFunction</code>
+binding (<code>src/node_builtins.cc:300</code> <code>LookupAndCompile</code> — with V8
+code cache), calling each source as a function with exactly the
+parameters declared in <code>src/builtin_info.h</code>&#39;s <code>parameter_map</code>
+(<code>exports, require, module, process, internalBinding, primordials</code>
+for stdlib modules — a stricter CommonJS wrapper). <strong>Why:</strong> the
+binary is a complete, single-file runtime (no disk reads at boot,
+works from any cwd), the map is copy-on-write so worker isolates
+share it, and compiling lazily with code cache keeps startup fast
+without shipping precompiled blobs for modules never used.</p>
+<h3 id="the-binding-registry-a-linked-list-of-node-module">The binding registry — a linked list of <code>node_module</code></h3>
+<p><strong>What:</strong> each C++ binding is a static <code>node_module</code> struct
+registered into <code>modlist_internal</code> (macro lists like
+<code>NODE_BUILTIN_STANDARD_BINDINGS</code>, <code>src/node_binding.cc:48</code>);
+<code>GetInternalBinding</code> (<code>:997</code>) is a memoized lookup that runs the
+module&#39;s <code>nm_context_register_func</code> to fill an exports template.
+<strong>Why:</strong> static-registration linked lists (no constructors, no
+dynamic init order) are how C++ builds plugin tables that also work
+when Node itself is linked as a static library — the comment above
+the macro list says exactly this. It is the same instinct as
+SQLite&#39;s core+extensions registration: the registry is data, and
+the loader is one small function.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><p><strong>One thread per Environment runs all JS.</strong> Concurrency exists at
+three levels below that: V8 background threads (GC, compilation)
+owned by <code>NodePlatform</code> (<code>src/node_platform.cc:227</code>), whose
+per-isolate foreground task runner is itself a <code>uv_async_t</code>
+(<code>PerIsolatePlatformData</code>, <code>src/node_platform.cc:318</code>) — the
+libuv async doorbell again; the libuv threadpool for blocking
+syscalls (see the <a href="../libuv/">libuv</a> dive); and worker threads,
+each a full isolate. JS-level shared state between threads is
+only <code>SharedArrayBuffer</code> and the message system.</p>
+</li>
+<li><p><strong>The choke point enforces the model.</strong> Because every C++→JS
+entry goes through <code>InternalMakeCallback</code>
+(<code>src/api/callback.cc:215</code>), &quot;no two JS callbacks interleave&quot; and
+&quot;microtasks run at the unwind, not mid-callback&quot; are not
+conventions — they are enforced by one function&#39;s scoping
+(<code>InternalCallbackScope</code> guards nesting; <code>kSkipTaskQueues</code> lets
+the parser suppress it when reentrancy would corrupt parse
+state).</p>
+</li>
+<li><p><strong>Immediates and cross-thread tasks are loop handles.</strong>
+<code>Environment::InitializeLibuv</code> (<code>src/env.cc:1314</code>) wires
+<code>setImmediate</code> to a <code>uv_check</code> handle (<code>CheckImmediate</code>, <code>:1824</code>
+— the libuv check phase, right after the poll), and native
+cross-thread callbacks (including interrupts and V8 foreground
+tasks) to <code>task_queues_async_</code>, an <code>uv_async_t</code> that workers and
+background threads can ring from any thread.</p>
+</li>
+<li><p><strong>Workers: replicate, don&#39;t share.</strong> <code>Worker::Run</code>
+(<code>src/node_worker.cc:308</code>) creates a <em>new isolate</em> on a new
+thread (with per-worker resource limits — heap caps set before
+the isolate exists), bootstraps a full Environment (deserialized
+from the worker-context snapshot with a few bootstrap &quot;switches&quot;
+re-run, <code>src/api/environment.cc</code>&#39;s <code>is_not_main_thread</code> path),
+and communicates only via <code>MessagePort</code>: a queue plus an
+<code>uv_async_t</code> doorbell whose callback (<code>node_messaging.cc:675</code>)
+deserializes V8-serialized messages on the receiving isolate —
+with an explicit starvation budget (at least 1000 messages, then
+re-trigger) so a message flood cannot pin the loop.</p>
+</li>
+<li><p><strong>Failure: exceptions travel; crashes kill; teardown is LIFO.</strong> A
+JS exception inside a native callback propagates as an empty
+<code>MaybeLocal</code>, is caught by <code>TryCatch</code> scopes at the choke point,
+and (uncaught) reaches the fatal handler — the process exits by
+default; Node never &quot;recovers&quot; a broken Environment, which keeps
+teardown honest. Teardown order: <code>SpinEventLoopInternal</code>
+(<code>src/api/embed_helpers.cc:23</code>) exits the loop-again loop,
+<code>FreeEnvironment</code> forbids further JS execution
+(<code>DisallowJavascriptExecutionScope</code>), then <code>Environment::RunCleanup</code>
+(<code>src/env.cc:1550</code>) drains the <code>CleanupQueue</code> (<code>src/cleanup_queue.cc:27</code>
+<code>Drain</code>) — hooks run <strong>most-recently-added first</strong>, like stack
+destructors, so an addon that grabs a resource can depend on
+whoever registered after it having released theirs. Addons and
+embedders register via <code>AddEnvironmentCleanupHook</code>
+(<code>src/node.h:1521</code>) — the documented way to not leak when the
+isolate dies. The loop&#39;s exit condition itself — run until no
+refs, emit <code>beforeExit</code>, run again if that scheduled work — is
+ref-counting as process lifetime, the same bet libuv makes per
+handle.</p>
+</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><p><strong>Three tiers of seam, by audience.</strong> (1) <code>internalBinding</code> —
+private, unstable, zero-cost-of-evolution: the stdlib&#39;s own
+C++ surface, free to break every minor release because both sides
+ship together. (2) N-API (<code>src/js_native_api.cc</code>, header
+<code>src/js_native_api.h</code>) — a C ABI of ~130 functions over opaque
+<code>napi_env</code>/<code>napi_value</code> handles, versioned by <code>NAPI_VERSION</code>
+(currently 8, <code>src/js_native_api_types.h:15</code>): a precompiled
+addon works across Node versions <em>and</em> across V8 upgrades. (3)
+The embedding API (<code>src/node.h</code>: <code>InitializeOncePerProcess</code>,
+<code>CreateEnvironment</code>, <code>CommonEnvironmentSetup</code>) — Node as a
+library inside someone else&#39;s process, documented in
+<code>doc/api/embedding.md</code>. Note the deliberate asymmetry with
+CPython: CPython made its internal C API quasi-public and paid
+for decades of constraint; Node kept internals private and
+built a <em>smaller stable one</em> beside them.</p>
+</li>
+<li><p><strong>The public surface is <code>node:</code> modules + <code>process</code>.</strong> Core
+modules are exposed through <code>BuiltinModule</code> policies
+(<code>lib/internal/bootstrap/realm.js</code>&#39;s
+<code>builtinModulePolicies</code> — which builtins are requirable, with or
+without the <code>node:</code> scheme, some gated behind flags), and the
+CommonJS loader (<code>lib/internal/modules/cjs/loader.js</code>,
+<code>Module._load</code>) is itself stdlib JS that user code can intercept
+(<code>require.extensions</code> history, <code>--require</code> preload hooks) — the
+platform&#39;s own loader is an extension point of the platform.</p>
+</li>
+<li><p><strong>The honest warts.</strong> The dual-module-system decade (CommonJS and
+ESM loaders coexisting, with <code>Module._load</code> special-casing
+<code>node:</code> URLs) is the visible debt of evolving a live stdlib in
+the guest language. The <code>primordials</code> discipline — internal code
+capturing pristine copies of every JS builtin so user
+monkey-patching cannot break the platform (<code>lib/internal/bootstrap/node.js</code>
+documents the chain) — is a permanent tax paid because the
+stdlib shares a heap with untrusted user code; Lua&#39;s and
+CPython&#39;s cores never pay it. And <code>process.binding</code>, the
+pre-internalBinding escape hatch, lingers for compatibility
+exactly because too much userland reached into the internals.</p>
+</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-the-standard-library-in-the-guest-language-over-a-c-stdlib">Trade-off 1: the standard library in the guest language, over a C++ stdlib</h3>
+<ul>
+<li><strong>Tension:</strong> Node needed far more surface (HTTP, streams, module
+loading, fs) than the small team could write and maintain in C++
+against V8 — and needed users to trust and extend it.</li>
+<li><strong>Choice:</strong> implement everything not syscall-shaped as JS in
+<code>lib/</code>, calling C++ only through narrow internal bindings; even
+HTTP&#39;s control flow is JS (<code>lib/_http_server.js</code>) with only the
+byte parser (llhttp) in C.</li>
+<li><strong>Evidence:</strong> <code>lib/_http_common.js:31</code> imports the parser as a
+binding; <code>src/node_http_parser.cc</code>&#39;s C callbacks batch into
+32-slot buffers and cross only at completion (<code>Flush</code>); the
+parameter map (<code>src/builtin_info.h</code>) compiles stdlib sources as
+plain functions over <code>internalBinding</code> — the entire mechanism
+exists to keep the C++ side <em>thin</em>.</li>
+<li><strong>Given up:</strong> every crossing pays V8-API costs a monolithic C++
+stdlib would not; hot per-byte work must be pushed back into C
+(that&#39;s why llhttp exists); and sharing a heap with user code
+forced the primordials discipline.</li>
+<li><strong>Verdict:</strong> right for a platform whose success metric is
+ecosystem — users could read <code>lib/http.js</code>, subclass its classes,
+and publish fixes, which seeded npm. Wrong for a stable,
+performance-critical runtime with few extension points — there,
+CPython&#39;s (mostly) one-language core is easier to keep correct.</li>
+</ul>
+<h3 id="trade-off-2-two-abi-tiers-private-churn-beside-a-frozen-c-abi">Trade-off 2: two ABI tiers — private churn beside a frozen C ABI</h3>
+<ul>
+<li><strong>Tension:</strong> the internal C++/JS surface must evolve freely (V8
+changes under it every few weeks), but native addons must not
+recompile per release or the ecosystem dies.</li>
+<li><strong>Choice:</strong> keep <code>internalBinding</code> private (no stability promise,
+<code>NODE_MODULE_VERSION</code> guards even the legacy addon path), and
+build N-API as a stable C ABI with opaque handles; versions tell
+the story — <code>NODE_MODULE_VERSION</code> is 152 (<code>src/node_version.h:108</code>,
+bumped with V8 ABI), <code>NAPI_VERSION</code> is 8
+(<code>src/js_native_api_types.h:15</code>, stable for years).</li>
+<li><strong>Evidence:</strong> <code>src/node_binding.cc:997</code> <code>GetInternalBinding</code>
+resolves a <em>linked list of statically registered</em> modules — free
+to change shape because callers are in-repo; while
+<code>src/js_native_api.cc</code> implements every napi entry point with
+explicit status codes and no V8 types in the API — stable because
+callers are compiled elsewhere.</li>
+<li><strong>Given up:</strong> N-API&#39;s opaque handles are slower and less
+expressive than raw V8 API (each value op is a function call and
+a lookup), so perf-critical addons (or Node&#39;s own bindings) don&#39;t
+use it; and the legacy <code>NODE_MODULE_VERSION</code> path still exists,
+doubling the support matrix.</li>
+<li><strong>Verdict:</strong> right whenever a platform has a native-plugin
+ecosystem that must outlive its engine upgrades — the frozen-seam
+pattern. Wrong for internal hot paths; that&#39;s what the private
+tier is for, and conflating the two (as CPython did for years)
+freezes your internals.</li>
+</ul>
+<h3 id="trade-off-3-isolate-per-worker-over-shared-heap-threads">Trade-off 3: isolate-per-worker over shared-heap threads</h3>
+<ul>
+<li><strong>Tension:</strong> JS has no memory model for shared objects; but
+servers need parallelism beyond one core.</li>
+<li><strong>Choice:</strong> each <code>worker_threads</code> worker gets a fresh isolate and
+loop (<code>src/node_worker.cc:308</code> <code>Run</code> — <code>NewIsolate</code> per worker,
+resource limits applied before creation); communication is
+structured-clone messages via <code>MessagePort</code> (<code>uv_async_t</code>
+doorbell + V8 serializer, <code>src/node_messaging.cc</code>), with
+<code>SharedArrayBuffer</code> as the deliberate escape hatch.</li>
+<li><strong>Evidence:</strong> <code>WorkerThreadData</code> (<code>src/node_worker.cc:163</code>)
+initializes its own <code>uv_loop_t</code>; <code>MessagePort::OnMessage</code>
+(<code>src/node_messaging.cc</code>) drains with a ≥1000-message budget then
+re-rings the async handle — starvation-guarded queueing, not
+shared data structures.</li>
+<li><strong>Given up:</strong> cheap sharing — everything else is copied on post;
+per-worker bootstrap cost (mitigated by the worker-context
+snapshot, <code>src/api/environment.cc</code> deserializing
+<code>kNodeMainContextIndex</code> with worker &quot;switches&quot; re-applied); and
+same-process latency on every message.</li>
+<li><strong>Verdict:</strong> right because it preserves the single-threaded
+correctness model users actually have — an isolated heap cannot
+data-race. Wrong for workloads needing fine-grained sharing;
+those need SAB+Atomics (which is why the escape hatch exists) or
+a different runtime entirely.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>lib/internal/bootstrap/node.js</code> (just the header comment) —
+the codebase&#39;s own map of startup: what runs, in what order,
+what the snapshot replaced. Best single comment in the repo.</li>
+<li><code>src/node_main.cc:96</code> <code>main</code> → <code>src/node.cc:1876</code> <code>Start</code> →
+<code>:1804</code> <code>StartInternal</code> — per-process init; note
+<code>InitializeOncePerProcessInternal</code>, snapshot loading, and the
+<code>NodeMainInstance</code> handoff. Nothing JS has happened yet.</li>
+<li><code>src/node_main_instance.cc:89</code> <code>NodeMainInstance::Run</code> then
+<code>:127</code> <code>CreateMainEnvironment</code> — isolate scope, Environment
+creation via <code>src/api/environment.cc:438</code> <code>CreateEnvironment</code>;
+read the <code>Context::FromSnapshot</code> branch (<code>:470</code>) to see release
+builds deserialize an already-bootstrapped heap.</li>
+<li><code>src/api/embed_helpers.cc:23</code> <code>SpinEventLoopInternal</code> — the
+outer <code>uv_run</code> loop, <code>DrainTasks</code>, the <code>beforeExit</code> re-check
+dance; this is where &quot;the process exits when nothing is left&quot;
+lives.</li>
+<li><code>src/node_realm.cc:326</code> <code>PrincipalRealm::BootstrapRealm</code> and
+<code>ExecuteBootstrapper</code> — the bootstrap script chain
+(<code>internal/bootstrap/realm</code> → <code>node</code> → per-thread/process
+&quot;switches&quot;); this path runs only when there is no snapshot, so
+run <code>node --no-node-snapshot</code> to watch it.</li>
+<li><code>lib/internal/bootstrap/realm.js:169</code> <code>internalBinding</code>,
+<code>:245</code> <code>class BuiltinModule</code>, <code>:425</code> <code>compileForInternalLoader</code> —
+the JS stdlib loader for the stdlib itself; match the arguments
+against <code>src/builtin_info.h</code>&#39;s <code>parameter_map</code>, then open
+<code>src/node_builtins.cc:300</code> <code>LookupAndCompile</code> (code cache!) and
+the <code>kTemplate</code> string in <code>tools/js2c.cc</code> to see where the
+sources came from.</li>
+<li><code>src/node_binding.cc:48</code> the <code>NODE_BUILTIN_*</code> macro lists and
+<code>:997</code> <code>GetInternalBinding</code> — the private C++ surface: a linked
+list, a memoized loader, one function template per binding.</li>
+<li><code>src/async_wrap.cc:672</code> <code>MakeCallback</code> → <code>src/api/callback.cc:215</code>
+<code>InternalMakeCallback</code> and <code>:138</code> <code>InternalCallbackScope::Close</code> —
+<strong>read this twice</strong>: async-hook push/pop, the trampoline branch,
+the microtask checkpoint and tick at unwind. Every behavior
+users ascribe to &quot;the event loop&quot; is in these 150 lines.</li>
+<li><code>src/connection_wrap.cc:33</code> <code>OnConnection</code> next to
+<code>lib/net.js:2899</code> <code>onconnection</code> — the accept crossing; note
+who creates what (C++ instantiates the handle, JS builds the
+socket object) and that <code>MakeCallback(onconnection_string())</code>
+is the entire handoff.</li>
+<li><code>src/stream_base.cc:731</code> <code>EmitToJSStreamListener::OnStreamRead</code>
+and <code>:483</code> <code>CallJSOnreadMethod</code> — the data crossing: read
+slab, ArrayBuffer commit, the <code>kOnReadFunctionField</code> internal
+field; then skim <code>lib/internal/stream_base_commons.js</code> to see
+the JS twin reading <code>stream_base_state</code> — AliasedBuffer in
+action (declaration: <code>src/aliased_buffer.h:33</code>).</li>
+<li><code>src/node_http_parser.cc</code> — <code>Execute</code> (<code>:870</code>), the batching
+<code>on_header_field</code>/<code>on_header_value</code> (<code>:377</code>), and
+<code>on_headers_complete</code> (≈<code>:430</code>): the only place where a JS
+return value steers a C parser. Then <code>lib/_http_common.js:77</code>
+<code>parserOnHeadersComplete</code> for the JS end of the contract.</li>
+<li><code>src/env.cc:1314</code> <code>InitializeLibuv</code>, <code>:1824</code> <code>CheckImmediate</code> —
+<code>setImmediate</code> as a <code>uv_check</code> handle, cross-thread tasks as
+<code>task_queues_async_</code>; connect each handle to the libuv loop
+phases from the <a href="../libuv/">libuv</a> dive.</li>
+<li><code>src/node_worker.cc:308</code> <code>Worker::Run</code> and
+<code>src/node_messaging.cc:675</code> <code>OnMessage</code> — the second isolate:
+per-worker loop, snapshot reuse, the port&#39;s async doorbell and
+its message-budget starvation guard.</li>
+<li><code>src/cleanup_queue.cc:27</code> <code>Drain</code> and <code>src/env.cc:1550</code>
+<code>RunCleanup</code> — LIFO teardown; then <code>src/node.h:1521</code>
+<code>AddEnvironmentCleanupHook</code> — the addon-facing slice of it.</li>
+</ol>
+<p>You have now traced one HTTP request from the kernel to a user
+callback and back out through teardown — and every crossing it made
+was through the same desk.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the boundary one choke point</strong> (<code>InternalMakeCallback</code>,
+<code>src/api/callback.cc:215</code>): routing <em>every</em> engine-entry callback
+through one function is what makes cross-cutting state — async
+context, microtask timing, hooks — enforceable instead of
+conventional.</li>
+<li><strong>Write the stdlib in the guest language</strong> (<code>lib/*.js</code> over
+<code>internalBinding</code>): a platform whose users can read its own
+source recruits its maintainers from its user base — npm is the
+compounding return on that decision.</li>
+<li><strong>Run two ABI tiers: private-and-fast, public-and-frozen</strong>
+(<code>NODE_MODULE_VERSION</code> 152 vs <code>NAPI_VERSION</code> 8): freeze a small
+C-ABI seam for out-of-tree code, and let internals churn — never
+one tier doing both jobs.</li>
+<li><strong>Share hot counters through aliased typed arrays</strong>
+(<code>AliasedBuffer</code>, <code>src/aliased_buffer.h:33</code>): when two runtimes
+must share small fast state, shared memory under enum-indexed
+layout beats API calls per access.</li>
+<li><strong>Teardown as a LIFO queue</strong> (<code>CleanupQueue::Drain</code>): cleanup
+hooks running most-recently-first give arbitrary resources stack
+discipline — destructors for things that were never on a stack.</li>
+<li><strong>Do boot work once, at build time</strong> (<code>SnapshotBuilder::Generate</code>,
+<code>src/node_snapshotable.cc:1175</code>): serializing the bootstrapped
+heap and deserializing at startup turned milliseconds of JS
+execution into a memcpy — the snapshot is the ultimate startup
+budget.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong>. The code is clean modern C++, but the
+concepts stack: V8 embedding, an event loop, and a JS-level
+module system all at once.</li>
+<li>Budget: ~6–8 hours for the reading path (the choke-point and
+bootstrap files deserve slow reading; the parser and worker files
+can be skimmed once the pattern is clear).</li>
+<li>Prerequisites: the <a href="../libuv/">libuv</a> dive (the loop underneath);
+a working idea of V8&#39;s isolate/context/handle-scope model (the
+V8 &quot;Embedder&#39;s Guide&quot; is enough — you need the vocabulary, not
+the details); comfort with RAII/scope guards in C++; the
+<a href="../lua/">Lua</a> dive&#39;s embedding chapter for contrast on how small
+a language boundary can be.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Node&#39;s own <code>doc/api/embedding.md</code> (in-repo) — the supported
+story for the <code>CommonEnvironmentSetup</code> API this dive cites.</li>
+<li>V8 Embedder&#39;s Guide — <a href="https://v8.dev/docs/embed">https://v8.dev/docs/embed</a> — the
+isolate/context/handle-scope model the C++ core lives inside.</li>
+<li>The <code>lib/internal/bootstrap/node.js</code> and
+<code>src/node_binding.cc</code> header comments — unusually good
+in-tree documentation of the bootstrap order and the binding
+registry.</li>
+<li>This atlas&#39;s <a href="../libuv/">libuv</a> deep-dive — the loop that every
+crossing in this dive eventually waits on; and
+<a href="../cpython/">CPython</a> for the sibling embedding with opposite
+ABI instincts.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../llama-cpp/"><span class="dir">← Previous dive</span>llama.cpp: LLM inference with no framework — tensors, a graph, and quantization as the product</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 24 of 24 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

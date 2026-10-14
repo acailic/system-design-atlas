@@ -50,7 +50,7 @@ repeat one token at a time.</p>
 <p>Read it against PyTorch-class frameworks: those optimize for
 <em>research flexibility</em> (dynamic everything, Python); llama.cpp
 optimizes for <em>deployment everywhere</em> (static graph per shape, C,
-quantization first). It is the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite</a> of ML runtimes:
+quantization first). It is the <a href="../sqlite/">SQLite</a> of ML runtimes:
 one portable core, a file format, and a fierce refusal to depend on
 anyone.</p>
 <section class="eli10">
@@ -221,7 +221,7 @@ enqueue on device streams.</p></div></div>
 <p><code>res-&gt;get_logits()</code> hands the
 lm_head output to the sampler chain (<code>src/llama-sampler.cpp:895 llama_sampler_sample</code>): temperature → top-k → top-p → grammar… each
 sampler&#39;s <code>apply</code> mutating the candidates array — the
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/redis.md">Redis</a> commands-table pattern applied to decoding
+<a href="../redis/">Redis</a> commands-table pattern applied to decoding
 policy.</p></div></div>
 <div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-token-out-state-persisted-in-the-cache">One token out, state persisted in the cache</h3>
 <p>The new
@@ -237,7 +237,7 @@ two <code>src[]</code> + <code>view_src</code> (<code>ggml/include/ggml.h:685</c
 be null (pure graph node) or a view into a buffer.
 <strong>Why:</strong> separating <em>description</em> from <em>storage</em> makes
 graph-building allocation-free, views zero-copy, and weights
-mmap-able — the descriptor/physical split <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite&#39;s</a>
+mmap-able — the descriptor/physical split <a href="../sqlite/">SQLite&#39;s</a>
 VFS uses, at tensor granularity.</p>
 </li>
 <li><p><strong>Quantized super-blocks + type-trait tables.</strong>
@@ -266,7 +266,7 @@ contiguously; unified vs. recurrent variants behind one memory
 interface.
 <strong>Why:</strong> making <em>attention state</em> an explicitly managed resource
 (defrag, shifting, eviction) turns &quot;context overflow&quot; from an
-error into admission control — <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/kafka.md">Kafka&#39;s</a> retention
+error into admission control — <a href="../kafka/">Kafka&#39;s</a> retention
 insight applied to tensor memory.</p>
 </li>
 <li><p><strong>The sampler chain.</strong>
@@ -315,7 +315,7 @@ diffing outputs between machines.</li>
 model/context/batch/sampler/backend as opaque handles with
 default-parameter structs (<code>llama_model_default_params</code>), every
 field commented. The header is the design document the way
-<code>lua.h</code> is for <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/lua.md">Lua</a>.</li>
+<code>lua.h</code> is for <a href="../lua/">Lua</a>.</li>
 <li><strong>Four extension seams, no plugin ABI:</strong> (1) new model
 architectures — a file in <code>src/models/</code>, a registration in
 <code>models.h</code> and <code>llama-arch.cpp</code>; (2) new quant formats — block
@@ -324,14 +324,14 @@ implement ggml&#39;s backend/buffer interface (CUDA, Metal, Vulkan,
 SYCL already do); (4) new samplers — an iface struct.</li>
 <li><strong>ggml is itself the reusable engine</strong> — whisper.cpp and siblings
 consume it directly; llama.cpp is &quot;ggml plus LLM opinions.&quot; The
-layering that made <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/libuv.md">libuv</a> reusable beyond Node, in ML
+layering that made <a href="../libuv/">libuv</a> reusable beyond Node, in ML
 clothes.</li>
 <li><strong>Honest wart:</strong> velocity shows. The API accumulates deprecation
 shims (<code>llama_batch</code> legacy vs <code>llama_batch_ext</code> — two <code>decode</code>
 overloads at <code>llama-context.cpp:1811</code>/<code>:4570</code>), parameter structs
 grow dozens of fields, and graph-reuse heuristics
 (<code>can_reuse</code> on topology fingerprints) are cleverness that leans
-on its comments. Stability discipline lags <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl&#39;s</a> by
+on its comments. Stability discipline lags <a href="../curl/">curl&#39;s</a> by
 choice — the project picked iteration speed.</li>
 </ul>
 <h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
@@ -384,7 +384,7 @@ ecosystems &quot;for free&quot; — the project rebuilds scheduling, thread
 pools, and file I/O itself.</li>
 <li><strong>Verdict:</strong> right for a tool whose differentiator is <em>runs
 anywhere with the model file and nothing else</em> — the
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl</a> verdict in ML clothes. Wrong inside a platform
+<a href="../curl/">curl</a> verdict in ML clothes. Wrong inside a platform
 that already owns those layers.</li>
 </ul>
 <h2 id="6-reading-path">6. Reading path</h2>
@@ -467,7 +467,7 @@ and the README history — the &quot;no framework&quot; thesis in the author&#39
 own words.</li>
 <li><em>Attention Is All You Need</em> (Vaswani et al., 2017) — one read
 of the graph builder makes the paper concrete.</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/sqlite.md">SQLite</a> and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/llama-cpp/curl.md">curl</a> dives in this atlas —
+<li>The <a href="../sqlite/">SQLite</a> and <a href="../curl/">curl</a> dives in this atlas —
 the two design lineages (portable core + file format; zero-dependency
 portability) this project consciously or not extends to ML.</li>
 </ul>
@@ -475,9 +475,9 @@ portability) this project consciously or not extends to ML.</li>
   </article>
   <div class="dive-nav">
   <a href="../curl/"><span class="dir">← Previous dive</span>curl: a transfer state machine designed to live inside someone else's event loop</a>
-  <span></span>
+  <a href="../nodejs/" style="text-align:right"><span class="dir">Next dive →</span>Node.js: the boundary is the platform — an engine and a loop behind one JS-facing seam</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 23 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 23 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

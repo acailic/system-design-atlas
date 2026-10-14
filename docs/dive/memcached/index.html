@@ -42,7 +42,7 @@ deep-dive teaches what that refusal buys (predictable latency, a tiny
 server that scaled the mid-2000s web) and where it hurts, by walking one
 <code>SET</code> and one <code>GET</code> through worker event loops, striped locks, and the
 slab allocator that never frees.</p>
-<p>Read it alongside <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/memcached/redis.md">Redis</a>: two opposite answers to the same
+<p>Read it alongside <a href="../redis/">Redis</a>: two opposite answers to the same
 problem. Memcached keeps the server minimal and pays in features; Redis
 builds the data structures in and pays in complexity.</p>
 <section class="eli10">
@@ -452,7 +452,7 @@ will read in systems code.</li>
 <li>Budget: ~4 hours for the reading path; a weekend adds <code>thread.c</code>,
 <code>items.c</code>, and <code>slabs.c</code> cover to cover (~8k lines total, dense).</li>
 <li>Prerequisites: hash tables and freelists at a data-structures level;
-what an event loop is (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/memcached/redis.md">Redis</a> dive covers the shape);
+what an event loop is (the <a href="../redis/">Redis</a> dive covers the shape);
 pthread mutex basics.</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -473,7 +473,7 @@ paper Ketama-style client hashing implements; read it to see the
   <a href="../elasticsearch/"><span class="dir">← Previous dive</span>Elasticsearch: a search engine behind a friendly distributed façade</a>
   <a href="../httpd/" style="text-align:right"><span class="dir">Next dive →</span>Apache httpd: the web server as a hook-running extension platform</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 14 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 14 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

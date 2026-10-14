@@ -136,7 +136,7 @@ function normalizeTarget(href, fromDir) {
     else resolved.push(part);
   }
   path = resolved.join('/');
-  const m = path.match(/^(?:.*\/)?deep-dives\/([^/.]+)\.md$/) || path.match(/^([^/.]+)\.md$/);
+  const m = path.match(/^(?:.*\/)?deep-dives\/([^/.]+)\.md$/) || path.match(/^(?:.*\/)?([^/.]+)\.md$/);
   if (m && diveIdSet.has(m[1])) return { kind: 'site', path: `dive/${m[1]}/`, anchor };
   if (path === 'PATTERNS.md') return { kind: 'site', path: 'patterns/', anchor };
   return { kind: 'github', url: `${GITHUB_BASE}/blob/main/${path}` };

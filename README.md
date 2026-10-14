@@ -93,10 +93,11 @@ Deep-dives (the exemplars — more added over time):
 - [Envoy](deep-dives/envoy.md) — API-driven data plane: worker snapshots, filter chains, xDS hot config
 - [curl](deep-dives/curl.md) — transfer state machine that rents foreign event loops; layered cfilters
 - [llama.cpp](deep-dives/llama-cpp.md) — framework-free LLM inference: ggml tensor graphs, quantization-first, mmap weights
+- [Node.js](deep-dives/nodejs.md) — V8 + libuv wrapped into one platform: the C++/JS boundary as the core design
 
-The catalog tracks 11 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — the Linux kernel, RocksDB, Node.js,
-V8, Caddy/haproxy-class proxies, FFmpeg and more —
+The catalog tracks 10 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — the Linux kernel, RocksDB, V8,
+Caddy/haproxy-class proxies, FFmpeg and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors. Linux and Chromium are cataloged for
 targeted reading rather than deep-dives by design (see their entries).

@@ -44,7 +44,7 @@ scaled an ecosystem (one binary served CGI farms, PHP hosts, and
 proxies), what the per-request cost of runtime-extensibility is, and
 how the Multi-Processing Module seam lets prefork, event, and the new
 motorz MPM live behind one server API.</p>
-<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/httpd/nginx.md">nginx</a> dive to see the two answers to
+<p>Read it against the <a href="../nginx/">nginx</a> dive to see the two answers to
 &quot;what is a web server&quot;: a pipeline of modules over pools, versus a
 state machine in a worker process.</p>
 <section class="eli10">
@@ -465,7 +465,7 @@ in any single file.</li>
 <li>Budget: ~8-10 hours for the reading path; the phases and filter
 stacks repay a second pass with a debugger attached.</li>
 <li>Prerequisites: C preprocessor fluency (the hook system is macros);
-what a DSO is; the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/httpd/nginx.md">nginx</a> dive for the contrasting model;
+what a DSO is; the <a href="../nginx/">nginx</a> dive for the contrasting model;
 basic POSIX process/thread semantics.</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -485,7 +485,7 @@ history of the process-model trade-offs.</li>
   <a href="../memcached/"><span class="dir">← Previous dive</span>Memcached: the cache that kept the server dumb</a>
   <a href="../zookeeper/" style="text-align:right"><span class="dir">Next dive →</span>ZooKeeper: consensus wrapped in a tiny ordered filesystem</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 15 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 15 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

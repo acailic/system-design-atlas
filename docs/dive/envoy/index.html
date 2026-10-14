@@ -48,8 +48,8 @@ the last filter, and the load balancer itself is a registered policy.
 The dive teaches how to build a system that is simultaneously a hot-
 reconfigurable fabric, a metric firehose, and a defense line that
 sheds load the moment headers arrive.</p>
-<p>Read it against <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/nginx.md">nginx</a> (the config-file-and-reload
-generation) and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/curl.md">curl</a> (the tenant that rents loops):
+<p>Read it against <a href="../nginx/">nginx</a> (the config-file-and-reload
+generation) and <a href="../curl/">curl</a> (the tenant that rents loops):
 Envoy is what a proxy becomes when <em>the API is the product</em> —
 programmability pushed all the way into the control plane.</p>
 <section class="eli10">
@@ -233,7 +233,7 @@ objects; updates build a new object, then publish per-thread.
 <code>cluster_manager_impl.cc</code> (<code>ThreadAwareLoadBalancer</code> pair at line
 932).
 <strong>Why:</strong> copy-on-write replaces locking on the hot path — the same
-trade <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/kubernetes.md">Kubernetes</a> makes with informer caches.
+trade <a href="../kubernetes/">Kubernetes</a> makes with informer caches.
 Cost is memory per worker and update latency; the proxy workload
 (read millions, update rarely) is exactly right for it.</p>
 </li>
@@ -309,7 +309,7 @@ the proxy world.</li>
 pressures (heap, pending streams) to actions; HCM checks
 stop-accepting-requests in <code>decodeHeaders</code> (<code>conn_manager_impl.cc</code>
 ~1610) and can skip filter-chain creation — shedding at the
-cheapest possible point, the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/kafka.md">Kafka</a>-style &quot;reject early&quot;
+cheapest possible point, the <a href="../kafka/">Kafka</a>-style &quot;reject early&quot;
 lesson applied to a proxy.</li>
 </ul>
 <h2 id="4-api-and-extension-design">4. API and extension design</h2>
@@ -346,7 +346,7 @@ clusters).</li>
 memory duplication, and the discipline cost — every shared thing
 must be redesigned as snapshot-or-post.</li>
 <li><strong>Verdict:</strong> right for read-heavy hot paths with rare updates
-(also <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/kubernetes.md">Kubernetes&#39;s</a> informer verdict). Wrong for
+(also <a href="../kubernetes/">Kubernetes&#39;s</a> informer verdict). Wrong for
 frequently-mutated shared counters — which is why stats are
 per-thread aggregated instead.</li>
 </ul>
@@ -450,7 +450,7 @@ pattern to steal for your own accept loops.</li>
 make it two sittings — the xDS half reads best after the data
 path.</li>
 <li>Prerequisites: strong C++ (smart pointers, callbacks-as-closures);
-event-loop thinking (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/libuv.md">libuv</a> dive helps);
+event-loop thinking (the <a href="../libuv/">libuv</a> dive helps);
 HTTP/1.1-2 framing basics; gRPC streams at the conceptual level.
 No prior service-mesh knowledge needed — the dive builds it.</li>
 </ul>
@@ -464,7 +464,7 @@ and the <code>xds_protocol</code> docs (versions, delta xDS, resource
 warming).</li>
 <li>Matt Klein, <em>Envoy&#39;s architecture</em> and his service-mesh-era
 write-ups (the &quot;universal data plane&quot; framing this dive leans on).</li>
-<li>The <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/nginx.md">nginx</a>, <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/curl.md">curl</a>, and <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/envoy/kubernetes.md">Kubernetes</a>
+<li>The <a href="../nginx/">nginx</a>, <a href="../curl/">curl</a>, and <a href="../kubernetes/">Kubernetes</a>
 dives in this atlas — the reload-generation proxy, the renting
 tenant, and the informer-snapshot cousin.</li>
 </ul>
@@ -474,7 +474,7 @@ tenant, and the informer-snapshot cousin.</li>
   <a href="../lua/"><span class="dir">← Previous dive</span>Lua: one tagged union, a register VM, and the friendliest embedding API in the business</a>
   <a href="../curl/" style="text-align:right"><span class="dir">Next dive →</span>curl: a transfer state machine designed to live inside someone else's event loop</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 21 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 21 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

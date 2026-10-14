@@ -318,7 +318,7 @@ projects:
     license: MIT
     domains: [runtime]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 4 }
     why: >
       V8 + libuv + a module system, glued so that JavaScript became a

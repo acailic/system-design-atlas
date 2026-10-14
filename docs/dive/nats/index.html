@@ -45,7 +45,7 @@ This deep-dive teaches how far protocol minimalism plus one well-chosen
 data structure gets you — millions of messages per second in plain Go —
 and how NATS makes delivery semantics a <em>per-feature</em> decision instead
 of a system-wide one.</p>
-<p>Read it against the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kafka.md">Kafka</a> dive: the same problem space,
+<p>Read it against the <a href="../kafka/">Kafka</a> dive: the same problem space,
 inverted. Kafka&#39;s broker is a dumb append-only log with heavy clients;
 NATS&#39;s broker is a smart in-memory router with featherweight clients —
 and JetStream is what it takes to bolt the log back on when &quot;at most
@@ -303,7 +303,7 @@ Raft replication across replicas before acknowledging a publish
 (itself a Raft group) assigns streams to servers and converges
 toward the <em>desired</em> placement (<code>desiredRaftGroup</code>,
 <code>server/jetstream_cluster.go:206</code>) — a reconcile loop, at a smaller
-scale, of the kind the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kubernetes.md">Kubernetes</a> dive covers.</li>
+scale, of the kind the <a href="../kubernetes/">Kubernetes</a> dive covers.</li>
 <li><strong>Graceful shutdown</strong> drains connections (<code>shutdown</code>/<code>drain</code>
 modes in the protocol): subscriptions are unsubscribed with
 flushes so in-flight deliveries complete before close.</li>
@@ -470,8 +470,8 @@ no kernel-level tricks.</li>
 internals (the raft.go + filestore.go pair are a second deep-dive&#39;s
 worth).</li>
 <li>Prerequisites: goroutines and channels at a working level; tries;
-what Raft gives you (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/etcd.md">etcd</a> dive is the best primer in
-this atlas); the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nats/kafka.md">Kafka</a> dive for the contrasting broker
+what Raft gives you (the <a href="../etcd/">etcd</a> dive is the best primer in
+this atlas); the <a href="../kafka/">Kafka</a> dive for the contrasting broker
 philosophy.</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -489,7 +489,7 @@ for the durability tier&#39;s semantics (acks, retention, limits).</li>
   <a href="../zookeeper/"><span class="dir">← Previous dive</span>ZooKeeper: consensus wrapped in a tiny ordered filesystem</a>
   <a href="../libuv/" style="text-align:right"><span class="dir">Next dive →</span>libuv: the event loop distilled into a portable, embeddable library</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 17 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 17 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

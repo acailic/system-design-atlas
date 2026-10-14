@@ -45,8 +45,8 @@ watcher/pending queue machinery under every platform backend, and the
 two designs that make single-threaded async workable in practice:
 mutex-plus-eventfd handoff for other threads, and a starvation-guarded
 thread pool for blocking work.</p>
-<p>Read it after <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> (a bespoke loop) and
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/nginx.md">nginx</a> (a loop per worker process): libuv is what those
+<p>Read it after <a href="../redis/">Redis</a> (a bespoke loop) and
+<a href="../nginx/">nginx</a> (a loop per worker process): libuv is what those
 machines look like when the goal is <em>portability as the product</em> —
 it is also the missing diagram behind every &quot;Node.js event loop&quot;
 blog post, in the code.</p>
@@ -267,7 +267,7 @@ cross-thread path funnels through the same shape: producer locks the
 loop&#39;s <code>wq_mutex</code> only long enough to append and <code>uv_async_send</code>
 (eventfd write on Linux, <code>EVFILT_USER</code> on kqueue, a pipe elsewhere —
 <code>src/unix/async.c</code>). The loop wakes, drains, runs <code>done</code> callbacks.
-This is the pattern the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> dive shows in reverse
+This is the pattern the <a href="../redis/">Redis</a> dive shows in reverse
 (I/O threads handing clients <em>back</em> to a serial core).</li>
 <li><strong>Blocking work is quarantined by kind</strong>: CPU-bound and fs operations
 go to the pool with explicit slow-IO budgets; anything async-capable
@@ -468,7 +468,7 @@ the phase machinery in your head, not parsing syntax.</li>
 readable in a weekend — <code>core.c</code>, <code>stream.c</code>, <code>threadpool.c</code>, and
 <code>async.c</code> are the whole story.</li>
 <li>Prerequisites: <code>select</code>/<code>poll</code>/<code>epoll</code> at a working level (man
-pages suffice); condition variables; the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/libuv/redis.md">Redis</a> dive&#39;s
+pages suffice); condition variables; the <a href="../redis/">Redis</a> dive&#39;s
 event-loop section for a minimalist sibling of this design.</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -486,7 +486,7 @@ the best &quot;why&quot; comments in the systems C canon.</li>
   <a href="../nats/"><span class="dir">← Previous dive</span>NATS: a subject trie with a wire protocol small enough to memorize</a>
   <a href="../runc/" style="text-align:right"><span class="dir">Next dive →</span>runc: a container is a config file plus a choreographed chain of syscalls</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 18 of 23 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 18 of 24 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>
