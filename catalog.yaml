@@ -663,7 +663,7 @@ projects:
     license: LGPL-2.1 OR GPL-2.0 (per binary)
     domains: [media, networking]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       The universal media toolbox: demuxers, decoders, filters, encoders,

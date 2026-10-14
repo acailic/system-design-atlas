@@ -232,7 +232,10 @@ as the single seam users build inheritance, prototypes, and DSLs
 through; [Node.js](deep-dives/nodejs.md) — two deliberate tiers:
 a private `internalBinding` seam that churns with V8 and a frozen
 N-API C ABI that lets precompiled native addons outlive engine
-upgrades.
+upgrades; [FFmpeg](deep-dives/ffmpeg.md) — codecs, demuxers, muxers,
+and filters as plain C structs behind one callback contract each
+(with per-arch SIMD as a second dispatch seam), which is how 880
+compatible implementations coexist in one program.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -269,7 +272,10 @@ schemas) and compiled into dispatch, docs, validation, and clients.
 dispatch/ACL/docs; [Kubernetes](deep-dives/kubernetes.md) — OpenAPI
 schemas → typed clients for unknown future types;
 [CPython](deep-dives/cpython.md) — bytecodes.c DSL generating the
-interpreter and its metadata.
+interpreter and its metadata; [FFmpeg](deep-dives/ffmpeg.md) —
+configure generates codec_list.c / filter_list.c from its component
+lists, so the "plugin registry" is a static C array at link time
+(print_enabled_components in configure:8774).
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems

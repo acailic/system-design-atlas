@@ -212,7 +212,10 @@ as the single seam users build inheritance, prototypes, and DSLs
 through; <a href="../dive/nodejs/">Node.js</a> — two deliberate tiers:
 a private <code>internalBinding</code> seam that churns with V8 and a frozen
 N-API C ABI that lets precompiled native addons outlive engine
-upgrades.</p>
+upgrades; <a href="../dive/ffmpeg/">FFmpeg</a> — codecs, demuxers, muxers,
+and filters as plain C structs behind one callback contract each
+(with per-arch SIMD as a second dispatch seam), which is how 880
+compatible implementations coexist in one program.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -239,7 +242,10 @@ schemas) and compiled into dispatch, docs, validation, and clients.</p>
 dispatch/ACL/docs; <a href="../dive/kubernetes/">Kubernetes</a> — OpenAPI
 schemas → typed clients for unknown future types;
 <a href="../dive/cpython/">CPython</a> — bytecodes.c DSL generating the
-interpreter and its metadata.</p>
+interpreter and its metadata; <a href="../dive/ffmpeg/">FFmpeg</a> —
+configure generates codec_list.c / filter_list.c from its component
+lists, so the &quot;plugin registry&quot; is a static C array at link time
+(print_enabled_components in configure:8774).</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>

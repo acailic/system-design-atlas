@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FFmpeg: two thousand components behind four boring interfaces — System Design Atlas</title>
+<meta name="description" content="FFmpeg is the Swiss army knife of media — it demuxes, decodes, filters, encodes, and muxes essentially every audio/video format that exists — and its design lesson is that none of that scale">
+<meta property="og:title" content="FFmpeg: two thousand components behind four boring interfaces — System Design Atlas">
+<meta property="og:description" content="FFmpeg is the Swiss army knife of media — it demuxes, decodes, filters, encodes, and muxes essentially every audio/video format that exists — and its design lesson is that none of that scale">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/ffmpeg/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/ffmpeg/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-transcode-file-to-file">Walkthrough: one transcode, file to file</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>FFmpeg: two thousand components behind four boring interfaces</h1>
+    <div class="meta-chips"><span class="chip domain">media</span><span class="chip domain">networking</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/FFmpeg/FFmpeg" rel="noopener">LGPL-2.1-or-later OR GPL-2.0-or-later (per binary)</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>4a122520444dc78ed5bc3ee4d35bbd15f220c67f</code> · 2026-10-12 · <a href="https://github.com/FFmpeg/FFmpeg" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">FFmpeg is the Swiss army knife of media — it demuxes, decodes,
+filters, encodes, and muxes essentially every audio/video format
+that exists — and its design lesson is that none of that scale
+required clever per-format machinery. Every demuxer, decoder,
+filter, and encoder is a plain C struct implementing one small
+callback contract, discovered through generated lists at link
+time (no runtime plugin registry), and everything they exchange
+is one of two refcounted value types: <code>AVPacket</code> (compressed) and
+<code>AVFrame</code> (decoded). The <code>ffmpeg</code> CLI threads these components
+into a directed acyclic graph and runs <strong>one pthread per
+component</strong>, pacing them with a single global rule — no source
+may run more than 100 ms of output-time ahead of the slowest
+consumer. This deep-dive teaches how far &quot;boring uniform
+interfaces + shared memory model + one pacing rule&quot; scales:
+at this commit, 880 codec declarations, ~600 filters, ~370
+demuxers and ~190 muxers — every one registrable in a single
+program.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A factory where every machine speaks the same plug.</strong> Packages
+arrive from trucks (the <strong>demuxers</strong> take containers apart into
+<strong>packets</strong> — still-wrapped presents). Unwrapping machines
+(<strong>decoders</strong>) open them into flat pictures and sounds
+(<strong>frames</strong>). A workshop (<strong>filters</strong>) crops, scales, and mixes
+frames. Wrapping machines (<strong>encoders</strong>) repack frames into new
+presents, and packing stations (<strong>muxers</strong>) interleave them into
+new boxes, in timestamp order. Every machine&#39;s plug is the same
+shape, so any machine can feed any other (the <strong>scheduler</strong> wires
+them into a flowchart and gives each its own worker). Photos are
+never photocopied when two machines want the same one: each pins
+the original to its corkboard (a <strong>reference count</strong>), and only
+the last one out recycles it. And the foreman enforces one rule:
+if any shipping lane is more than a tenth of a second behind, the
+fast lanes&#39; trucks wait (the <strong>choke</strong>), so no worker drowns in
+presents.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> with hundreds of codecs
+written by hundreds of people across its per-architecture ports
+(x86, ARM/AArch64, MIPS, PowerPC, RISC-V, LoongArch), one shared
+plug, one memory model, and one pacing rule mean every codec gets
+the same correctness machinery for free — special cases would
+have multiplied by two thousand.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CLI[&quot;fftools/ffmpeg.c — main(): parse options,&lt;br/&gt;then transcode() = sch_start → sch_wait → sch_stop&quot;]
+    subgraph sched[&quot;Scheduler (fftools/ffmpeg_sched.c) — one pthread per node&quot;]
+        DMX[&quot;demux threads&lt;br/&gt;input_thread (ffmpeg_demux.c)&quot;]
+        DEC[&quot;decoder threads&lt;br/&gt;decoder_thread (ffmpeg_dec.c)&quot;]
+        FG[&quot;filtergraph threads&lt;br/&gt;filter_thread (ffmpeg_filter.c)&quot;]
+        ENC[&quot;encoder threads&lt;br/&gt;encoder_thread (ffmpeg_enc.c)&quot;]
+        MUX[&quot;muxer threads&lt;br/&gt;muxer_thread (ffmpeg_mux.c)&quot;]
+        TQ[&quot;ThreadQueue per edge (thread_queue.c)&lt;br/&gt;bounded, blocking, per-stream EOF&quot;]
+        PACE[&quot;schedule_update_locked —&lt;br/&gt;choke/unchoke by DTS, 100 ms tolerance&quot;]
+    end
+    subgraph libs[&quot;libraries (each a uniform component registry)&quot;]
+        LAVF[&quot;libavformat — AVInputFormat / FFOutputFormat +&lt;br/&gt;AVIO (file, http, ... protocols)&quot;]
+        LAVC[&quot;libavcodec — FFCodec (880 externs):&lt;br/&gt;libx264.c... h264dec.c... + parsers, BSFs&quot;]
+        LAVFI[&quot;libavfilter — FFFilter (596 externs),&lt;br/&gt;graph parser + format negotiation&quot;]
+        LAVU[&quot;libavutil — AVBuffer/AVFrame refcounting,&lt;br/&gt;AVOption/AVClass, AVERROR, log, pixfmt&quot;]
+    end
+    DMX --&gt;|&quot;AVPacket&quot;| DEC --&gt;|&quot;AVFrame&quot;| FG --&gt;|&quot;AVFrame&quot;| ENC --&gt;|&quot;AVPacket&quot;| MUX
+    DMX --&gt;|&quot;AVPacket (streamcopy)&quot;| MUX
+    TQ --- DMX &amp; DEC &amp; FG &amp; ENC &amp; MUX
+    PACE -.-&gt;|choke/unchoke| DMX &amp; FG
+    CLI --&gt; sched
+    DMX --&gt; LAVF
+    DEC &amp; ENC --&gt; LAVC
+    FG --&gt; LAVFI
+    sched --&gt; LAVU
+    LAVC &amp; LAVF &amp; LAVFI --&gt; LAVU
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>libavutil</strong> is the foundation nothing may depend upward from:
+<code>AVBuffer</code>/<code>AVBufferRef</code> (refcounted bytes, <code>libavutil/buffer.c</code>),
+<code>AVFrame</code> and <code>AVPacket</code> (the two value types), <code>AVClass</code> +
+<code>AVOption</code> (one generic option system for every component,
+<code>libavutil/opt.c</code>), <code>av_log</code>, <code>AVERROR</code> codes, pixel/sample
+format descriptors. It contains no media logic — it is the
+vocabulary.</li>
+<li><strong>libavformat</strong> owns containers and byte I/O. Demuxers are
+<code>AVInputFormat</code> structs whose <code>read_packet</code> callback the generic
+<code>ff_read_packet</code> loop drives (<code>libavformat/demux.c:652</code>); muxers
+register <code>write_packet</code> behind the generic interleaver
+(<code>libavformat/mux.c:369</code> picks <code>ff_interleave_packet_per_dts</code>
+when a file has more than one interleaved stream). Protocols
+(file/http/pipe) are a second registry under <code>AVIOContext</code>.</li>
+<li><strong>libavcodec</strong> is the largest library: every decoder/encoder is
+one <code>FFCodec</code> struct (<code>libavcodec/codec_internal.h:129</code>) whose
+public first member is <code>AVCodec</code>. Wrappers around external
+projects (<code>libavcodec/libx264.c</code>) sit beside native codecs
+(<code>libavcodec/h264dec.c</code>) — same struct, same contract. Threading
+(slice vs frame, <code>libavcodec/pthread.c:54</code>), bitstream filters,
+and parsers are generic layers under the same roof.</li>
+<li><strong>libavfilter</strong> turns ~600 filter structs into graphs: a text
+parser (<code>graphparser.c</code>), an engine where each link holds a
+frame queue and filters are <em>activated</em> when their inputs
+change (<code>avfilter.c:ff_filter_activate</code>), and a format
+negotiation pass that auto-inserts <code>scale</code>/<code>aresample</code> where
+formats mismatch (<code>avfiltergraph.c:query_formats</code>).</li>
+<li><strong>fftools</strong> is the CLI layer: <code>ffmpeg.c:main</code> parses options,
+builds the component graph through <code>sch_add_*</code>/<code>sch_connect</code>,
+then starts it and waits. It owns no media logic — its whole
+job is wiring, pacing, and reporting.</li>
+</ul>
+<p><strong>The spine:</strong> one transcode walks
+<code>ffmpeg_demux.c:input_thread</code> → <code>av_read_frame</code> →
+<code>ffmpeg_sched.c:sch_demux_send</code> → <code>ffmpeg_dec.c:decoder_thread</code>
+→ <code>avcodec_send_packet</code>/<code>receive_frame</code> →
+<code>ffmpeg_filter.c:filter_thread</code> → <code>av_buffersrc_add_frame</code> →
+<code>av_buffersink_get_frame</code> → <code>ffmpeg_enc.c:encoder_thread</code> →
+<code>avcodec_send_frame</code>/<code>receive_packet</code> →
+<code>ffmpeg_mux.c:muxer_thread</code> → <code>av_interleaved_write_frame</code>.
+Every arrow crosses a bounded <code>ThreadQueue</code> that owns the frames
+in flight by reference.</p>
+<div class="walkthrough">
+<h2 id="walkthrough-one-transcode-file-to-file">Walkthrough: one transcode, file to file</h2>
+<p class="walkthrough-intro">The spine as a story — on the site you can step through it; in
+the repo it reads top to bottom.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant DMX as input_thread (demux)
+    participant LAVF as av_read_frame (libavformat)
+    participant DEC as decoder_thread
+    participant FG as filter_thread
+    participant ENC as encoder_thread
+    participant MUX as muxer_thread
+    DMX-&gt;&gt;DMX: waiter_wait — blocked until scheduler unchokes
+    DMX-&gt;&gt;LAVF: av_read_frame(ctx, pkt)
+    LAVF--&gt;&gt;DMX: refcounted AVPacket (probe done on first packets)
+    DMX-&gt;&gt;DEC: sch_demux_send → tq_send (blocks if queue full)
+    DEC-&gt;&gt;DEC: avcodec_send_packet / avcodec_receive_frame
+    DEC-&gt;&gt;FG: sch_dec_send → buffersrc (via ThreadQueue)
+    FG-&gt;&gt;FG: filter graph activated; pull from buffersink
+    FG-&gt;&gt;ENC: sch_filter_send (frame ref, no copy)
+    ENC-&gt;&gt;ENC: avcodec_send_frame / avcodec_receive_packet
+    ENC-&gt;&gt;MUX: sch_enc_send → pre-mux queue
+    MUX-&gt;&gt;MUX: sch_mux_receive → of_write_packet
+    MUX--&gt;&gt;DMX: every send updates last_dts; choke re-evaluated
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-main-thread-builds-a-graph-not-a-loop">The main thread builds a graph, not a loop</h3>
+<p><code>ffmpeg.c:main</code> (line 995) allocates a <code>Scheduler</code>, then
+<code>ffmpeg_parse_options</code> opens inputs and outputs, which register
+nodes via <code>sch_add_demux</code>, <code>sch_add_dec</code>, <code>sch_add_enc</code>,
+<code>sch_add_mux</code>, <code>sch_add_filtergraph</code> (<code>ffmpeg_sched.c:615-899</code>)
+and wires edges with <code>sch_connect</code> (line 957) — a typed bipartite
+graph: demux streams may feed decoders or muxers (streamcopy),
+decoders feed filtergraphs or encoders (subtitles), filtergraph
+outputs feed encoders. <code>start_prepare</code> (line 1625) then rejects
+any unconnected sink, and <code>check_acyclic</code> (line 1589) walks every
+filtergraph upstream to prove the graph is a DAG — before any
+thread exists.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="threads-start-downstream-first">Threads start downstream-first</h3>
+<p><code>sch_start</code> (line
+1741) first initializes muxers whose streams are all ready, then
+starts threads in order encoders → filtergraphs → decoders →
+demuxers (<code>task_start</code>, line 404, is a thin <code>pthread_create</code>
+wrapper). Downstream threads are already parked on their input
+queues when upstream ones begin pushing, so the first packet has
+a complete path to the output file.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="a-demux-thread-reads-until-it-is-choked">A demux thread reads until it is choked</h3>
+<p><code>ffmpeg_demux.c:input_thread</code> (line 843) loops <code>av_read_frame</code>.
+That call descends into <code>libavformat/demux.c:ff_read_packet</code>,
+which buffers early packets while <code>probe_codec</code> still guesses the
+codec, then drives the demuxer&#39;s <code>read_packet</code> callback; the
+return is always made refcounted (<code>av_packet_make_refcounted</code>,
+<code>demux.c:704</code>). The thread then calls <code>sch_demux_send</code> (line 2179 of the
+scheduler), whose first act is <code>waiter_wait</code> — if this demuxer is
+ahead of the trailing consumer by more than
+<code>SCHEDULE_TOLERANCE</code> (100 ms, line 45), the thread sleeps here
+until the global schedule updates.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-decoder-turns-packets-into-frames-on-demand">The decoder turns packets into frames on demand</h3>
+<p><code>ffmpeg_dec.c:decoder_thread</code> (line 163+) receives a packet from
+its queue and calls <code>avcodec_send_packet</code>, then drains
+<code>avcodec_receive_frame</code> in a loop. Inside libavcodec,
+<code>decode_simple_internal</code> (<code>libavcodec/decode.c:431</code>) invokes the
+codec&#39;s single callback — <code>codec-&gt;cb.decode(avctx, frame, &amp;got_frame, pkt)</code> — whose contract is almost embarrassingly
+plain: return bytes consumed, set <code>got_frame</code>. The generic glue
+handles partial consumption (<code>pkt-&gt;data += consumed</code>), draining
+(send a NULL packet to flush <code>AV_CODEC_CAP_DELAY</code> codecs), and
+defends against buggy decoders (invalid frames are logged as
+<code>AVERROR_BUG</code>; a decoder that loops on drain is force-stopped
+after ~20+ attempts).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-filter-thread-owns-a-lazily-built-graph">The filter thread owns a lazily built graph</h3>
+<p><code>ffmpeg_filter.c:filter_thread</code> (line 3480) cannot configure its
+graph until every input&#39;s format (width, sample rate, channel
+layout) is known — the first decoded frame supplies that
+(<code>ifilter_has_all_input_formats</code>). Once built, incoming frames go
+to <code>av_buffersrc_add_frame</code> (the graph&#39;s doorway), the engine
+activates filters downstream (<code>avfilter.c:ff_filter_activate</code>),
+and <code>read_frames</code> pulls whatever is ready from <code>av_buffersink_get_frame</code>.
+One extra ThreadQueue stream (index <code>nb_inputs</code>) carries control
+messages — a command typed interactively rides the same queue as
+frames, boxed in an <code>AVFrame</code>&#39;s opaque buffer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-encoder-thread-frames-in-packets-out">The encoder thread frames in, packets out</h3>
+<p><code>ffmpeg_enc.c:encoder_thread</code> (line 998) receives frames from
+its queue, and for each: <code>avcodec_send_frame</code>, then loops
+<code>avcodec_receive_packet</code> until <code>EAGAIN</code> (<code>ffmpeg_enc.c:722-734</code>)
+— the mirror image of the decoder API, so both directions of the
+codec contract are pull-based and one-buffer-deep. Opening the
+encoder has its own wrinkle: the first frame&#39;s parameters decide
+encoder settings, but audio sync queues need the encoder&#39;s frame
+size to chunk that very frame — <code>SchEnc</code> resolves the circle with
+an <code>open_cb</code> fired on first frame (<code>ffmpeg_sched.c</code>, comment at
+the <code>open_cb</code> field).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="the-muxer-interleaves-and-feeds-the-schedule">The muxer interleaves and feeds the schedule</h3>
+<p><code>ffmpeg_mux.c:muxer_thread</code> (line 403) pulls packets via
+<code>sch_mux_receive</code>; <code>of_write_packet</code> lands in libavformat, where
+<code>av_interleaved_write_frame</code> buffers one packet per stream and
+releases, each round, the stream whose buffered packet has the
+lowest DTS (<code>ff_interleave_packet_per_dts</code>, <code>mux.c:977</code>).
+Critically, every packet sent to a mux stream updates
+<code>SchMuxStream.last_dts</code> (<code>send_to_mux</code>, <code>ffmpeg_sched.c:2009</code>) —
+this is the signal the whole pacing loop runs on.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="output-proceeds-at-the-speed-of-the-slowest-stream">Output proceeds at the speed of the slowest stream</h3>
+<p>Each send to any node triggers <code>schedule_update_locked</code> (line
+1422), which recomputes the <em>trailing DTS</em> across all mux streams
+and unchokes only those demux/filter sources whose outputs stay
+within 100 ms of it. When every mux finishes — or any task fails
+— <code>sch_wait</code> (line 1807) returns, <code>sch_stop</code> chokes all sources
+and joins all threads in reverse dependency order, and <code>main</code>
+writes trailers. The file, not the process, is the only state.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="avbuffer-avbufferref-libavutil-buffer-c-libavutil-buffer-internal-h">AVBuffer / AVBufferRef (<code>libavutil/buffer.c</code>, <code>libavutil/buffer_internal.h</code>)</h3>
+<p><strong>What:</strong> an opaque heap block with an <code>atomic_uint refcount</code>
+(<code>buffer_internal.h:45</code>), plus a one-pointer <code>AVBufferRef</code> handle
+the rest of the codebase passes around. <code>av_buffer_ref</code> bumps the
+count; the last <code>av_buffer_unref</code> runs the embedded <code>free</code>
+callback. <strong>Why:</strong> this is the entire memory-safety story of the
+pipeline — a packet handed to three queues and two codecs is three
+refcounts, zero copies, and one eventual free. The alternative —
+ownership transfer or deep copies — would either leak under every
+error path or copy gigabytes per second of raw video. Pools
+(<code>av_buffer_pool_init</code>, <code>buffer.c:284</code>) recycle freed entries
+behind the same interface, so decoder frame allocation and
+ThreadQueues reuse memory without any layer knowing.</p>
+<h3 id="avpacket-and-avframe-libavformat-avcodec-h-era-libavcodec-packet-h-libavutil-frame-c">AVPacket and AVFrame (<code>libavformat/avcodec.h</code> era → <code>libavcodec/packet.h</code>, <code>libavutil/frame.c</code>)</h3>
+<p><strong>What:</strong> the two value types. <code>AVPacket</code> is compressed data +
+timestamps + stream index; <code>AVFrame</code> is decoded data (planes in
+<code>frame-&gt;buf[]</code>, each an <code>AVBufferRef</code>), format, dimensions,
+channel layout, and a side-data list. <strong>Why one pair for
+everything:</strong> every component boundary — demux→dec, dec→filter,
+filter→enc, enc→mux — passes the <em>same</em> two types, which is what
+makes <code>sch_connect</code> able to wire any component to any consumer
+generically. The frames-vs-packets split is also exactly where
+the universality lives: subtitles skip filters (packet-ish
+frames), streamcopy skips decode (packet straight to mux), and
+neither needs a special scheduler node type.</p>
+<h3 id="ffcodec-libavcodec-codec-internal-h-129">FFCodec (<code>libavcodec/codec_internal.h:129</code>)</h3>
+<p><strong>What:</strong> the component contract: an embedded public <code>AVCodec p</code>
+(name, media type, id, capabilities — all a caller may read),
+then a private half: <code>priv_data_size</code>, <code>init</code>/<code>close</code>/<code>flush</code>,
+and a <strong>union of callbacks</strong> (<code>cb.decode</code> / <code>cb.receive_frame</code> /
+<code>cb.encode</code> / <code>cb.receive_packet</code> / subtitle variants) selected by
+<code>cb_type</code>. <strong>Why a union of nearly-identical callbacks:</strong> codecs
+are old, and three calling conventions survived (bytes-consumed,
+decoupled receive, subtitle); the union lets the generic layers
+support all three without asking new codecs to match a 2005
+signature. The cast <code>ffcodec(avctx-&gt;codec)</code> (line 325) gets the
+private view back from the public pointer — the same
+embed-public/keep-private trick as <code>FFFilter</code> (<code>libavfilter/filters.h:282</code>)
+and <code>FFStream</code> in libavformat. A third party adds a codec (or
+wraps x264, <code>libavcodec/libx264.c</code>) by writing one struct and
+adding one line to the registry — no headers forked.</p>
+<h3 id="scheduler-graph-threadqueue-fftools-ffmpeg-sched-c-80-310-fftools-thread-queue-c">Scheduler graph + ThreadQueue (<code>fftools/ffmpeg_sched.c:80-310</code>, <code>fftools/thread_queue.c</code>)</h3>
+<p><strong>What:</strong> <code>Scheduler</code> holds typed arrays (<code>SchDemux</code>, <code>SchDec</code>,
+<code>SchFilterGraph</code>, <code>SchEnc</code>, <code>SchMux</code>); each node stores its
+destination list plus a <code>SchTask</code> (thread + function pointer).
+Edges are <code>ThreadQueue</code>s: a bounded FIFO of packets-or-frames
+with one mutex, one read condition variable, and <em>per-stream
+write condition variables</em> (<code>thread_queue.c:52-55</code>), where
+<code>tq_send</code> blocks the producer while <code>can_write</code> is false and
+<code>tq_send_finish</code>/<code>tq_recv_finish</code> propagate per-stream EOF flags.
+<strong>Why queues as edges instead of callbacks:</strong> the queue is the
+unit of backpressure (bounded), of ordering (FIFO per edge), and
+of shutdown (EOF handshake) — three concerns that callback-style
+pipelines have to re-invent per component. The scheduler adds
+only <em>when</em> producers may run (choke) on top of <em>how much</em> they
+may produce (queue bound).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph threads[&quot;one pthread per component (task_start)&quot;]
+        D1[&quot;demux 1&lt;br/&gt;input_thread&quot;] 
+        D2[&quot;demux 2&quot;]
+        F1[&quot;filtergraph&quot;]
+        E1[&quot;encoder&quot;]
+        M1[&quot;muxer&lt;br/&gt;muxer_thread&quot;]
+    end
+    Q1[&quot;ThreadQueue&lt;br/&gt;(bounded, blocking)&quot;]
+    Q2[&quot;ThreadQueue&quot;]
+    Q3[&quot;pre-mux queue&lt;br/&gt;(last_dts → schedule)&quot;]
+    D1 --&gt; Q1 --&gt; F1 --&gt; Q2 --&gt; E1 --&gt; Q3 --&gt; M1
+    D2 -.-&gt;|&quot;waiter_wait parks any source&lt;br/&gt;&amp;gt; 100ms ahead&quot;| Q1
+    M1 --&gt;|&quot;every packet: schedule_update_locked&quot;| SCHED
+    subgraph SCHED[&quot;main thread: sch_wait on finish_cond&quot;]
+        W[&quot;task failed → task_failed=1&lt;br/&gt;→ all threads joined by sch_stop&quot;]
+    end
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> every component is its own pthread
+(<code>task_wrapper</code>, line 2716 — task function, then <code>task_cleanup</code>,
+then error merge). What is <em>serialized</em> is exactly two things:
+each ThreadQueue&#39;s mutex, and the scheduler&#39;s <code>schedule_lock</code>
+held only for choke/unchoke bookkeeping — never for data. Codec
+internals may add their own layer (slice threading fans a frame
+across workers; frame threading decodes several frames
+concurrently and clones state between them,
+<code>libavcodec/pthread.c:54</code> choosing the mode) — the scheduler
+neither knows nor cares.</li>
+<li><strong>Backpressure is two-tier.</strong> Tier one: bounded queues; a
+producer blocks in <code>tq_send</code> (<code>thread_queue.c:148</code>) when the
+edge is full. Tier two: <em>pacing</em>; <code>schedule_update_locked</code>
+(line 1422) computes the trailing DTS over every mux stream and
+chokes any demux/filter source whose output streams exceed it
+by <code>SCHEDULE_TOLERANCE</code> (100 ms, line 45), parking the thread in
+<code>waiter_wait</code> (line 320). The two compose: queues cap <em>memory</em>,
+the schedule caps <em>skew</em> — without tier two, a transcode
+mapping two inputs of different speed would buffer the fast
+input&#39;s entire remainder. The header of <code>ffmpeg_sched.h</code>
+honestly admits the limit: badly interlaved inputs or
+speed-changed streams can still force unbounded buffering and
+eventual failure.</li>
+<li><strong>Failure is global and immediate.</strong> Any task returning an
+error sets <code>sch-&gt;task_failed</code> under <code>finish_lock</code> and signals
+<code>finish_cond</code> (<code>task_wrapper</code>); <code>sch_wait</code> returns true, and
+<code>sch_stop</code> (line 2770) chokes every source, then joins threads
+upstream-to-downstream. <code>EOF</code> is <em>normal termination</em>
+everywhere — the same code path, different sign. There is no
+crash-recovery story because there is no persistent state: an
+<code>ffmpeg</code> run is a pure function from input files to output
+files; restart <em>is</em> recovery. Per-packet decode errors default
+to &quot;log and continue&quot; (<code>exit_on_error</code> off in <code>input_thread</code>),
+matching media reality — one corrupt frame should not void the
+whole encode.</li>
+<li><strong>Buggy components are treated as input.</strong> The generic decode
+path validates every returned frame (<code>frame_validate</code> returns
+<code>AVERROR_BUG</code>), caps drain loops (<code>nb_draining_errors</code>), and
+resets MMX state (<code>emms_c()</code>) in case an asm block forgot —
+defensive glue around two thousand independently-written
+callbacks is not paranoia, it is the design.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is contexts + send/receive pairs.</strong> Open a
+thing (<code>avformat_open_input</code>, <code>avcodec_open2</code>), then push/pull:
+<code>avcodec_send_packet</code>/<code>avcodec_receive_frame</code> and its encode
+mirror, <code>av_buffersrc_add_frame</code>/<code>av_buffersink_get_frame</code>. Each
+direction holds at most one item and returns <code>EAGAIN</code> — which
+makes the API composable with any outer loop (the scheduler, or
+your app) without threads leaking into libraries.</li>
+<li><strong>Extension seam one: compile-time components.</strong> Adding a codec
+or filter is one source file plus one entry in the registry list
+(<code>libavfilter/allfilters.c</code>, or <code>configure</code>&#39;s <code>*_LIST</code>), from
+which <code>print_enabled_components</code> (<code>configure:8774</code>) <em>generates</em>
+<code>codec_list.c</code>/<code>filter_list.c</code> — a static C array iterated by
+<code>av_codec_iterate</code> (<code>allcodecs.c:949</code>). No dlopen, no runtime
+registration API to get wrong: the &quot;plugin system&quot; is the
+linker. External encoders (x264, aom) are wrapped in the same
+struct, so from <code>avcodec_find_encoder</code> they are indistinguishable
+from native codecs.</li>
+<li><strong>Extension seam two: per-arch SIMD as function-pointer
+tables.</strong> DSP primitives live in plain structs of function
+pointers (<code>H264ChromaContext</code>); per-arch init functions assign
+asm implementations behind CPU-flag guards —
+<code>ff_h264chroma_init_x86</code> (<code>libavcodec/x86/h264chroma_init.c:56</code>)
+picks MMXEXT/SSE2/SSSE3/AVX variants of <code>put/avg_h264_chroma_mc*</code>
+with <code>EXTERNAL_SSSE3(cpu_flags)</code> checks, after the C versions
+were assigned as defaults. Dispatch happens once at init, never
+per pixel — the reason a 4K decode pays zero dispatch overhead
+while still using AVX2.</li>
+<li><strong>One option system for everything.</strong> <code>avcodec_open2</code>
+(<code>libavcodec/avcodec.c:145</code>) shows the mechanism end to end:
+each codec&#39;s private options are an <code>AVOption</code> table reachable
+through the <code>AVClass</code> pointer stored at the <em>first field of the
+codec&#39;s private data</em>; generic code allocates <code>priv_data_size</code>
+bytes, plants the class pointer, applies defaults
+(<code>av_opt_set_defaults</code>), then applies the user&#39;s dict —
+including child objects (<code>AV_OPT_SEARCH_CHILDREN</code>). The same
+machinery gives per-stream filter options, protocol options,
+and device options one syntax and one help system.</li>
+<li><strong>The honest warts.</strong> Codec <code>init</code> runs under a global
+per-codec mutex (<code>lock_avcodec(codec2)</code>, <code>avcodec.c:329-343</code>)
+because many legacy codecs keep static state — thread-safety at
+the component boundary is enforced, not assumed. Lookups are
+linear scans over the registry (<code>find_codec</code>, <code>allcodecs.c:983</code>)
+— fine for hundreds of entries, unthinkable for millions. And
+<code>AVCodecContext</code> itself is one giant struct shared by all
+codecs, with deprecation shims (<code>FF_API_INIT_PACKET</code> inside
+<code>ff_read_packet</code>) kept for a compatibility horizon measured in
+years — the tax of being everyone&#39;s dependency.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-callback-contract-over-per-component-apis">Trade-off 1: one callback contract over per-component APIs</h3>
+<ul>
+<li><strong>Tension:</strong> codecs span 30 years, three calling conventions,
+subtitles, hardware, external libraries — bespoke APIs would fit
+each better.</li>
+<li><strong>Choice:</strong> every component implements the same struct with a
+bytes-consumed/got-output callback (or its decoupled-queue
+variant), and all orchestration — threading, draining, partial
+input, timestamps — lives in generic glue.</li>
+<li><strong>Evidence:</strong> <code>libavcodec/decode.c:431</code> <code>decode_simple_internal</code>
+— the single call <code>codec-&gt;cb.decode(avctx, frame, &amp;got_frame, pkt)</code> plus the generic partial-consumption arithmetic
+(<code>pkt-&gt;data += consumed</code>) that no individual codec had to
+implement; the same shape in <code>avcodec.c:342</code> (<code>codec2-&gt;init</code>)
+and <code>avfiltergraph.c</code> negotiation.</li>
+<li><strong>Given up:</strong> fit. The contract leaks capability flags in
+exchange for uniformity — <code>FF_CODEC_CAP_SETS_PKT_DTS</code>,
+<code>SETS_FRAME_PROPS</code>, <code>AV_CODEC_CAP_DELAY</code> are exactly the
+special cases the glue must know about, and the capability-flag
+list is long. New needs (hardware frames, HDR metadata, Film
+Grain) accrete fields on shared structs rather than on the
+components that need them.</li>
+<li><strong>Verdict:</strong> right when the component count is in the hundreds
+and contributors are strangers to each other — the generic
+layer is where correctness concentrates, and it is tested once
+for all 880 codecs. Wrong for a system with five well-known
+components, where the flags would just be typed fields.</li>
+</ul>
+<h3 id="trade-off-2-refcounted-shared-buffers-over-copying-handoffs">Trade-off 2: refcounted shared buffers over copying handoffs</h3>
+<ul>
+<li><strong>Tension:</strong> raw 8-bit 4K video is ~25 MB <em>per frame</em> (~1.5 GB/s
+at 60 fps); every
+pipeline stage touching it multiplicatively would melt memory
+bandwidth.</li>
+<li><strong>Choice:</strong> all payload moves as <code>AVBufferRef</code> bumps; queues and
+graphs store references; <code>av_packet_make_refcounted</code> in
+<code>ff_read_packet</code> (<code>demux.c:704</code>) guarantees the invariant at the
+system&#39;s entry; pools recycle the same storage (<code>buffer.c:284</code>).</li>
+<li><strong>Evidence:</strong> <code>ThreadQueue</code> stores frames in a
+<code>AVContainerFifo</code> by reference (<code>thread_queue.c:48</code>); a
+decoder frame flows demux→decode→filter→encode→mux as refcounts
+with the pixels written exactly once. The rule is enforced
+socially: writers needing to mutate shared data must call
+<code>av_frame_make_writable</code> first — the refcount makes sharing
+cheap and mutation <em>detectable</em>, not impossible.</li>
+<li><strong>Given up:</strong> simple ownership. Every bug class refcounting
+invents (use-after-free across threads, cycles via side data)
+becomes possible; lifetime reasoning is now a pipeline-wide
+property. And the ThreadQueue&#39;s frame-count bound is coupled to
+decoder frame pools — see the assert in <code>queue_alloc</code>
+(<code>ffmpeg_sched.c:387-391</code>) warning that changing queue size
+touches decoder code.</li>
+<li><strong>Verdict:</strong> right for moving dense immutable media between
+concurrent stages — the alternative is copying or single-thread
+processing. Wrong when data is small and mutation-heavy;
+refcounting then buys leaks without buying bandwidth.</li>
+</ul>
+<h3 id="trade-off-3-global-dts-pacing-over-per-edge-flow-control">Trade-off 3: global DTS pacing over per-edge flow control</h3>
+<ul>
+<li><strong>Tension:</strong> one output file interleaves streams from many
+inputs of different speeds; local backpressure alone lets a
+fast input fill all queues while a slow one crawls — memory
+grows until failure.</li>
+<li><strong>Choice:</strong> one global schedule. Every packet reaching a mux
+updates <code>last_dts</code>; <code>schedule_update_locked</code>
+(<code>ffmpeg_sched.c:1422</code>) computes the trailing DTS across <em>all</em>
+output streams and chokes any source more than
+<code>SCHEDULE_TOLERANCE</code> (100 ms, line 45) ahead, parking it in
+<code>waiter_wait</code> until the world moves.</li>
+<li><strong>Evidence:</strong> the choke arithmetic in <code>schedule_update_locked</code>
+(<code>ms-&gt;last_dts - dts &gt;= SCHEDULE_TOLERANCE → skip unchoke</code>) and
+its admission in the header comment: with fundamentally
+mismatched rates &quot;there will be increasing amounts of buffering
+followed by eventual transcoding failure&quot; — pacing bounds skew,
+it cannot abolish it.</li>
+<li><strong>Given up:</strong> throughput independence and some latency: every
+source is throttled by the slowest consumer globally, and the
+schedule lock serializes bookkeeping across all threads. A
+stream that could finish instantly cannot.</li>
+<li><strong>Verdict:</strong> right when the product is <em>one interleaved file
+whose streams must stay temporally together</em> — the 100 ms
+window is the definition of &quot;together&quot;. Wrong for independent
+outputs (per-file quotas beat one global trailing DTS) — and
+note the design answers by making the muxer, not the codec, the
+center of gravity.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>fftools/ffmpeg.c:main</code> (line 995) and <code>transcode</code> (line 901) —
+how thin the CLI became: parse, <code>sch_start</code>, wait, stop.
+Everything else is in threads.</li>
+<li><code>fftools/ffmpeg_sched.h</code> — read the whole architecture comment
+first; it is the design document for the DAG, and it names
+every component type you will meet.</li>
+<li><code>fftools/ffmpeg_sched.c:957</code> <code>sch_connect</code> — the typed edge
+table: which source may feed which sink, asserted one case at
+a time; then <code>check_acyclic</code> (line 1589) and <code>start_prepare</code>
+(line 1625) for what is validated before threads exist.</li>
+<li><code>fftools/ffmpeg_demux.c:input_thread</code> (line 843) — the demux
+loop: <code>av_read_frame</code>, error policy, loop/seek handling, and
+the send into the scheduler.</li>
+<li><code>libavformat/demux.c:652</code> <code>ff_read_packet</code> — probing while
+streaming (the raw_packet_buffer), the <code>FFERROR_REDO</code>
+convention, and <code>av_packet_make_refcounted</code> at the entry to
+the pipeline.</li>
+<li><code>libavcodec/decode.c:734</code> <code>avcodec_send_packet</code> then <code>:431</code>
+<code>decode_simple_internal</code> — the one-callback contract, partial
+consumption, drain, and the buggy-decoder defenses; pair with
+<code>libavcodec/encode.c</code>&#39;s mirror for the encode side.</li>
+<li><code>libavcodec/codec_internal.h:129</code> <code>FFCodec</code> — the struct, the
+<code>cb</code> union, and <code>ffcodec()</code>; then <code>libavcodec/allcodecs.c:940-946</code><ul>
+<li><code>configure:8774</code> <code>print_enabled_components</code> to see where the
+registry comes from.</li>
+</ul>
+</li>
+<li><code>libavutil/buffer.c</code> — <code>av_buffer_create</code>, <code>buffer_ref</code>,
+<code>buffer_unref</code>, <code>av_buffer_pool_get</code>; then <code>libavutil/frame.c</code>
+<code>get_video_buffer</code> (line 75) for how AVFrame rides AVBuffer.</li>
+<li><code>fftools/ffmpeg_filter.c:filter_thread</code> (line 3480) — deferred
+graph configuration, buffersrc in / buffersink out, and the
+control-stream trick (frames carrying commands).</li>
+<li><code>libavfilter/avfilter.c:1455</code> <code>ff_filter_activate</code> (read the
+scheduling rationale comment above it) and
+<code>libavfilter/avfiltergraph.c:529</code> <code>query_formats</code> — the
+activation model and the negotiation that auto-inserts
+<code>scale</code>/<code>aresample</code>.</li>
+<li><code>fftools/ffmpeg_sched.c:1422</code> <code>schedule_update_locked</code> with
+<code>trailing_dts</code>/<code>progressing_dts</code> (lines 438, 460) and line 45
+<code>SCHEDULE_TOLERANCE</code>; then <code>thread_queue.c:148</code> <code>tq_send</code> for
+the bounded half of backpressure.</li>
+<li><code>libavcodec/x86/h264chroma_init.c:56</code> — SIMD as a second
+extension axis: default C tables overwritten per CPU flags,
+once, at init.</li>
+</ol>
+<p>You have now traced one transcode from a container on disk
+through demux, decode, filtering, encode, and interleaved muxing
+— and the scheduler that kept every stream within a tenth of a
+second of every other.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the registry a generated static list, not a runtime
+API</strong>: configure-time <code>codec_list.c</code> means plugins are
+compile-time facts — no ABI surface to break, no load-order
+bugs, and iteration order is reproducible (<code>allcodecs.c:946</code>).</li>
+<li><strong>Put correctness glue in the generic layer, not in components</strong>
+— frame validation, drain caps, and partial consumption live in
+<code>decode.c</code>, written once and inherited by every codec.</li>
+<li><strong>Bound your edges with queues, then pace your sources globally</strong>
+— ThreadQueues cap memory; the DTS schedule caps skew; together
+they make &quot;transcode anything into one interleaved file&quot; a
+two-rule system (<code>schedule_update_locked</code>).</li>
+<li><strong>Move dense data by refcount, not by copy</strong> — one
+<code>AVBufferRef</code> design serves packet queues, frame graphs, side
+data, and hardware frames with the same lifetime rules
+(<code>libavutil/buffer.c</code>).</li>
+<li><strong>Dispatch once, at init</strong> — SIMD selection via function-pointer
+tables filled under CPU-flag guards keeps per-pixel hot loops
+free of any branching (<code>x86/h264chroma_init.c</code>).</li>
+<li><strong>Separate the public view from the private half of a component</strong>
+— embed <code>AVCodec</code> in <code>FFCodec</code> (and <code>AVFilter</code> in <code>FFFilter</code>)
+so external code sees a stable, minimal struct while internals
+evolve (<code>codec_internal.h:129</code>).</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong>. The codebase is enormous, the C is
+dense and macro-heavy, and the interesting design lives
+across two layers (fftools scheduling + library contracts).</li>
+<li>Budget: ~8–10 hours for the reading path; double it if you also
+build and step through a transcode in gdb. Skim §1 and §6
+(4 hours) if you only want the architecture story.</li>
+<li>Prerequisites: comfortable C (function pointers, unions,
+<code>static</code> structs); refcounting semantics; pthreads
+(mutex/condvar at working level); media vocabulary — what a
+packet vs frame is, why DTS and PTS differ (the
+<a href="https://ffmpeg.org/documentation.html">libavformat docs</a> gloss
+this; <code>doc/demuxers.texi</code> in-tree). Threaded decoding
+(<code>doc/multithreading.txt</code>) and filter writing
+(<code>doc/writing_filters.txt</code>) are excellent second readings, both
+in-repo.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>FFmpeg documentation hub — <a href="https://ffmpeg.org/documentation.html">https://ffmpeg.org/documentation.html</a> —
+the doxygen API docs are the reference for the
+<code>avcodec_send_packet</code>/<code>receive_frame</code> contract.</li>
+<li>In-tree design notes (at the pinned commit): <code>doc/filter_design.txt</code>
+(the filter engine&#39;s design), <code>doc/multithreading.txt</code> (frame vs
+slice threading), <code>doc/writing_filters.txt</code> (the component
+contract from the author&#39;s side).</li>
+<li><code>doc/ffmpeg.texi</code> — the CLI manual: the option-parsing layer the
+scheduler sits on top of, including <code>-filter_complex</code> graph
+syntax that becomes <code>sch_connect</code> edges.</li>
+<li>The <code>ffmpeg_sched.h</code> header comment itself — one of the
+clearest architecture documents in the tree, written by the
+rewrite&#39;s author (Anton Khirnov, 2023).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../nodejs/"><span class="dir">← Previous dive</span>Node.js: the boundary is the platform — an engine and a loop behind one JS-facing seam</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 25 of 25 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
