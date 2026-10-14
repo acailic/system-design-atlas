@@ -1,5 +1,6 @@
 /* system-design-atlas site behaviors — generated into docs/assets/site.js by site/build.mjs
-   Read-aloud (speechSynthesis), walkthrough steppers, mermaid diagrams, TOC spy, home filter. */
+   Read-aloud (speechSynthesis), walkthrough steppers, mermaid diagrams, TOC spy,
+   home domain filter + name search. */
 
 /* ── mermaid diagrams ─────────────────────────────────────────────
    Diagram source lives in the markdown as fenced ```mermaid blocks; the
@@ -333,20 +334,33 @@ function initTocSpy() {
   setActive();
 }
 
-/* ── home: domain filter ───────────────────────────────────────── */
+/* ── home: domain filter + name search ────────────────────────── */
 function initFilter() {
   const cards = document.querySelectorAll('.dive-card');
   const domainChips = document.querySelectorAll('.filter-chip[data-domain]');
   const allChip = document.querySelector('.filter-chip:not([data-domain])');
+  const search = document.querySelector('.filter-search');
+  const status = document.querySelector('.filter-status');
   if (!domainChips.length || !cards.length) return;
-  let active = null;
+  let active = null;   // selected domain, or null for all
+  let query = '';      // lowercased name search, '' for none
   const apply = () => {
     domainChips.forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.domain === active)));
     if (allChip) allChip.setAttribute('aria-pressed', String(active === null));
+    let shown = 0;
     cards.forEach((card) => {
       const domains = (card.dataset.domains || '').split(' ');
-      card.style.display = !active || domains.includes(active) ? '' : 'none';
+      const hay = card.dataset.search || '';
+      const show = (!active || domains.includes(active)) && (!query || hay.includes(query));
+      card.style.display = show ? '' : 'none';
+      if (show) shown += 1;
     });
+    if (status) {
+      status.textContent =
+        !active && !query ? ''
+        : shown === 0 ? `0 of ${cards.length} deep-dives match — try another area or search.`
+        : `${shown} of ${cards.length} deep-dives`;
+    }
   };
   domainChips.forEach((chip) => {
     chip.addEventListener('click', () => {
@@ -359,6 +373,19 @@ function initFilter() {
     active = null;
     apply();
   });
+  if (search) {
+    search.addEventListener('input', () => {
+      query = search.value.trim().toLowerCase().replace(/\s+/g, ' ');
+      apply();
+    });
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && search.value) {
+        search.value = '';
+        query = '';
+        apply();
+      }
+    });
+  }
 }
 
 /* ── boot ───────────────────────────────────────────────────────── */
