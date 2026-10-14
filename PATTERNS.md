@@ -229,7 +229,10 @@ tables as composable seams; [llama.cpp](deep-dives/llama-cpp.md) —
 model architectures as graph-builder files (160 of them) over a
 dumb tensor core; [Lua](deep-dives/lua.md) — the metatable protocol
 as the single seam users build inheritance, prototypes, and DSLs
-through.
+through; [Node.js](deep-dives/nodejs.md) — two deliberate tiers:
+a private `internalBinding` seam that churns with V8 and a frozen
+N-API C ABI that lets precompiled native addons outlive engine
+upgrades.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
