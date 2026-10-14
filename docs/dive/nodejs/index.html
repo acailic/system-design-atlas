@@ -42,16 +42,16 @@ choke point), while almost the entire standard library lives on the
 JS side (<code>lib/*.js</code>), <em>on top of</em> the boundary, calling back into C++
 through narrow, unstable &quot;internal bindings.&quot; This deep-dive teaches
 how an embeddable engine (V8 isolates, contexts, handle scopes) and
-an embeddable event loop (the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> loop) are assembled
+an embeddable event loop (the <a href="../libuv/">libuv</a> loop) are assembled
 into a coherent platform: the bootstrap chain, the single
 <code>MakeCallback</code> door every I/O event walks through, the startup
 snapshot that skips it all, and the two-tier ABI (private
 <code>internalBinding</code> vs stable N-API) that let the core churn while
 native addons survived — the decision that made <code>npm</code> possible.</p>
-<p>Read it after <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> (what the loop underneath does) and
-alongside <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/cpython.md">CPython</a> (the other great &quot;wrap an engine
+<p>Read it after <a href="../libuv/">libuv</a> (what the loop underneath does) and
+alongside <a href="../cpython/">CPython</a> (the other great &quot;wrap an engine
 into a platform&quot; story, with the opposite ABI instincts) and
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/lua.md">Lua</a> (a boundary designed as a virtual-stack C API):
+<a href="../lua/">Lua</a> (a boundary designed as a virtual-stack C API):
 Node is what an embedding looks like when the stdlib itself lives on
 the guest side of the seam.</p>
 <section class="eli10">
@@ -195,7 +195,7 @@ build time, inside the snapshot.</p>
 <p>A TCP connection
 completes the handshake; epoll reports the listening socket readable
 and libuv&#39;s accept machinery fires (all of this is the
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> dive&#39;s loop). The callback registered for that
+<a href="../libuv/">libuv</a> dive&#39;s loop). The callback registered for that
 socket is <code>ConnectionWrap&lt;TCPWrap, uv_tcp_t&gt;::OnConnection</code>
 (<code>src/connection_wrap.cc:33</code>) — Node-specific C++ begins here.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="accept-and-wrap-then-cross-once">Accept and wrap, then cross once</h3>
@@ -341,7 +341,7 @@ owned by <code>NodePlatform</code> (<code>src/node_platform.cc:227</code>), whos
 per-isolate foreground task runner is itself a <code>uv_async_t</code>
 (<code>PerIsolatePlatformData</code>, <code>src/node_platform.cc:318</code>) — the
 libuv async doorbell again; the libuv threadpool for blocking
-syscalls (see the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> dive); and worker threads,
+syscalls (see the <a href="../libuv/">libuv</a> dive); and worker threads,
 each a full isolate. JS-level shared state between threads is
 only <code>SharedArrayBuffer</code> and the message system.</p>
 </li>
@@ -573,7 +573,7 @@ return value steers a C parser. Then <code>lib/_http_common.js:77</code>
 <li><code>src/env.cc:1314</code> <code>InitializeLibuv</code>, <code>:1824</code> <code>CheckImmediate</code> —
 <code>setImmediate</code> as a <code>uv_check</code> handle, cross-thread tasks as
 <code>task_queues_async_</code>; connect each handle to the libuv loop
-phases from the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> dive.</li>
+phases from the <a href="../libuv/">libuv</a> dive.</li>
 <li><code>src/node_worker.cc:308</code> <code>Worker::Run</code> and
 <code>src/node_messaging.cc:675</code> <code>OnMessage</code> — the second isolate:
 per-worker loop, snapshot reuse, the port&#39;s async doorbell and
@@ -621,11 +621,11 @@ module system all at once.</li>
 <li>Budget: ~6–8 hours for the reading path (the choke-point and
 bootstrap files deserve slow reading; the parser and worker files
 can be skimmed once the pattern is clear).</li>
-<li>Prerequisites: the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> dive (the loop underneath);
+<li>Prerequisites: the <a href="../libuv/">libuv</a> dive (the loop underneath);
 a working idea of V8&#39;s isolate/context/handle-scope model (the
 V8 &quot;Embedder&#39;s Guide&quot; is enough — you need the vocabulary, not
 the details); comfort with RAII/scope guards in C++; the
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/lua.md">Lua</a> dive&#39;s embedding chapter for contrast on how small
+<a href="../lua/">Lua</a> dive&#39;s embedding chapter for contrast on how small
 a language boundary can be.</li>
 </ul>
 <h2 id="9-further-reading">9. Further reading</h2>
@@ -638,9 +638,9 @@ isolate/context/handle-scope model the C++ core lives inside.</li>
 <code>src/node_binding.cc</code> header comments — unusually good
 in-tree documentation of the bootstrap order and the binding
 registry.</li>
-<li>This atlas&#39;s <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/libuv.md">libuv</a> deep-dive — the loop that every
+<li>This atlas&#39;s <a href="../libuv/">libuv</a> deep-dive — the loop that every
 crossing in this dive eventually waits on; and
-<a href="https://github.com/acailic/system-design-atlas/blob/main/dive/nodejs/cpython.md">CPython</a> for the sibling embedding with opposite
+<a href="../cpython/">CPython</a> for the sibling embedding with opposite
 ABI instincts.</li>
 </ul>
 
