@@ -101,7 +101,11 @@ drains the old generation;
 <a href="../dive/servo/">Servo</a> — the
 constellation thread supervises expendable pipelines (script
 threads or sandboxed child processes) and is chaos-tested against
-random pipeline death.</p>
+random pipeline death;
+<a href="../dive/haproxy/">HAProxy</a> — the
+master re-executes itself per reload and the old worker hands its
+listening sockets to the new one over a socketpair, so the supervisor
+ever only owns supervision, never a single connection.</p>
 <p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.</p>
 <p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
@@ -125,7 +129,10 @@ thread-local config snapshots;
 a transfer state machine that rents any foreign loop via pollsets;
 <a href="../dive/servo/">Servo</a> — one task-queue event loop per
 site-instance script thread implements the WHATWG event-loop
-processing model, so one page&#39;s hang cannot stall another site.</p>
+processing model, so one page&#39;s hang cannot stall another site;
+<a href="../dive/haproxy/">HAProxy</a> — one poll loop per thread, but with
+the loop&#39;s own scheduler made explicit: budgeted tasklet run queues
+in ebtrees, weighted by class, policed by a CPU-time watchdog.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event

@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">27 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">28 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -242,6 +242,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> An office building where each website gets a workroom, run by a building manager who never does any of the tenants' work herself. The building manager (the Constellation thread) assigns rooms…</span>
   <span class="dc-meta"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/haproxy/" data-domains="proxy-lb" data-search="haproxy: a proxy where every hot path runs against a visible budget">
+  <span class="dc-name">HAProxy</span>
+  <span class="dc-headline">a proxy where every hot path runs against a visible budget</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every waiter works alone with a to-do list that is never allowed to get long. Each waiter (a thread) has a to-do list ordered by when you wrote the item down (the run queue, an…</span>
+  <span class="dc-meta"><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -273,7 +279,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 27 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 28 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -311,7 +317,7 @@ transferable design moves you can apply to your own systems.</li>
 </details>
 <details class="catalog-group">
 <summary>proxy-lb <span class="count">(2)</span></summary>
-<ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/haproxy/haproxy" rel="noopener">HAProxy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/haproxy/">HAProxy</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The load balancer that refuses to drop traffic: run queues and tasks instead of threads, zero-downtime reload via socket handoff, and obsessive per-connection memory accounting (pools + ebtree). Teaches how to design…</div></li>
 <li><span class="cat-name"><a href="dive/envoy/">Envoy</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The modern data-plane architecture: an event loop per worker thread, filter chains as the extension model (network filters, HTTP filters), xDS as the control-plane API, and stats/tracing built into the skeleton.…</div></li></ul>
