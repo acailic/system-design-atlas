@@ -97,7 +97,11 @@ postmaster forks backends, one connection per process;
 expendable snapshotter over copy-on-write memory;
 <a href="../dive/httpd/">Apache httpd</a> — the MPM parent supervises score-
 board-tracked children and respawns them while a graceful restart
-drains the old generation.</p>
+drains the old generation;
+<a href="../dive/servo/">Servo</a> — the
+constellation thread supervises expendable pipelines (script
+threads or sandboxed child processes) and is chaos-tested against
+random pipeline death.</p>
 <p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.</p>
 <p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
@@ -118,7 +122,10 @@ library: phases, watcher queues, and a poller backend per OS;
 <a href="../dive/envoy/">Envoy</a> — one dispatcher per worker thread over
 thread-local config snapshots;
 <a href="../dive/curl/">curl</a> — the tenant&#39;s side of the same contract:
-a transfer state machine that rents any foreign loop via pollsets.</p>
+a transfer state machine that rents any foreign loop via pollsets;
+<a href="../dive/servo/">Servo</a> — one task-queue event loop per
+site-instance script thread implements the WHATWG event-loop
+processing model, so one page&#39;s hang cannot stall another site.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -218,7 +225,10 @@ and filters as plain C structs behind one callback contract each
 compatible implementations coexist in one program;
 <a href="../dive/pytorch/">PyTorch</a> — every extension (custom
 ops, backends, interceptors, compilers) registers at the one
-dispatch table, which is how eager Python stayed a platform.</p>
+dispatch table, which is how eager Python stayed a platform;
+<a href="../dive/servo/">Servo</a> — the engine grew an embedding API
+(ServoBuilder/WebView delegates, protocol registry, factory traits)
+so shells and C hosts (servoshell, ffi/capi) extend without forking.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -252,7 +262,10 @@ lists, so the &quot;plugin registry&quot; is a static C array at link time
 <a href="../dive/pytorch/">PyTorch</a> —
 native_functions.yaml + derivatives.yaml generate the bindings,
 autograd kernels, backward nodes, and dispatch registrations for
-2,000+ operators from one schema pair.</p>
+2,000+ operators from one schema pair;
+<a href="../dive/servo/">Servo</a> — 576 WebIDL files are code-generated
+into Rust DOM bindings and JS glue, so the web API surface cannot
+drift from its implementations.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>

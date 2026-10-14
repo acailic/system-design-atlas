@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Servo: a browser engine as a supervised graph of message-passing pipelines — System Design Atlas</title>
+<meta name="description" content="Servo is a parallel, memory-safe browser engine written in Rust, and its single defining idea is decomposition by ownership: every subsystem is a component crate with private state, reachabl">
+<meta property="og:title" content="Servo: a browser engine as a supervised graph of message-passing pipelines — System Design Atlas">
+<meta property="og:description" content="Servo is a parallel, memory-safe browser engine written in Rust, and its single defining idea is decomposition by ownership: every subsystem is a component crate with private state, reachabl">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/servo/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/servo/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-navigation-from-url-to-first-paint">Walkthrough: one navigation, from URL to first paint</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Servo: a browser engine as a supervised graph of message-passing pipelines</h1>
+    <div class="meta-chips"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/servo/servo" rel="noopener">MPL-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>72437e508875e1cbdad812f49d3f5f959b3369d3</code> · 2026-10-12 · <a href="https://github.com/servo/servo" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Servo is a parallel, memory-safe browser engine written in Rust, and
+its single defining idea is <strong>decomposition by ownership</strong>: every
+subsystem is a component crate with private state, reachable from the
+others <em>only</em> through typed message channels — and the message layer
+is built so the same engine runs as cooperating threads or as sandboxed
+processes with zero code changes. At the center sits the
+<strong>Constellation</strong>, a supervisor thread that owns no page content: it
+only creates, routes, and reaps <strong>Pipelines</strong> (its view of one
+document), each living in an <strong>EventLoop</strong> (a script thread) that may
+be shared by same-site documents or isolated into its own
+operating-system process and gaol sandbox. Within a script thread,
+Rust&#39;s hardest problem in this codebase — making SpiderMonkey&#39;s
+garbage-collected DOM and Rust&#39;s borrow checker coexist — is solved
+with a vocabulary of pointer types (<code>Dom</code>, <code>DomRoot</code>, <code>LayoutDom</code>,
+<code>Trusted</code>) that each encode one legal access pattern, and with a
+layout engine that runs <em>inside</em> the script thread, reading the DOM
+through <code>unsafe</code> wrappers made sound by the fact that the single
+script thread is, by construction, paused. The lesson this codebase
+teaches better than any other: how to carve a legacy-shaped
+gigasystem (the web platform) into communicating components with hard
+boundaries, and what Rust&#39;s ownership model buys — and costs — when
+data races are the historical bug class.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>An office building where each website gets a workroom, run by a
+building manager who never does any of the tenants&#39; work herself.</strong>
+The building manager (the Constellation thread) assigns rooms
+(Pipelines), connects intercoms (message channels), and when a room
+misbehaves or catches fire, she seals that one room and reroutes —
+the building stands (constellation.rs:778 <code>run</code>). Each room has one
+worker (a script thread) who opens her mail one envelope at a time
+(the task queue in <code>handle_msgs</code>), so nobody can edit her papers
+while she thinks. When it&#39;s time to redecorate (a reflow), the worker
+doesn&#39;t leave: a measurement crew (rayon style workers) floods in and
+reads her papers directly — safe only because she stands still, and
+every door is labeled with who may enter (the <code>thread_state</code> checks,
+assert.rs:12). Their measurements become blueprints (display lists)
+mailed to the projector room (Paint), which layers slides from every
+room into one picture on a magic overhead projector (WebRender on the
+GPU, painter.rs:997). Rooms in other buildings (content processes)
+are reachable only by official city mail (ipc-channel), are locked in
+a filing cabinet (the gaol sandbox, sandboxing.rs:190) — and because
+every intercom can be rewired at runtime between in-building wiring
+(crossbeam channels) and city mail (generic_channel/mod.rs:42
+<code>use_ipc</code>), nobody in the building even notices which kind is
+installed.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a browser runs untrusted,
+concurrently-updating, garbage-collected worlds side by side, so
+correctness has to come from architecture — supervised message
+passing makes every boundary auditable, and Rust makes every
+boundary-crossing pointer a compile-time or debug-time event.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph embedder[&quot;Embedder - any process&quot;]
+        SHELL[&quot;servoshell / ffi capi&lt;br/&gt;(ports/servoshell)&quot;]
+        subgraph libservo[&quot;Servo library - components/servo&quot;]
+            SERVO[&quot;Servo + WebView&lt;br/&gt;(servo.rs:909 Servo::new)&quot;]
+            PAINT[&quot;Paint + Painter&lt;br/&gt;(paint/paint.rs:121)&lt;br/&gt;WebRender instance per window&quot;]
+            REFRESH[&quot;RefreshDriver&lt;br/&gt;(vsync or timer)&quot;]
+        end
+    end
+
+    subgraph engine[&quot;Engine threads / processes&quot;]
+        CONST[&quot;Constellation supervisor thread&lt;br/&gt;(constellation.rs:778 run)&lt;br/&gt;Pipelines + BrowsingContexts&lt;br/&gt;+ session history&quot;]
+        subgraph content[&quot;Content process - optional&quot;]
+            ST1[&quot;Script thread&lt;br/&gt;(script_thread.rs:483 create)&lt;br/&gt;DOM + SpiderMonkey&quot;]
+            ST2[&quot;Script thread&lt;br/&gt;(same-site shares one loop)&quot;]
+            L1[&quot;Layout - in-thread&lt;br/&gt;(layout_impl.rs:126 LayoutThread)&lt;br/&gt;stylo + rayon pool&quot;]
+            L2[&quot;Layout - in-thread&quot;]
+            ST1 --- L1
+            ST2 --- L2
+        end
+        NET[&quot;Resource threads&lt;br/&gt;(resource_thread.rs:88)&lt;br/&gt;tokio fetch, cookies, HSTS&quot;]
+    end
+
+    SHELL --&gt; SERVO
+    SERVO --&gt;|&quot;generic channels&quot;| CONST
+    SERVO --&gt; PAINT
+    CONST --&gt;|&quot;ScriptThreadMessage&quot;| ST1
+    CONST --&gt;|&quot;ScriptThreadMessage&quot;| ST2
+    ST1 &amp; ST2 --&gt;|&quot;ReflowResult, display lists&quot;| PAINT
+    ST1 &amp; ST2 --&gt;|&quot;CoreResourceMsg::Fetch&quot;| NET
+    NET --&gt;|&quot;response chunks&quot;| ST1 &amp; ST2
+    REFRESH -.-&gt;|&quot;wake update_the_rendering&quot;| ST1
+    PAINT --&gt;|&quot;frame ready&quot;| SERVO
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The embedder owns the window; the engine owns the web.</strong> Modern
+Servo is a library, not an application: <code>Servo::new</code>
+(<code>components/servo/servo.rs:909</code>) wires up every internal thread and
+hands the embedder proxies — <code>ConstellationProxy</code>, <code>PaintProxy</code>,
+event receivers — plus a <code>WebView</code> per browsing surface
+(<code>components/servo/webview.rs</code>). <code>ports/servoshell</code> is just a
+windowing shell around it; <code>ffi/capi</code> exposes the same API to C.
+The embedder calls <code>spin_event_loop</code> (<code>servo.rs</code>) to pump delegate
+callbacks and presentation. This is the CEF shape, arrived at from
+the opposite direction: engine-first, shell-later.</li>
+<li><strong>The Constellation is the supervisor and nothing else.</strong> It owns
+the maps of <code>Pipeline</code>s and <code>BrowsingContext</code>s, session history,
+and the policy that decides which script thread a new page goes to
+— but zero page content. Its loop (<code>constellation.rs:778 run</code>)
+does <code>handle_request</code> (route one message), reap finished event
+loops, and — under a debug flag — randomly kill pipelines to
+harden itself (<code>maybe_close_random_pipeline</code>,
+constellation.rs:6061, an in-tree chaos test of the supervisor).</li>
+<li><strong>A Pipeline is a <em>view</em>, deliberately starved.</strong> &quot;A <code>Pipeline</code> is
+the constellation&#39;s view of a <code>Window</code>&quot; (pipeline.rs:21) — id,
+event-loop handle, URL, child iframe contexts, animation state:
+exactly what a supervisor needs to route and reap, and no DOM
+pointer at all. The <code>EventLoop</code> (<code>event_loop.rs:31</code>) is the
+constellation&#39;s handle to one script thread: a <code>GenericSender</code> of
+<code>ScriptThreadMessage</code>s whose <code>Drop</code> <em>is</em> the shutdown message
+(<code>event_loop.rs:55</code> sends <code>ExitScriptThread</code> when dropped) — the
+ownership graph implements the lifecycle protocol.</li>
+<li><strong>Script threads are per site-instance, not per page.</strong> A new
+pipeline first tries to join the event loop of its registered
+domain (eTLD+1) within the same WebView; <code>about:blank</code> must join
+its creator&#39;s loop; sandboxed origins never join anything
+(<code>get_event_loop_for_new_pipeline</code>, constellation.rs:~963 — the
+same-site rule, in code). Otherwise the constellation spawns a new
+script thread (<code>event_loop.rs:159 spawn_in_process</code>) — or, with
+<code>--multiprocess</code>, re-executes the binary as a sandboxed child and
+passes the boot payload over a one-shot IPC token
+(<code>sandboxing.rs:190 spawn_multiprocess</code>).</li>
+<li><strong>Layout is not a thread anymore.</strong> The Layout 2020 project moved
+layout from its own message-passed thread into the script thread
+itself: each <code>Window</code> owns a <code>Box&lt;dyn Layout&gt;</code>
+(<code>components/shared/layout/lib.rs:293</code>) created through the
+injected <code>LayoutFactory</code> when the window is born
+(<code>script_thread.rs:3502</code>). A reflow is a synchronous call,
+<code>self.layout.borrow_mut().reflow(...)</code> inside <code>Window::reflow</code>
+(window.rs:2659), and parallelism comes
+from a shared rayon pool (<code>STYLE_THREAD_POOL</code>, layout_impl.rs:107)
+that work-steals style and box-tree construction across <em>all</em>
+script threads in the process.</li>
+<li><strong>The spine</strong> is one navigation to first paint: embedder →
+constellation (<code>load_url</code> → <code>new_pipeline</code> → event loop) →
+<code>ScriptThreadMessage::SpawnPipeline</code> → fetch on the resource
+thread (tokio) → <code>ParserContext</code> → html5ever builds the DOM →
+first <code>update_the_rendering</code> → <code>Window::reflow</code> → restyle
+traversal → damage-driven box/fragment/stacking-context trees →
+display list → <code>Paint</code> → WebRender transaction → frame. The
+Walkthrough traces exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-navigation-from-url-to-first-paint">Walkthrough: one navigation, from URL to first paint</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant E as Embedder
+    participant C as Constellation
+    participant S as ScriptThread
+    participant N as Resource threads (tokio)
+    participant L as LayoutThread (in-thread)
+    participant P as Paint + WebRender
+
+    E-&gt;&gt;C: load_url (EmbedderToConstellationMessage)
+    C-&gt;&gt;C: new_pipeline + pick EventLoop
+    C-&gt;&gt;S: SpawnPipeline(NewPipelineInfo)
+    S-&gt;&gt;N: NavigationListener fetch (CoreResourceMsg::Fetch)
+    N--&gt;&gt;S: response chunks (ParserContext)
+    S-&gt;&gt;S: load_document: Window + Document + ServoParser
+    S-&gt;&gt;S: html5ever TreeSink builds DOM
+    S-&gt;&gt;S: update_the_rendering
+    S-&gt;&gt;L: Window::reflow (synchronous)
+    L-&gt;&gt;L: traverse_dom restyle (rayon)
+    L-&gt;&gt;L: damage, box/fragment/stacking trees
+    L-&gt;&gt;P: send_display_list (generic channel)
+    P-&gt;&gt;P: WebRender transaction, generate_frame
+    P--&gt;&gt;E: frame ready, present
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-embedder-asks-the-constellation-plans">The embedder asks, the constellation plans</h3>
+<p>A navigation
+request arrives as <code>EmbedderToConstellationMessage</code>
+(<code>constellation.rs:1237 handle_request_from_embedder</code>) and lands in
+<code>load_url</code> (constellation.rs:4106): the constellation walks session
+history, builds <code>LoadData</code>, and calls <code>new_pipeline</code>
+(constellation.rs:955). Two decisions happen here that shape
+everything after: which <code>EventLoop</code> the pipeline joins — same
+registered domain in the same WebView reuses the existing script
+thread, <code>about:blank</code>/<code>about:srcdoc</code> join their creator, sandboxed
+origins get a fresh one (<code>get_or_create_event_loop_for_new_pipeline</code>,
+constellation.rs:921) — and whether that event loop needs to be
+spawned now, in-thread or in a new process.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="a-pipeline-is-born-as-one-message">A pipeline is born as one message</h3>
+<p><code>Pipeline::spawn</code>
+(pipeline.rs:91) does not construct a document; it <em>sends</em>
+<code>ScriptThreadMessage::SpawnPipeline(NewPipelineInfo)</code> into the chosen
+event loop and immediately records a skeletal <code>Pipeline</code> in the
+constellation&#39;s map. If the event loop is new, <code>EventLoop::spawn</code>
+(event_loop.rs:66) either starts a thread
+(<code>spawn_in_thread</code>→<code>ScriptThreadFactory::create</code>,
+script_thread.rs:483, an 8 MiB stack &quot;to be consistent with other
+browsers&quot;) or, in multiprocess mode, re-execs the binary with
+<code>--content-process &lt;token&gt;</code> and hands over an
+<code>UnprivilegedContent</code> payload through an <code>IpcOneShotServer</code> handshake
+(sandboxing.rs:190) — the child then installs a gaol sandbox profile
+that allows little more than font files and <code>/dev/urandom</code>
+(<code>content_process_sandbox_profile</code>, sandboxing.rs:52).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-script-thread-goes-shopping">The script thread goes shopping</h3>
+<p>The script thread&#39;s
+event loop (<code>handle_msgs</code>, script_thread.rs:1373) receives
+<code>SpawnPipeline</code> and calls <code>pre_page_load</code> (script_thread.rs:4068):
+it parks a <code>ParserContext</code> (servoparser/mod.rs:953) in
+<code>incomplete_parser_contexts</code> and starts the fetch itself via
+<code>NavigationListener::initiate_fetch</code> toward the resource threads.
+There, <code>CoreResourceMsg::Fetch</code> (resource_thread.rs:409) runs the
+Fetch spec as a Rust async fn on a tokio runtime
+(<code>fetch/methods.rs:180 fetch</code> → <code>:401 main_fetch</code>) — redirects,
+CORS, HSTS, cookies all live on that side of the channel.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="bytes-come-home-and-a-document-appears">Bytes come home and a document appears</h3>
+<p>Response chunks
+flow back and land in <code>ParserContext::process_response_chunk</code>
+(servoparser/mod.rs:1599), which first buffers 1445 bytes to sniff
+the MIME type/encoding (the mimesniff resource-header rule), then
+calls <code>load_document</code>: here the <code>Window</code> and <code>Document</code> DOM objects
+are created, with the injected layout engine attached to the window
+(<code>layout_factory.create(layout_config)</code>, script_thread.rs:3502), and
+a <code>ServoParser</code> (servoparser/mod.rs:128) is born holding two input
+streams — script input (for <code>document.write</code>) and network input —
+around one html5ever tokenizer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="html5ever-builds-the-tree-script-suspends-it">html5ever builds the tree, script suspends it</h3>
+<p>The parser module&#39;s <code>Sink</code> implements html5ever&#39;s <code>TreeSink</code> trait
+(servoparser/mod.rs:1819), so the spec-exact tokenizer/tree-builder
+drives DOM mutations directly: <code>append</code>, <code>create_element</code>,
+<code>set_quirks_mode</code>. A classic
+<code>&lt;script&gt;</code> suspends the parser (<code>suspended</code> cell) until execution
+finishes; the async tokenizer variant (async_html.rs) instead runs
+html5ever on a dedicated parser thread against a lightweight
+<code>ParseNode</code> tree and streams <code>ParseOperation</code>s back — the DOM
+mutator and the spec state machine are decoupled by a message log,
+so parsing can overlap script-thread work. Either way, when the
+document finishes loading, <code>process_response_eof</code>
+(servoparser/mod.rs:1629) runs a final synchronous parse and fires
+load events.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-first-rendering-opportunity">The first rendering opportunity</h3>
+<p>Animation-frame
+scheduling or a script-triggered reflow need brings the script
+thread to <code>update_the_rendering</code> (script_thread.rs:1094), which
+walks its documents in tree order and calls <code>Window::reflow</code>
+(window.rs:2659). Reflow first drains <code>RestyleReason</code>s — the
+document&#39;s <code>dirty_root</code>, pending restyles, changed stylesheets —
+packs a <code>ReflowRequest</code> carrying a <code>TrustedNodeAddress</code> (a raw DOM
+pointer plus a promise that script stays still), and makes the
+synchronous call <code>self.layout.borrow_mut().reflow(reflow)</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="style-and-layout-as-parallel-visitors-on-a-paused-dom">Style and layout as parallel visitors on a paused DOM</h3>
+<p><code>LayoutThread::handle_reflow</code> (layout_impl.rs:1060) runs the stylo
+cascade as a parallel top-down traversal —
+<code>driver::traverse_dom(&amp;recalc_style_traversal, token, rayon_pool)</code>
+(layout_impl.rs:1340) — where the <code>RecalcStyle</code> traversal
+(traversal.rs:21) walks the DOM through <code>ServoLayoutNode</code> wrappers.
+Computed damage (<code>RestyleDamage</code>, <code>LayoutDamage</code>) then decides how
+much of the cached <code>BoxTree</code>/<code>FragmentTree</code>/<code>StackingContextTree</code>
+must be rebuilt: if nothing needs it, layout phases are skipped
+entirely (<code>can_skip_reflow_request_entirely</code>). When a display list
+is due, <code>build_display_list</code> (layout_impl.rs:1545) walks the
+stacking-context tree and hands a WebRender <code>BuiltDisplayList</code> to
+<code>paint_api.send_display_list</code> (components/shared/paint/lib.rs:330).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="pixels-and-a-supervisable-system">Pixels, and a supervisable system</h3>
+<p><code>Paint</code> receives
+the display list on the embedder&#39;s side
+(<code>Painter::handle_new_display_list</code>, painter.rs:997), installs the
+new scroll tree, wraps the list in a WebRender <code>Transaction</code>, and
+<code>generate_frame</code> (painter.rs:603) asks the GPU-side scene builder
+for a frame; the notifier wakes the embedder to present. Every
+component on the trip — constellation, script thread, resource
+thread, paint — held only channels to its collaborators, so any of
+them can crash, be killed (or be chaos-killed) without the others
+losing more than the messages still in flight.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>Pipeline</code> + <code>EventLoop</code> — supervision as starved records.</strong>
+<strong>What:</strong> pipeline.rs:26 and event_loop.rs:31 — the pipeline
+record carries ids, the event-loop handle, URL, iframe children,
+animation state; the <code>EventLoop</code> carries one <code>GenericSender</code> and a
+<code>Drop</code> impl that sends <code>ExitScriptThread</code>. <strong>Why:</strong> the supervisor
+deliberately sees <em>less</em> than the supervised: no DOM pointers, no
+layout state, nothing to corrupt or leak. Lifecycle is encoded in
+ownership (drop = exit message), so the constellation cannot leak
+a thread even by forgetting cleanup code — compare
+<a href="../kubernetes/">Kubernetes</a>&#39;s informers, where the controller&#39;s
+view is also a projection rather than the truth.</p>
+</li>
+<li><p><strong>The DOM pointer zoo — one type per legal access.</strong> <strong>What:</strong>
+<code>Dom&lt;T&gt;</code> (root.rs:153) — a bare <code>NonNull&lt;T&gt;</code> allowed only as a
+<em>field</em> of another DOM object, traced by the GC; <code>DomRoot&lt;T&gt; = Root&lt;Dom&lt;T&gt;&gt;</code> (root.rs:297) — a stack root registered in the
+thread-local <code>STACK_ROOTS</code> (root.rs:440) that the SpiderMonkey GC
+scans; <code>LayoutDom&lt;&#39;dom, T&gt;</code> (script/dom/bindings/root.rs:50) — a
+lifetime-scoped, debug-asserted &quot;layout is on the DOM now&quot; view;
+<code>Trusted&lt;T&gt;</code> (refcounted.rs:66) — an <code>Arc</code>-counted pin for
+<em>another thread</em>, backed by the <code>LIVE_DOM_REFERENCES</code> weak-table
+the GC treats as roots (refcounted.rs:34). <strong>Why:</strong> GC and borrow
+checker disagree about object lifetimes; rather than one
+unsafe escape hatch, Servo names each access pattern as a type,
+and each dereference debug-asserts its thread state
+(<code>assert_in_script</code>/<code>assert_in_layout</code>, assert.rs:12). The
+<code>#[dom_struct]</code>/<code>must_root</code> lint makes unrooted field pointers a
+compile error — the shape CPython&#39;s C API could not retrofit.</p>
+</li>
+<li><p><strong><code>Node</code> — a GC-traced doubly-linked tree with a layout side-slot.</strong>
+<strong>What:</strong> node/node.rs:127 — parent/first/last/next/prev as
+<code>MutNullableDom&lt;Node&gt;</code>; <code>rare_data: Option&lt;Box&lt;NodeRareData&gt;&gt;</code> so
+plain nodes pay nothing for rare fields; an
+<code>inclusive_descendants_version: Cell&lt;u64&gt;</code> bumped on mutation; and
+<code>layout_data: DomRefCell&lt;Option&lt;Box&lt;GenericLayoutData&gt;&gt;&gt;</code> — the
+hole where the style/layout engines hang <em>their</em> per-node state on
+the DOM itself. <strong>Why:</strong> sibling links (not child vectors) make
+tree mutation O(1) with no allocator traffic; the version counter
+and dirty-descendant flags are what incremental restyle keys off;
+and the layout side-table inverts the usual &quot;layout owns its
+parallel tree&quot; model (the pre-2020 design) into &quot;layout decorates
+the DOM&quot; — one tree, two owners separated by thread state.</p>
+</li>
+<li><p><strong><code>GenericSender</code>/<code>GenericReceiver</code> — channels whose backend is a
+runtime choice.</strong> <strong>What:</strong> components/shared/base/generic_channel/
+mod.rs — enum senders/receivers wrapping either crossbeam (same
+process) or ipc-channel (cross process), selected once per process
+by <code>use_ipc()</code> (:42) from the <code>--multiprocess</code>/<code>--force-ipc</code>
+flags; plus <code>GenericSharedMemory</code> for bulk payloads. <strong>Why:</strong> it
+is the load-bearing seam of the whole engine: every subsystem
+(<code>PaintProxy</code>, <code>ConstellationProxy</code>, <code>CoreResourceThread</code>,
+<code>ScriptThreadMessage</code>) speaks through it, so the threaded and
+process-isolated builds are the <em>same code</em> — and the display
+list crosses as shared memory in one mode and (nearly) free
+crossbeam messages in the other. The cost is honesty in the type
+system: everything sent must be <code>Serialize + Deserialize</code>, which
+is why <code>ReflowRequest</code> carries <code>TrustedNodeAddress</code> (a raw
+pointer!) rather than nodes — and why that is only sound in the
+same-process mode.</p>
+</li>
+<li><p><strong>The cached layout trees + damage bits.</strong> <strong>What:</strong> <code>BoxTree</code>,
+<code>FragmentTree</code>, <code>StackingContextTree</code> on <code>LayoutThread</code>
+(layout_impl.rs:126), kept between reflows, with
+<code>RestyleDamage</code>/<code>LayoutDamage</code>/<code>need_new_display_list</code> cells
+deciding which phases run this time
+(<code>handle_reflow</code>&#39;s phase list, layout_impl.rs:1060). <strong>Why:</strong> a
+browser reflows 60 times a second but almost nothing changes
+between frames — the entire rendering pipeline is a skip-if-
+undamaged cache, the same bet as <a href="../postgresql/">PostgreSQL</a>&#39;s
+MVCC or <a href="../kafka/">Kafka</a>&#39;s index: pay to detect change, not to
+redo work.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph process[&quot;One process&quot;]
+        C[&quot;Constellation thread&quot;]
+        P[&quot;Paint on embedder thread&lt;br/&gt;+ WebRender threads&quot;]
+        R[&quot;Resource threads&lt;br/&gt;(tokio)&quot;]
+        subgraph loops[&quot;Script threads - one per site instance&quot;]
+            S1[&quot;ScriptThread A&lt;br/&gt;DOM A - layout A&quot;]
+            S2[&quot;ScriptThread B&lt;br/&gt;DOM B - layout B&quot;]
+        end
+        RP[&quot;shared rayon pool&lt;br/&gt;(STYLE_THREAD_POOL)&quot;]
+    end
+    C ---|&quot;generic channels&quot;| S1 &amp; S2 &amp; P
+    S1 &amp; S2 --- R
+    S1 &amp; S2 -.-&gt;|&quot;work stealing&quot;| RP
+    P ---|&quot;hit test results&quot;| C
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> the constellation thread, paint on the
+embedder&#39;s thread, resource threads on tokio, one script thread
+per site-instance (possibly in a sandboxed child process), one
+WebRender scene/frame builder pair per window, and — during
+reflow — the shared rayon pool fanning style/box-tree work out
+across cores. <strong>What is serialized:</strong> everything within one
+script thread: JS execution, DOM mutation, parser, timers, and
+layout/reflow all take turns on that single thread&#39;s event loop
+(<code>handle_msgs</code>, script_thread.rs:1373), which is precisely why
+layout&#39;s <code>unsafe</code> DOM reads are sound. A hung page hangs <em>its</em>
+document, never another site&#39;s — the concurrency unit is the
+site, not the tab.</li>
+<li><strong>The deadlock-avoidance rule is written down:</strong> &quot;<code>Paint</code> and all
+of its contained structs should <strong>never</strong> block on the
+Constellation, because sometimes the Constellation blocks on us&quot;
+(paint.rs:119). Message graphs need cycle rules; this is Servo&#39;s,
+and it is documented at the one place a violator would read.</li>
+<li><strong>Crash containment is the architecture.</strong> A panicking or
+poisoned script thread surfaces as a channel send error in the
+constellation — <code>handle_send_error</code> (constellation.rs:2922) closes
+the pipeline, notifies the embedder, and keeps serving the rest.
+The constellation itself is tested against random pipeline death
+(<code>maybe_close_random_pipeline</code>, constellation.rs:6061 — an
+in-tree chaos monkey behind <code>--random-pipeline-closure-probability</code>).
+A script thread that can no longer be talked to is detected by the
+background hang monitor (the <code>closing</code> flag checked from
+SpiderMonkey&#39;s interrupt callback, script_thread.rs:860) — slow
+pages get flagged, wedged threads get abandoned. In multiprocess
+mode the OS reaps the whole child; the supervisor loses nothing it
+cannot recreate from <code>LoadData</code>.</li>
+<li><strong>Backpressure and throttling are supervisor policy:</strong> hidden or
+inactive pipelines are throttled — timers slowed, updates coalesced
+— by <code>Pipeline::send_throttle_messages</code> (pipeline.rs:~223) and the
+&quot;never unthrottle a pipeline without a document&quot; rule; the paint
+side coalesces frames through the <code>RefreshDriver</code>
+(refresh_driver.rs:23), which the embedder can drive from real
+vsync.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is an embedding API, not a browser.</strong>
+<code>ServoBuilder</code> → <code>Servo</code> → <code>WebView</code> + delegates
+(<code>ServoDelegate</code>, <code>WebViewDelegate</code> in components/servo/) is the
+whole product surface: hosts supply a window, GL context,
+clipboard, permission prompts, and protocol handlers
+(<code>ProtocolRegistry</code>), and receive navigation events, input
+routing, and frames. <code>ports/servoshell</code> proves the API by being a
+complete browser in a few thousand lines; <code>ffi/capi</code> proves it
+again in C. Compare <a href="../vscode/">VS Code</a>: the engine became a
+platform by growing an embedder seam <em>before</em> it needed one.</li>
+<li><strong>The seams are factories on crate boundaries.</strong> The script crate
+never depends on the layout or image-cache implementations:
+<code>InitialScriptState</code> carries <code>Arc&lt;dyn LayoutFactory&gt;</code> /
+<code>Arc&lt;dyn ImageCacheFactory&gt;</code> (shared/layout/lib.rs:289) from the
+embedding layer down. Dependency arrows point <em>up</em> into the
+engine, so component crates stay independently testable and the
+engine can be re-hosted with different engines at each slot — the
+same inversion <a href="../runc/">runc</a> uses for its factories.</li>
+<li><strong>The web API is generated from 576 WebIDL files.</strong>
+<code>components/script_bindings/webidls/*.webidl</code> are parsed by a
+Python codegen forked from SpiderMonkey&#39;s
+(script_bindings/codegen/run.py, driven from build.rs) into Rust
+binding modules, <code>FooMethods</code> traits, and JS glue; the DOM side
+is written once, by hand, as <code>#[dom_struct]</code> structs. Adding a
+new interface is an IDL file plus one struct — the <a href="../redis/">Redis</a>
+commands.json pattern at web scale, with the same payoff: docs,
+types, and dispatch cannot drift apart.</li>
+<li><strong>Honest warts.</strong> The unsafe DOM access from layout is guarded by
+<code>debug_assert!</code> only — release builds trust the discipline, so a
+missed thread-state bug is UB, not an error. The IPC boundary
+forces every message to be serde-serializable, which the display
+list pays on every frame in multiprocess mode. And the bindings
+codegen being Python means <code>cargo build</code> silently shells out to a
+whole second toolchain — the price of inheriting SpiderMonkey&#39;s
+generator instead of rewriting it (a trade VS Code never had to
+make, and one <a href="../cpython/">CPython</a> also accepted with its
+generated cases tables).</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-message-passing-over-shared-state-everywhere">Trade-off 1: message passing over shared state, everywhere</h3>
+<ul>
+<li><strong>Tension:</strong> a browser is many worlds — untrusted pages, network,
+GPU, embedder — that must not be able to corrupt each other, but
+that also must cooperate at 60 fps.</li>
+<li><strong>Choice:</strong> subsystem state is private; the only road between
+components is a typed message channel (<code>GenericSender</code>), with the
+backend — crossbeam or ipc-channel — chosen at runtime
+(generic_channel/mod.rs:42 <code>use_ipc</code>). Even the window↔layout
+boundary, once a channel to a layout thread, is now a synchronous
+call — the one place the design let data stay shared.</li>
+<li><strong>Evidence:</strong> <code>Pipeline::spawn</code> (pipeline.rs:91) — creating a page
+<em>is</em> sending <code>SpawnPipeline</code>; <code>send_display_list</code>
+(shared/paint/lib.rs:330) — a frame <em>is</em> a message with shared
+memory inside; <code>CoreResourceMsg::Fetch</code> (resource_thread.rs:409).
+The bill: <code>ReflowRequest</code> cannot carry DOM nodes across IPC, so it
+carries <code>TrustedNodeAddress</code> and works only in-process — the
+message design quietly assumes which mode it is in.</li>
+<li><strong>Given up:</strong> zero-copy sharing between engine parts in the
+multiprocess mode (every display list serializes), one extra hop
+of latency per subsystem boundary, and stack traces that end at
+channels.</li>
+<li><strong>Verdict:</strong> right when components are untrusted or crashable —
+the whole point of a browser. Wrong for a single-tenant embedded
+library chasing maximum throughput — which is exactly why the
+same code keeps the threaded mode: one engine, two deployment
+shapes, one message vocabulary.</li>
+</ul>
+<h3 id="trade-off-2-unsafe-dom-sharing-for-layout-guarded-by-thread-identity">Trade-off 2: unsafe DOM sharing for layout, guarded by thread identity</h3>
+<ul>
+<li><strong>Tension:</strong> layout needs parallel reads of the whole DOM, but the
+DOM is a garbage-collected SpiderMonkey graph that Rust cannot
+borrow across threads; copying it per reflow would be ruinous.</li>
+<li><strong>Choice:</strong> layout runs <em>on the script thread&#39;s time</em>: the script
+thread pauses (it made the synchronous call), layout wraps DOM
+nodes in <code>unsafe</code> Send/Sync handles
+(layout_dom/servo_layout_node.rs:52–63), and fan-out happens via
+the shared rayon pool while the one thread that could mutate is
+standing still. Every access debug-asserts its <code>thread_state</code>
+(assert.rs:12); mutation of DOM nodes from layout is forbidden by
+construction (only <code>layout_data</code> side-slots are written).</li>
+<li><strong>Evidence:</strong> <code>Window::reflow</code> (window.rs:2659) — the synchronous
+<code>self.layout.borrow_mut().reflow(reflow)</code> (window.rs:2792) that
+makes the pause true;
+<code>driver::traverse_dom(..., rayon_pool)</code> (layout_impl.rs:1340) —
+the parallel read; <code>GenericLayoutData</code> in <code>Node::layout_data</code>
+(node/node.rs:164) — the sanctioned write path for layout
+results. The soundness argument is <em>architectural</em>: the HTML
+event loop guarantees no interleaved mutation during the call.</li>
+<li><strong>Given up:</strong> layout cannot overlap script execution on the same
+document (no concurrent reflow-during-JS), correctness in release
+builds rests on a discipline enforced only in debug builds, and
+the pre-2020 message-passing layout thread&#39;s crash isolation was
+traded away.</li>
+<li><strong>Verdict:</strong> right when mutation is single-threaded <em>by spec</em> —
+which the HTML event loop guarantees — and the data is huge
+relative to traversal cost. Wrong the moment you need concurrent
+writers: then pay for a copy or a message log, as the async HTML
+tokenizer did (async_html.rs).</li>
+</ul>
+<h3 id="trade-off-3-one-engine-two-process-topologies-runtime-switchable">Trade-off 3: one engine, two process topologies, runtime-switchable</h3>
+<ul>
+<li><strong>Tension:</strong> an embeddable engine wants cheap in-process threading;
+a web-facing product needs OS-level site isolation and sandboxing;
+maintaining two engines would fork every subsystem.</li>
+<li><strong>Choice:</strong> the <code>GenericChannel</code> enum makes topology a runtime
+flag; <code>spawn_multiprocess</code> (sandboxing.rs:190) re-executes the
+engine binary with a one-shot token payload and optionally
+installs a gaol sandbox (<code>content_process_sandbox_profile</code>,
+sandboxing.rs:52) so untrusted content processes can read fonts
+and little else; the <code>ProcessManager</code> (process_manager.rs:40)
+registers child processes into the constellation&#39;s select loop so
+a dead child is just another closed channel.</li>
+<li><strong>Evidence:</strong> <code>use_ipc()</code> (generic_channel/mod.rs:42) — one
+<code>OnceLock</code> decides the whole engine&#39;s channel mode; the
+multiprocess-only guards in <code>Servo::new</code> (servo.rs:948 — single
+JS-engine init happens only in single-process mode);
+<code>UnprivilegedContent</code> (sandboxing.rs:31) — the entire child boot
+state as one serializable enum. The bill is paid everywhere a
+message must be <code>Serialize + Deserialize</code> even when it will ride
+a crossbeam channel.</li>
+<li><strong>Given up:</strong> the ability to hand a pointer between components
+ever (everything is designed for the hostile mode even when
+running friendly), and a class of bugs that only exist in one
+mode (IPC failures, routing through the ipc-channel router
+thread).</li>
+<li><strong>Verdict:</strong> right when the same product must ship as an embedded
+library and a hardened browser — one codebase, one set of
+message types, two trust domains. Wrong when one topology is
+truly impossible: then the abstraction is dead weight, as the
+single-process-only <code>TrustedNodeAddress</code> in <code>ReflowRequest</code>
+already hints.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>docs/ORGANIZATION.md</code> and the repo root — Servo&#39;s architecture
+lives in the crate graph itself; then <code>Cargo.toml</code>&#39;s
+<code>[workspace.dependencies]</code> for the satellite projects (stylo,
+html5ever, webrender, ipc-channel, gaol are <em>separate repos</em>).</li>
+<li><code>components/servo/servo.rs:909 Servo::new</code> — the wiring diagram
+of the whole engine as one function; note which pieces are
+created here (paint, resource threads, constellation) and which
+are deferred to pipelines. Then <code>create_constellation</code> at :1233
+for what the supervisor is handed at birth.</li>
+<li><code>components/constellation/constellation.rs:778 run</code> — the
+supervisor loop; read <code>maybe_close_random_pipeline</code> (:6061) next
+to believe the crash-containment story, then <code>handle_request</code>
+(:1135) just to see how many message families one thread routes.</li>
+<li><code>components/constellation/pipeline.rs:26</code> and
+<code>event_loop.rs:31</code> — the two records the constellation supervises
+with; do not miss <code>Drop for EventLoop</code> (:55): shutdown as
+ownership.</li>
+<li><code>constellation.rs:921 get_or_create_event_loop_for_new_pipeline</code>
+and the <code>get_event_loop_for_new_pipeline</code> just above it (:875) — the
+site-instance policy in ~60 lines: same-site reuse, about:blank
+inheritance, sandbox isolation.</li>
+<li><code>components/constellation/sandboxing.rs:190 spawn_multiprocess</code> —
+re-exec, one-shot token, gaol; then <code>process_manager.rs:40</code> to
+see how children plug into the supervisor&#39;s select loop.</li>
+<li><code>components/script/event_loop/script_thread.rs:483 create</code> — how
+a script thread is born (8 MiB stack, thread-state init, BHM),
+then <code>:1037 start</code> → <code>:1373 handle_msgs</code> — the HTML event loop
+as a channel multiplexer; note the task queue and the interrupt
+callback that honors the hang monitor&#39;s <code>closing</code> flag.</li>
+<li><code>components/script/dom/mod.rs</code> — the finest internal
+documentation in the codebase: the DOM-object/reflector split,
+inheritance-by-first-field, construction rules. Then
+<code>components/script_bindings/root.rs:153</code> (<code>Dom</code>), <code>:297</code>
+(<code>DomRoot</code>), <code>:440</code> (<code>STACK_ROOTS</code>) and <code>refcounted.rs:66</code>
+(<code>Trusted</code>) — the pointer zoo, one type per legal access.</li>
+<li><code>components/script/dom/node/node.rs:127 Node</code> — the linked-tree
+DOM; find <code>layout_data</code> (:164), <code>inclusive_descendants_version</code>,
+and <code>rare_data</code>, and ask of each field who writes it and when.</li>
+<li><code>components/script/layout_dom/servo_layout_node.rs:52</code> — the
+unsafe bridge layout crosses; read the <code>unsafe impl Send/Sync</code>
+at :62 together with <code>components/script_bindings/assert.rs</code> and
+convince yourself the pause argument holds (it is the same
+argument Trade-off 2 prices).</li>
+<li><code>components/script/dom/window/window.rs:2659 reflow</code> — the
+script-side restyle invalidation harvest, then the synchronous
+hand-in to layout; cross to <code>components/layout/layout_impl.rs: 1060 handle_reflow</code> → <code>:1255</code> (rayon pool) → <code>:1340 traverse_dom</code> → <code>:1545 build_display_list</code> — one reflow, phase
+by phase, with the damage flags gating each.</li>
+<li><code>components/script/dom/servoparser/mod.rs:128 ServoParser</code> (and
+its doc comment on the two input streams) with a skim of
+<code>async_html.rs</code>&#39;s <code>ParseOperation</code> log — two designs of the
+same spec algorithm, chosen by a preference flag
+(<code>dom_servoparser_async_html_tokenizer_enabled</code>,
+config/prefs.rs:458).</li>
+<li><code>components/paint/paint.rs:121</code> — the <code>Paint</code> doc comment
+(including the never-block rule), then <code>painter.rs:997 handle_new_display_list</code> and <code>refresh_driver.rs:23</code> — where
+display lists become WebRender transactions and vsync becomes
+<code>update_the_rendering</code> pressure.</li>
+<li><code>components/shared/base/generic_channel/mod.rs:42 use_ipc</code> —
+the seam that makes everything above runnable as threads or
+processes; end here, because this is the file that explains why
+every other file could ignore the question.</li>
+</ol>
+<p>You have now traced one navigation from embedder click to first
+presented frame — through a supervisor that owns nothing, a script
+thread that owns everything for one site, a layout engine that
+borrows it all for one call, and channels that did not care whether
+their peers were threads or processes.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Supervise by projection, not by participation</strong> — give the
+supervisor records that contain handles and ids but no domain
+data (<code>Pipeline</code>, pipeline.rs:26), and it can never be corrupted
+by what it supervises; kill/restart stays O(1). Seen in the
+constellation&#39;s maps versus the script thread&#39;s DOM.</li>
+<li><strong>Make channel backend a runtime choice</strong> — wrap crossbeam and
+ipc-channel behind one enum type (generic_channel/mod.rs), and
+&quot;threaded or multiprocess&quot; stops being two architectures; you pay
+only serde bounds on messages.</li>
+<li><strong>Encode lifecycle in ownership</strong> — <code>Drop for EventLoop</code> sends
+the exit message (event_loop.rs:55), so forgetting to clean up is
+impossible by construction; the ownership graph <em>is</em> the shutdown
+protocol.</li>
+<li><strong>Name each legal access pattern as a type</strong> — <code>Dom</code> (heap field,
+traced), <code>DomRoot</code> (stack, rooted), <code>LayoutDom</code> (borrowed window
+during reflow), <code>Trusted</code> (cross-thread pin counted as a GC
+root): one unsafe mechanism, four vocabularies, each
+debug-asserted against <code>thread_state</code> (assert.rs). This is how to
+marry a GC runtime to Rust without lying to either.</li>
+<li><strong>Gate every pipeline phase on damage bits</strong> — reflow runs only
+the phases whose cached trees were invalidated
+(<code>can_skip_reflow_request_entirely</code>, layout_impl.rs:1060): at 60
+fps, the fast path <em>is</em> the product, and correctness of skip
+logic is the real engineering.</li>
+<li><strong>Chaos-test your supervisor</strong> — <code>maybe_close_random_pipeline</code>
+(constellation.rs:6061) randomly kills pipelines under a debug
+flag, exactly like Netflix&#39;s Chaos Monkey for processes: the
+crash-containment story is executable, not aspirational.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 12–16 hours for this
+path. The codebase is enormous (~40 crates), the Rust is
+idiomatic but leans hard on <code>unsafe</code> in exactly the places this
+dive stops, and the HTML/CSS/JS platform concepts (event loop
+processing model, the cascade, quirks mode) are assumed
+knowledge, not taught here.</li>
+<li>Prerequisites: solid Rust — lifetimes, <code>Send</code>/<code>Sync</code>, <code>unsafe</code>,
+interior mutability (<code>Cell</code>/<code>RefCell</code>); how a tracing GC finds
+roots (the <a href="../cpython/">CPython</a> dive covers the same problem in
+a smaller system); the shape of the HTML spec&#39;s event loop and
+tree construction (skim WHATWG §8 &quot;the HTML syntax&quot; if needed);
+roughly what WebIDL is. The <a href="../libuv/">libuv</a> dive is good
+contrast for a single-loop world; <a href="../kubernetes/">Kubernetes</a>
+for the other end — supervision with reconcile loops instead of
+message graphs.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The Servo Book&#39;s design documentation
+(book.servo.org/design-documentation/) — the crate-by-crate map
+this dive&#39;s section 1 walks, upstream&#39;s own words.</li>
+<li>In the clone: <code>docs/ORGANIZATION.md</code>, <code>docs/glossary.md</code>, the
+header documentation of <code>components/script/dom/mod.rs</code> (the
+DOM-ownership document), and the ASCII diagram in
+<code>components/script/dom/servoparser/async_html.rs</code> explaining the
+parser-thread protocol.</li>
+<li>The satellite repositories, each a lesson on its own:
+<a href="https://github.com/servo/html5ever">html5ever</a> (spec-exact
+parsing without a parser generator), <a href="https://github.com/servo/stylo">stylo</a>
+(the CSS engine Servo built and Firefox adopted as Quantum CSS),
+<a href="https://github.com/servo/webrender">WebRender</a> (the GPU display
+list model this dive treats as a black box),
+<a href="https://github.com/servo/ipc-channel">ipc-channel</a> and
+<a href="https://github.com/servo/gaol">gaol</a>.</li>
+<li>Lin Clark, <em>Inside a super fast CSS engine: Quantum CSS (Stylo)</em>
+(Mozilla Hacks, 2017) — the story of stylo&#39;s migration into
+Firefox, i.e. this codebase&#39;s style system running in ~500M
+browsers.</li>
+<li>The WHATWG HTML Standard&#39;s &quot;Event loops&quot; and &quot;Parsing HTML
+documents&quot; sections — the specifications <code>handle_msgs</code>,
+<code>update_the_rendering</code>, and <code>ServoParser</code> implement line by
+line, with spec quotes pasted at the implementation sites.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../pytorch/"><span class="dir">← Previous dive</span>PyTorch: the forward pass that records its own graph</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 27 of 27 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
