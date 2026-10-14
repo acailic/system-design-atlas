@@ -548,7 +548,7 @@ tensors as it ran: the tape is single-use by default.
   `mul` overloads in 40 lines, including sparse/Mkldnn dispatch
   map entries; `tools/autograd/gen_autograd.py`'s header states
   the build destination (`torch/csrc/autograd/generated/`);
-  `torchgen/gen.py:2606-2646` writes `RegisterBackendSelect.cpp`,
+  `torchgen/gen.py:2581-2646` writes `RegisterBackendSelect.cpp`,
   `RegisterSchema.cpp`, `Operators.cpp`, `Functions.cpp` from the
   same parse.
 - **Given up:** a readable, greppable implementation — the "real"

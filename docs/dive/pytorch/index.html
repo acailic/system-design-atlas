@@ -567,7 +567,7 @@ into compile-parallel shards because the unsplit file was
 <code>mul</code> overloads in 40 lines, including sparse/Mkldnn dispatch
 map entries; <code>tools/autograd/gen_autograd.py</code>&#39;s header states
 the build destination (<code>torch/csrc/autograd/generated/</code>);
-<code>torchgen/gen.py:2606-2646</code> writes <code>RegisterBackendSelect.cpp</code>,
+<code>torchgen/gen.py:2581-2646</code> writes <code>RegisterBackendSelect.cpp</code>,
 <code>RegisterSchema.cpp</code>, <code>Operators.cpp</code>, <code>Functions.cpp</code> from the
 same parse.</li>
 <li><strong>Given up:</strong> a readable, greppable implementation — the &quot;real&quot;
