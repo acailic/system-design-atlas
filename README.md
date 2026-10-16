@@ -101,9 +101,10 @@ Deep-dives (the exemplars — more added over time):
 - [Linux kernel](deep-dives/linux.md) — frozen syscall ABI over vtable seams: fair-share EEVDF scheduler, lock-free page cache, RCU reads
 - [Go runtime](deep-dives/go.md) — M:N goroutines: GMP work-stealing scheduler, integrated netpoller, growable stacks + escape analysis, concurrent GC with a hybrid write barrier
 - [RocksDB](deep-dives/rocksdb.md) — LevelDB paged into production: column families over one WAL, stall ladders and I/O budgets, pluggable compaction
+- [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
 
-The catalog tracks 4 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — V8,
+The catalog tracks 3 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — Caddy, Chromium, Neovim,
 and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors. Chromium is cataloged for

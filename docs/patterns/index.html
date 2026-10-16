@@ -25,7 +25,7 @@
 </nav>
 <main id="main">
 <div class="page article-layout">
-<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
+<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
 <div>
   <header class="article-header"><h1>Patterns index: design lessons that recur</h1>
   <p class="lead">The deep-dives teach systems; this index teaches <strong>design</strong>. Each pattern appears in two or more canonical codebases — the recurrence is the signal.</p></header>
@@ -167,7 +167,12 @@ billed as scanning debt (<code>gcAssistAlloc</code>), and Green Tea batching
 spans to keep each unit of mark work cache-local;
 <a href="../dive/rocksdb/">RocksDB</a> — compaction budgets made explicit:
 a token-bucket rate limiter throttles background I/O while a stall
-ladder turns overload into published, steerable slowdown states.</p>
+ladder turns overload into published, steerable slowdown states;
+<a href="../dive/v8/">V8</a> — marking runs
+as allocation-paced steps on the main thread plus concurrent jobs on
+the embedder&#39;s platform, with the store-path write barrier as the
+mutator&#39;s tax that buys never stopping for one big collection
+(<code>ConcurrentMarking::RunMajor</code>, <code>IncrementalMarking::AdvanceOnAllocation</code>).</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -302,7 +307,11 @@ into Rust DOM bindings and JS glue, so the web API surface cannot
 drift from its implementations; <a href="../dive/linux/">linux</a> —
 <code>syscall_64.tbl</code> is the frozen syscall ABI as one data file, from
 which the dispatch switch, the <code>__x64_sys_*</code> stubs, and the tracing
-table are all generated.</p>
+table are all generated; <a href="../dive/v8/">V8</a> — the
+interpreter itself is generated: one <code>IGNITION_HANDLER</code> DSL per
+bytecode (with Torque-built builtins beside it) compiles to
+machine-code handlers for every architecture, the same move as
+CPython&#39;s <code>bytecodes.c</code> but stopping at nothing short of code.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>
@@ -331,6 +340,34 @@ operations that need a global view (rebalancing without client
 updates, multi-key transactions) become impossible or bolted on
 later — which is exactly the cliff both Memcached and early Kafka
 hit, and what ZooKeeper/etcd exist to catch on the coordination side.</p>
+<h2 id="14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</h2>
+<p><strong>Shape:</strong> run a slow-but-correct baseline; record what actually
+happens (types, shapes, call targets); compile guarded fast paths
+that assume the observations hold; when a guard fails, fall back to
+the baseline and record the wider truth. Wrong guesses are a
+designed control-flow path, not an error.</p>
+<p><strong>Seen in:</strong> <a href="../dive/v8/">V8</a> — the full ladder: feedback
+bytes and IC states observed by Ignition, four tiers of guarded
+code, <code>Deoptimizer</code> rebuilding interpreter frames, and
+<code>CompilationDependencies</code> registering invalidations so a Map
+transition can retire whole batches of optimized code;
+<a href="../dive/cpython/">CPython</a> — the portable middle point: the
+same feedback-and-guards idea (3.11&#39;s adaptive interpreter)
+specializing bytecode in place, with deopt back to the generic
+opcode, and no JIT at all. <a href="../dive/lua/">Lua</a> is the control
+experiment: zero speculation, one honest interpreter.</p>
+<p><strong>Why it recurs:</strong> dynamic languages hide their types until runtime;
+when the workload is long-lived, learning-by-running beats both
+static typing (unshippable) and naive interpretation (unbearably
+slow). The engineering is not the specialization — it is making
+retraction complete and cheap, because a guess you cannot safely
+take back is a crash.</p>
+<p><strong>Reach for it when:</strong> the hot paths are stable enough to have
+repeating shapes/types and the process lives long enough to amortize
+learning. Costs: warmup latency (cold code runs the baseline),
+memory for feedback and multiple code versions, and deopt storms
+when shapes churn. Short-lived processes should stay at CPython&#39;s
+specialization tier or Lua&#39;s none at all.</p>
 <hr>
 <h2 id="how-to-use-this-index-while-learning">How to use this index while learning</h2>
 <ol>
