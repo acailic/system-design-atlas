@@ -95,7 +95,12 @@ random pipeline death;
 [HAProxy](deep-dives/haproxy.md) — the
 master re-executes itself per reload and the old worker hands its
 listening sockets to the new one over a socketpair, so the supervisor
-ever only owns supervision, never a single connection.
+ever only owns supervision, never a single connection;
+[Chromium](deep-dives/chromium.md) — the
+browser process supervises sandboxed renderer processes it assumes
+are hostile: a dead renderer is a sad tab and a policy-ladder
+respawn, and a lying one is killed on a catalogued
+BadMessageReason.
 
 **Why it recurs:** crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.
@@ -127,7 +132,12 @@ site-instance script thread implements the WHATWG event-loop
 processing model, so one page's hang cannot stall another site;
 [HAProxy](deep-dives/haproxy.md) — one poll loop per thread, but with
 the loop's own scheduler made explicit: budgeted tasklet run queues
-in ebtrees, weighted by class, policed by a CPU-time watchdog.
+in ebtrees, weighted by class, policed by a CPU-time watchdog;
+[Chromium](deep-dives/chromium.md) — every
+process is threads-over-queues: the browser's named UI/IO threads
+plus a trait-tagged ThreadPool, and renderers whose main thread is
+the HTML event loop — with PostTask messages, not locks, as the
+officially documented cross-thread contract.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -302,7 +312,11 @@ autograd kernels, backward nodes, and dispatch registrations for
 2,000+ operators from one schema pair;
 [Servo](deep-dives/servo.md) — 576 WebIDL files are code-generated
 into Rust DOM bindings and JS glue, so the web API surface cannot
-drift from its implementations.
+drift from its implementations;
+[Chromium](deep-dives/chromium.md) — ~1,900
+.mojom IDL files compile into typed, versioned IPC bindings for
+every process boundary, so validation and version skew are build
+artifacts, not review diligence.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems

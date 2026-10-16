@@ -105,7 +105,12 @@ random pipeline death;
 <a href="../dive/haproxy/">HAProxy</a> — the
 master re-executes itself per reload and the old worker hands its
 listening sockets to the new one over a socketpair, so the supervisor
-ever only owns supervision, never a single connection.</p>
+ever only owns supervision, never a single connection;
+<a href="../dive/chromium/">Chromium</a> — the
+browser process supervises sandboxed renderer processes it assumes
+are hostile: a dead renderer is a sad tab and a policy-ladder
+respawn, and a lying one is killed on a catalogued
+BadMessageReason.</p>
 <p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.</p>
 <p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
@@ -132,7 +137,12 @@ site-instance script thread implements the WHATWG event-loop
 processing model, so one page&#39;s hang cannot stall another site;
 <a href="../dive/haproxy/">HAProxy</a> — one poll loop per thread, but with
 the loop&#39;s own scheduler made explicit: budgeted tasklet run queues
-in ebtrees, weighted by class, policed by a CPU-time watchdog.</p>
+in ebtrees, weighted by class, policed by a CPU-time watchdog;
+<a href="../dive/chromium/">Chromium</a> — every
+process is threads-over-queues: the browser&#39;s named UI/IO threads
+plus a trait-tagged ThreadPool, and renderers whose main thread is
+the HTML event loop — with PostTask messages, not locks, as the
+officially documented cross-thread contract.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -272,7 +282,11 @@ autograd kernels, backward nodes, and dispatch registrations for
 2,000+ operators from one schema pair;
 <a href="../dive/servo/">Servo</a> — 576 WebIDL files are code-generated
 into Rust DOM bindings and JS glue, so the web API surface cannot
-drift from its implementations.</p>
+drift from its implementations;
+<a href="../dive/chromium/">Chromium</a> — ~1,900
+.mojom IDL files compile into typed, versioned IPC bindings for
+every process boundary, so validation and version skew are build
+artifacts, not review diligence.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>

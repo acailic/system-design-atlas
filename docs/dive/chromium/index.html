@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chromium: a security model that forced a multi-process operating system for web content — System Design Atlas</title>
+<meta name="description" content="Chromium is the most dominant browser engine ever built, and the lesson it teaches is written into its process map: the security model came first, and the architecture was forced by it. A br">
+<meta property="og:title" content="Chromium: a security model that forced a multi-process operating system for web content — System Design Atlas">
+<meta property="og:description" content="Chromium is the most dominant browser engine ever built, and the lesson it teaches is written into its process map: the security model came first, and the architecture was forced by it. A br">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/chromium/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/chromium/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-navigation-omnibox-to-first-presented-frame">Walkthrough: one navigation, omnibox to first presented frame</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Chromium: a security model that forced a multi-process operating system for web content</h1>
+    <div class="meta-chips"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/chromium/chromium" rel="noopener">BSD-3-Clause AND others</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>2e4ac9790fceb5cc73ce2bb35a1b4835f67a4b7c</code> · 2026-10-16 · <a href="https://github.com/chromium/chromium" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Chromium is the most dominant browser engine ever built, and the
+lesson it teaches is written into its process map: <strong>the security
+model came first, and the architecture was forced by it</strong>. A browser
+must run millions of lines of parsing, layout, scripting, and
+decoding code over hostile input, so Chromium does not even try to
+make that code trustworthy — it makes it <em>powerless</em>: web content
+runs in sandboxed renderer processes that by design have no
+filesystem, no network sockets, and no direct access to the display
+(bpf_renderer_policy_linux.cc allowlists syscalls; subresource
+fetching happens only through a URLLoaderFactory pipe handed over by
+the privileged browser process). Everything a renderer can do is an
+IPC message over Mojo, an IDL-generated, typed, versioned message
+system spanning ~1,900 <code>.mojom</code> interface definitions; everything it
+owns is reachable only through capabilities the browser granted it.
+The browser process plays operating system: it owns the frame tree
+(the browser&#39;s <em>mirror</em> of every page&#39;s DOM tree, FrameTreeNode +
+replicated state), allocates renderers to sites through a policy
+ladder (SiteInstance → SiteInstanceGroup → RenderProcessHost), and
+supervises them with the explicit assumption that any of them may be
+compromised — 409 catalogued reasons to kill one on the spot
+(content/browser/bad_message.h). Read this dive against
+<a href="../servo/">Servo</a>, its catalog pairing: Servo decomposes the same
+problem with ownership types and message-passing <em>inside</em> one
+process by default; Chromium decomposes it with OS processes and
+capability IPC <em>always</em> — same distrust, two answers, and the
+comparison is the point.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A giant restaurant where every website&#39;s food is cooked in its own
+locked kitchen, by cooks who are locked in too.</strong> The front-of-house
+manager (the browser process) takes every order, but never lets any
+cook out of the kitchen area: kitchens have no windows and no doors
+to the street (the sandbox — a renderer can&#39;t touch files or the
+network), only a hatch (Mojo IPC) with preprinted order forms
+(<code>.mojom</code> interface files — you can only ask for things there&#39;s a
+form for). Cooks (Blink&#39;s DOM engine + V8, the JavaScript engine)
+for one restaurant chain always work in the same kitchen (site
+isolation — a SiteInstance), and never share a kitchen with a rival
+chain, so if rival food is poisoned it stays in their kitchen. When
+a cook needs groceries, he can&#39;t go shopping: he slides a request
+form through the hatch and the manager&#39;s buyer (the network service
+process) fetches it — cooks have no wallets. Finished dishes are not
+plated in the kitchen: kitchens send labeled trays (CompositorFrames)
+to the plating station (the GPU process running viz, the display
+compositor), which lays out every kitchen&#39;s trays into one picture
+you see on the screen. If a kitchen catches fire (a renderer crash),
+only that table gets a sorry-card (the sad tab); the manager simply
+lights a new kitchen — and because she kept her own clipboard mirror
+of every order (the browser&#39;s frame tree), nothing else on the menu
+is lost.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a browser downloads and runs
+strangers&#39; programs millions of times a day, so instead of promising
+the code is safe, the design takes away everything but the hatch —
+an OS-enforced sandbox needs a process boundary, and that single
+requirement explains almost every other choice in this codebase.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph browser[&quot;browser process — privileged broker&lt;br/&gt;(content/browser + chrome/browser)&quot;]
+        UI[&quot;UI thread (BrowserThread::UI)&lt;br/&gt;NavigationController, FrameTree,&lt;br/&gt;RenderProcessHost/RenderFrameHost&quot;]
+        IOT[&quot;IO thread (BrowserThread::IO)&lt;br/&gt;IPC dispatch, non-blocking&quot;]
+        TP[&quot;base::ThreadPool&lt;br/&gt;priority + sequencing traits&quot;]
+    end
+
+    subgraph renderers[&quot;renderer processes — sandboxed, expendable&lt;br/&gt;(content/renderer + third_party/blink + v8/)&quot;]
+        R1[&quot;Renderer for site A&lt;br/&gt;main thread: DOM + JS&lt;br/&gt;compositor thread: cc&quot;]
+        R2[&quot;Renderer for site B&lt;br/&gt;(cross-site iframe of A)&quot;]
+    end
+
+    subgraph services[&quot;utility processes — one sandbox type each&lt;br/&gt;(sandbox.mojom)&quot;]
+        NET[&quot;network service&lt;br/&gt;(services/network, kNetwork)&quot;]
+        GPU[&quot;GPU process&lt;br/&gt;(content/gpu + components/viz/service, kGpu)&lt;br/&gt;display compositor: SurfaceAggregator&quot;]
+        UTIL[&quot;storage, audio, data decoder…&lt;br/&gt;(kService, kUtility, kAudio …)&quot;]
+    end
+
+    UI --&gt;|&quot;mojo: NavigationClient, FrameHost,&lt;br/&gt;LocalFrameHost …&quot;| R1
+    UI --&gt;|mojo| R2
+    R1 --&gt;|&quot;mojom::URLLoaderFactory&lt;br/&gt;(subresource fetch)&quot;| NET
+    UI --&gt;|mojo| NET
+    R1 --&gt;|&quot;CompositorFrameSink::&lt;br/&gt;SubmitCompositorFrame&quot;| GPU
+    R2 --&gt;|&quot;CompositorFrame&quot;| GPU
+    GPU --&gt;|&quot;presented frame&quot;| UI
+    IOT --- TP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The browser process is the only trusted process, and it is a
+broker, not a worker.</strong> It runs the UI, owns the disk, sockets,
+and credentials, and every capability a renderer or service
+process holds was handed out by it. Structurally it is split
+between <code>content/browser</code> (the embeddable engine core) and
+<code>chrome/browser</code> (Chrome-the-product: omnibox, history,
+extensions — ~574 MB vs ~73 MB of source in this clone), joined
+by the <code>ContentBrowserClient</code> SPI (&quot;Use this &#39;escape hatch&#39;
+sparingly&quot;, content/public/browser/content_browser_client.h:314).
+Threading is two named threads — <code>BrowserThread::UI</code> (all
+navigation and state) and <code>BrowserThread::IO</code> (&quot;the highly
+responsive, non-blocking I/O thread for IPC&quot;,
+browser_thread.h:86) — plus a process-wide <code>base::ThreadPool</code>
+whose tasks carry priority, sequencing, and shutdown traits
+(base/task/thread_pool.h).</li>
+<li><strong>Renderer processes are hostile-by-assumption and expendable.</strong>
+Each hosts one site&#39;s documents and workers: Blink&#39;s DOM, style,
+and layout, plus V8 executing JavaScript (V8 is vendored as a
+separate tree at <code>v8/</code> — the same engine Node.js embeds, see
+<a href="../nodejs/">Node.js</a>). The Linux seccomp-bpf policy for them is
+an allowlist on top of a deny-by-default baseline
+(sandbox/policy/linux/bpf_renderer_policy_linux.cc:
+<code>RendererProcessPolicy::EvaluateSyscall</code>); there is no file
+access and no socket — network I/O is delegated to the network
+service through <code>network::mojom::URLLoaderFactory</code> pipes
+(services/network/public/mojom/url_loader_factory.mojom:68), one
+of which is passed <em>into</em> the renderer at commit time with every
+navigation.</li>
+<li><strong>The GPU process is a separate trust domain because GPU drivers
+are untrusted-input-facing C++ that must be fenced off.</strong> It
+hosts viz, the <em>display compositor</em>: renderers submit finished
+<code>CompositorFrame</code>s (&quot;the complete output of a compositor meant
+for display&quot;, components/viz/common/quads/compositor_frame.h:24)
+through <code>viz.mojom.CompositorFrameSink::SubmitCompositorFrame</code>,
+and viz&#39;s <code>SurfaceAggregator</code>
+(components/viz/service/display/surface_aggregator.h:44) merges
+every frame sink&#39;s surfaces into one frame for the screen — one
+process composites untrusted content from many renderers without
+any renderer touching another&#39;s pixels. Notably, the GPU process
+bans synchronous IPC outright
+(<code>mojo::SyncCallRestrictions::DisallowSyncCall()</code>,
+content/gpu/gpu_main.cc:250) — deadlock prevention as a lockdown.</li>
+<li><strong>Everything else is a utility process classified by sandbox
+type.</strong> <code>sandbox/policy/mojom/sandbox.mojom</code> is the process
+taxonomy as an enum: <code>kRenderer</code> (&quot;Hosts untrustworthy web
+content. Blocks as much OS access as possible&quot;), <code>kGpu</code>,
+<code>kNetwork</code>, <code>kAudio</code>, <code>kService</code> (&quot;computation only&quot; services
+such as media decoders), <code>kCdm</code>, <code>kPrintCompositor</code>, … each with
+its own policy — dangerous codecs and parsers get their own
+process class rather than a code audit.</li>
+<li><strong>Mojo is the connective tissue.</strong> Interfaces are declared in
+<code>.mojom</code> IDL and compiled into typed C++/Java/JS bindings;
+<code>mojo::Remote&lt;T&gt;</code>/<code>PendingReceiver&lt;T&gt;</code> pairs are capabilities
+(mojo/public/cpp/bindings/remote.h:29). Child processes are born
+via a Mojo <em>invitation</em> (&quot;invite another process to join the
+calling process&#39;s IPC network&quot;,
+mojo/public/cpp/system/invitation.h:46) — the renderer launcher
+even attaches the GPU channel pipe to the invitation before the
+child exists (render_process_host_impl.cc:2004
+<code>mojo_invitation_.AttachMessagePipe</code>).</li>
+<li><strong>The spine</strong> is one browser-initiated navigation to first
+presented frame: omnibox → <code>NavigationControllerImpl:: LoadURLWithParamsForResult</code>
+(navigation_controller_impl.cc:1745) → <code>NavigationRequest</code> state
+machine + NavigationThrottles → process/site selection
+(<code>RenderFrameHostManager::GetFrameHostForNavigation</code>,
+render_frame_host_manager.cc:1931) → possible new renderer
+(<code>RenderProcessHostImpl::GetProcessHostForSiteInstance</code>, the
+allocation ladder) → URLLoader in the network service →
+<code>NavigationClient::CommitNavigation</code> →
+<code>RenderFrameImpl::CommitNavigation</code> (render_frame_impl.cc:2671)
+→ Blink builds the document → cc produces a CompositorFrame →
+viz aggregates and presents. The Walkthrough traces exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-navigation-omnibox-to-first-presented-frame">Walkthrough: one navigation, omnibox to first presented frame</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant U as UI (browser, UI thread)
+    participant NC as NavigationController/NavigationRequest
+    participant RFHM as RenderFrameHostManager
+    participant RPH as RenderProcessHost(+launcher/zygote)
+    participant NET as network service (URLLoader)
+    participant RF as RenderFrameImpl (renderer)
+    participant VIZ as viz in GPU process
+
+    U-&gt;&gt;NC: LoadURLWithParams (omnibox)
+    NC-&gt;&gt;NC: NavigationThrottles run start checks
+    NC-&gt;&gt;RFHM: GetFrameHostForNavigation
+    RFHM-&gt;&gt;RFHM: compute SiteInstance (same site? lock?)
+    alt cross-site or no suitable process
+        RFHM-&gt;&gt;RPH: SiteInstance::GetProcess → allocation ladder
+        RPH-&gt;&gt;RPH: reuse/spare/launch (zygote fork), mojo invitation
+    end
+    NC-&gt;&gt;NET: URLLoader: redirects, CORS, COOP, response head
+    NC-&gt;&gt;RF: NavigationClient::CommitNavigation (response + capabilities)
+    RF-&gt;&gt;NET: bind URLLoaderClient endpoints, stream body
+    RF-&gt;&gt;RF: Blink: DocumentLoader, DOM, layout (cc)
+    RF-&gt;&gt;VIZ: CompositorFrameSink::SubmitCompositorFrame
+    VIZ-&gt;&gt;VIZ: SurfaceAggregator merges surfaces
+    VIZ--&gt;&gt;U: frame presented (DidFirstVisuallyNonEmptyPaint)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-omnibox-never-talks-to-a-renderer">The omnibox never talks to a renderer</h3>
+<p>An omnibox
+navigation lands in the browser&#39;s <code>NavigationController</code> as
+<code>LoadURLWithParamsForResult</code> (content/browser/renderer_host/
+navigation_controller_impl.cc:1745): debug URLs are intercepted,
+params validated, then control passes to <code>NavigateWithoutEntry</code>,
+which creates a <code>NavigationRequest</code> — a ~14,000-line-per-file
+browser-side state machine (content/browser/renderer_host/
+navigation_request.cc) that owns the navigation from URL to commit.
+The renderer that will display the page is, at this moment,
+irrelevant: process placement is a later, separate decision.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="throttles-policy-as-a-pipeline">Throttles: policy as a pipeline</h3>
+<p>Before any bytes move,
+the NavigationRequest runs NavigationThrottles — embedder-supplied
+checks (redirects, permissions, Safe Browsing) that may proceed,
+defer, cancel, or block; <code>OnStartChecksComplete</code>
+(navigation_request.cc:6196) is the gate that fires once all start
+checks pass, wiring the service-worker handle and the storage
+partition. This is where Chrome-the-product gets to veto without
+content-the-engine knowing it exists — the same seam VS Code uses
+for its extension contributions.</p></div></div>
+<p><strong>Step 3 — Where will this document live?</strong> The request reaches
+<code>RenderFrameHostManager::GetFrameHostForNavigation</code>
+(render_frame_host_manager.cc:1931) for its frame&#39;s <code>FrameTreeNode</code>.
+The manager computes the destination <code>SiteInstanceImpl</code>
+(<code>GetSiteInstanceForNavigationRequest</code>): same-site stays in the
+current renderer; a cross-site navigation gets a new SiteInstance —
+and if that instance needs one, a <em>speculative</em> RenderFrameHost
+(<code>CreateSpeculativeRenderFrameHost</code>, :4483) is created so the old
+page stays interactive until commit. This is the site-isolation
+decision point, in code.</p>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="process-allocation-is-a-policy-ladder">Process allocation is a policy ladder</h3>
+<p><code>SiteInstanceImpl::GetProcess</code> bottoms out in
+<code>RenderProcessHostImpl::GetProcessHostForSiteInstance</code>
+(render_process_host_impl.cc:5430): reuse the sole process-per-site host if the policy says so;
+reuse a host for a pending/committed same site; match an unmatched
+service worker; reuse an empty background host; take a pre-launched
+<em>spare</em> renderer (<code>SpareRenderProcessHostManager</code>); if the process
+limit is hit (<code>GetMaxRendererProcessCount</code>, :1522 — RAM/2 divided
+by an 85 MB-per-tab estimate, clamped 3..82), pick a random suitable
+existing host (<code>GetExistingProcessHost</code>, :5356 — <code>base::RandomChoice</code>
+over suitability-filtered hosts); only otherwise launch new.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="a-renderer-is-born-holding-capabilities">A renderer is born holding capabilities</h3>
+<p>If launch is
+needed, <code>RenderProcessHostImpl::Init</code> (:1913) builds the command
+line, wraps a <code>RendererSandboxedProcessLauncherDelegate</code>, and hands
+a <code>ChildProcessLauncher</code> a Mojo invitation — with the GPU channel
+pipe already attached (:2004). On Linux the launcher asks the
+<em>zygote</em> — a pre-warmed, already-sandboxed ancestor process — to
+fork (<code>ZygoteCommunication::ForkRequest</code>,
+content/browser/child_process_launcher_helper_linux.cc:88), then
+tunes the OOM score so the kernel prefers killing renderers
+(<code>kLowestRendererOomScore</code>). The child&#39;s seccomp filter installs
+before any web content runs; its only superpower is the hatch.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-browser-fetches-the-renderer-waits">The browser fetches; the renderer waits</h3>
+<p>The
+NavigationRequest drives the load through the network service: a
+<code>network::mojom::URLLoader</code> handles redirects, CORS, COOP/COEP,
+and returns the response head. When it is safe to commit, the
+browser calls <code>NavigationClient::CommitNavigation</code>
+(content/common/navigation_client.mojom:297 — &quot;Tells the renderer
+that a navigation is ready to commit&quot;) passing not just the
+response but a <em>capability bundle</em>: a data pipe with the body,
+subresource <code>URLLoaderFactory</code>s, a cookie manager, a policy
+container, a code-cache host. The renderer never fetched the main
+resource; it is handed the results.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="commit-two-trees-agree">Commit: two trees agree</h3>
+<p><code>RenderFrameImpl::CommitNavigation</code> (content/renderer/
+render_frame_impl.cc:2671) binds the loader endpoints, decodes the
+body stream, and hands the payload to Blink&#39;s DocumentLoader to
+build the document — DOM, style, layout — with V8 executing
+scripts as the parser yields. Blink reports the commit back
+(<code>DidCommitProvisionalLoad</code>), and the browser&#39;s mirror follows:
+<code>RenderFrameHostManager::CommitPending</code> (:5281) swaps the
+speculative RFH to current, the old RFH is unloaded or demoted to a
+proxy, and replicated frame state (origin, sandbox flags, name)
+updates in every process that hosts a frame of this tree.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">8</span><div class="step-body"><h3 class="step-title" id="pixels-renderers-propose-viz-decides">Pixels: renderers propose, viz decides</h3>
+<p>Blink/cc
+rasterizes what it can and produces a <code>CompositorFrame</code> — draw
+quads over shared resources — submitted through the
+<code>CompositorFrameSink</code> mojo interface the renderer holds toward the
+GPU process (bound in Blink&#39;s <code>WidgetBase</code>,
+third_party/blink/renderer/platform/widget/widget_base.cc:185).
+There, <code>SurfaceAggregator</code> merges this renderer&#39;s surface with
+every other frame sink (the browser UI&#39;s, other iframes&#39;) into the
+display&#39;s frame. Presentation feedback flows back; the first
+visually-non-empty paint is reported through <code>LocalFrameHost</code>
+(<code>DidFirstVisuallyNonEmptyPaint</code>, blink.mojom frame.mojom:1396)
+— the browser learns what the renderer did, never assuming it was
+told the truth (viz distinguishes &quot;painted something&quot; from
+&quot;produced a frame&quot; <em>without trusting any renderer-supplied signal</em>,
+compositor_frame.h:57).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="a-page-on-screen-and-a-system-that-survived-its-own-assumptions">A page on screen, and a system that survived its own
+assumptions</h3>
+<p>Every renderer involved could have crashed at any
+step — the browser&#39;s mirror, the capability bundle, and the
+allocation ladder make a fresh process a three-function call away;
+and every message in the trip was typed IDL, validated, and
+kill-worthy, which is exactly how a codebase assembled over
+eighteen years runs millions of hostile pages a day without
+losing the UI thread.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>RenderProcessHost</code> — the supervisor&#39;s starved handle.</strong>
+<strong>What:</strong> content/public/browser/render_process_host.h:130 —
+&quot;There will generally be one RenderProcessHost per renderer
+process&quot;. It carries routing IDs, mojo pipes, priority clients,
+and lifecycle observers — but no DOM, no frame tree, no page
+content. Its <code>EnableSendQueue()</code> (:187) lets the browser send
+messages <em>before the process exists</em> and have them delivered
+when it does; <code>ShutdownForBadMessage</code> (:212) kills on invalid
+input. <strong>Why:</strong> the same starved-supervisor-record move as
+<a href="../servo/">Servo</a>&#39;s <code>Pipeline</code> (constellation-facing view with no
+DOM pointer) or <a href="../kubernetes/">Kubernetes</a>&#39; informers: the
+supervisor can supervise, restart, and distrust cheaply because
+it holds projections, not truths.</p>
+</li>
+<li><p><strong><code>SiteInstance</code> / <code>BrowsingInstance</code> (+ <code>SiteInstanceGroup</code>) —
+the security principal, separated from the process.</strong> <strong>What:</strong>
+<code>content/browser/browsing_instance.h</code> — a BrowsingInstance is a
+&quot;unit of related browsing contexts&quot; (windows/frames that can
+script each other); within it, a SiteInstance is the atomic
+same-site group that <em>must</em> share a process. Newer still,
+<code>SiteInstanceGroup</code> (content/browser/site_instance_group.h:76)
+is &quot;one view of a browsing context group&#39;s frame trees within a
+renderer process… a tuning knob, allowing the number of groups
+to vary… without affecting the number of security principals.&quot;
+<strong>Why:</strong> the key insight this codebase teaches: <em>principals</em> and
+<em>processes</em> are different axes. Same-site-synchronous-access is
+a spec fact (HTML agent clusters); process count is a resource
+decision. Keeping them as separate types lets Android share
+processes under memory pressure while desktop isolates — same
+code, different tuning.</p>
+</li>
+<li><p><strong><code>FrameTree</code> / <code>FrameTreeNode</code> / <code>RenderFrameHostManager</code> — the
+browser&#39;s mirrored DOM.</strong> <strong>What:</strong>
+content/browser/renderer_host/frame_tree.h:72 — one per page,
+built from browser-side nodes that exist &quot;in response to frame
+attach and detach events in the DOM&quot;; each node&#39;s manager holds
+the <code>current_frame_host_</code>, a speculative one during cross-site
+navigations, and proxy hosts for frames living in other
+processes, plus <code>FrameReplicationState</code> (origin, sandbox flags,
+name) replicated to every relevant renderer. <strong>Why:</strong> because
+the renderer cannot be trusted to describe its own tree, the
+browser keeps its own — the renderer must even <em>ask</em> to create a
+child frame (<code>FrameHost::CreateChildFrame</code>,
+content/common/frame.mojom:741). Duplicated state is the price
+of distrust, and the mirror is where jail checks are enforced.</p>
+</li>
+<li><p><strong>Mojo <code>Remote&lt;T&gt;</code> / <code>PendingReceiver&lt;T&gt;</code> — IPC as capability
+tokens.</strong> <strong>What:</strong> mojo/public/cpp/bindings/remote.h:29 — a
+<code>Remote</code> is bound by consuming a <code>PendingRemote</code> &quot;received via
+some IPC&quot; or by <code>BindNewPipeAndPassReceiver()</code>: message-pipe
+endpoints are values you can pass, store, and revoke; a
+<code>PendingReceiver</code> names the <em>right to be talked to</em>. New pipes
+ride invitations to newborn processes
+(mojo/public/cpp/system/invitation.h:46), and the
+<code>BrowserInterfaceBroker</code> (blink.mojom browser_interface_broker.mojom)
+is the renderer&#39;s one sanctioned way to ask for more
+(&quot;GetInterface(GenericPendingReceiver)&quot;), implemented per
+execution context with compile-time binder maps
+(content/browser/browser_interface_broker_impl.h:33). <strong>Why:</strong>
+the process boundary is a capability system: nothing is
+reachable that wasn&#39;t granted, and grants are revocable objects
+— the object-capability lesson at industrial scale.</p>
+</li>
+<li><p><strong><code>CompositorFrame</code> + <code>SurfaceId</code> — the rendering currency
+between processes.</strong> <strong>What:</strong>
+components/viz/common/quads/compositor_frame.h:24 — draw quads
+over transferable resources, produced by any renderer (or the
+browser UI) and submitted with a <code>LocalSurfaceId</code>; viz&#39;s
+<code>FrameSinkManagerImpl</code> (components/viz/service/frame_sinks/
+frame_sink_manager_impl.h:83) tracks surfaces, and
+<code>SurfaceAggregator</code> composes them. <strong>Why:</strong> cross-process
+compositing needs an immutable, serializable unit of &quot;what to
+draw&quot; — the same reason <a href="../ffmpeg/">FFmpeg</a> refcounts AVFrames:
+zero-copy handoff of buffers between trust domains. The viz side
+even bounds queueing (<code>max_uncommitted_frames</code>, frame_sink_manager_impl.h:112).</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph bp[&quot;browser process&quot;]
+        UIT[&quot;UI thread&lt;br/&gt;navigation, FrameTree, RFHs&quot;]
+        IOT2[&quot;IO thread&lt;br/&gt;(IPC dispatch)&quot;]
+        TP2[&quot;ThreadPool&lt;br/&gt;(traits: priority, sequence, shutdown)&quot;]
+    end
+    subgraph rp[&quot;one renderer process&quot;]
+        MT[&quot;main thread&lt;br/&gt;DOM + V8 (spec event loop)&quot;]
+        CT[&quot;compositor thread&lt;br/&gt;(cc, 60fps pipeline)&quot;]
+        WT[&quot;worker threads&lt;br/&gt;(dedicated/shared/service workers)&quot;]
+        ASG[&quot;AgentSchedulingGroup&lt;br/&gt;(ordering domain for IPC)&quot;]
+    end
+    subgraph gpu[&quot;GPU process&quot;]
+        VIZ[&quot;viz display compositor&lt;br/&gt;(no sync IPC allowed)&quot;]
+    end
+    UIT &lt;--&gt;|&quot;mojo&quot;| MT
+    MT --- CT
+    ASG -.orders.-&gt; MT
+    MT &amp; CT --&gt;|&quot;SubmitCompositorFrame&quot;| VIZ
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> processes by the dozen (each with its
+own sandbox class), threads within each. <strong>What is serialized:</strong>
+per-thread task queues. Chromium&#39;s rule of thumb is written in
+docs/threading_and_tasks.md: prefer message passing between
+sequences over locks; &quot;always avoid reading/writing to the same
+place in memory from separate threads… Prefer passing messages.&quot;
+The renderer&#39;s main thread implements the HTML event-loop
+processing model (same spec duty as Servo&#39;s script thread), with
+cc&#39;s compositor thread separate so scrolling can outrun JS; the
+browser&#39;s UI thread owns all navigation state while its IO
+thread only dispatches IPC. <code>AgentSchedulingGroupHost</code>
+(content/browser/renderer_host/agent_scheduling_group_host.h:40)
+exists purely to give cross-interface message <em>ordering</em> a
+schedulable identity: &quot;the only way to obtain ordering
+guarantees between different Mojo (associated) interfaces and
+legacy IPC messages.&quot;</li>
+<li><strong>Crash containment is the architecture.</strong> A dead renderer
+surfaces as <code>RenderProcessHostImpl::ProcessDied</code>
+(render_process_host_impl.cc:5736): reset the mojo receivers so
+&quot;no IPCs or mojo calls from the old process get dispatched after
+it has died,&quot; notify observers, re-arm the send queue, and the
+host is reusable — the embedder shows the sad tab
+(chrome/browser/ui/sad_tab_controller.h) and a reload re-runs the
+same allocation ladder. Nothing else loses state, because only
+the mirror lives in the browser.</li>
+<li><strong>Distrust has a taxonomy.</strong> Every security-relevant invariant on
+the IPC surface is a <code>BadMessageReason</code> — 409 of them
+(content/browser/bad_message.h:26) — and tripping one logs
+&quot;Terminating renderer for bad IPC message, reason N&quot;
+(bad_message.cc:29) and kills the process
+(<code>RenderProcessHost::ShutdownForBadMessage</code>). Compromised
+renderers get jail-checked on top: <code>ChildProcessSecurityPolicy:: CanAccessDataForOrigin</code> (now being rewritten in Rust,
+content/browser/security/cpsp/child_process_security_policy_impl.rs)
+enforces that a process locked to a site cannot fetch or be
+granted another site&#39;s data — the browser re-verifies every
+privileged request, in the broker.</li>
+<li><strong>Backpressure is policy, in three places.</strong> Navigation:
+NavigationThrottles defer/cancel, and a new navigation
+supersedes an in-flight speculative RFH (wasted-speculative-RFH
+metrics are a named enum, render_frame_host_manager.h:105 — they
+budget the speculation). Rendering: viz drives renderers with
+BeginFrames and bounds <code>max_uncommitted_frames</code>. Memory: the
+process-count model itself (<code>GetMaxRendererProcessCount</code>) is
+memory budgeting — the fallback ladder exists because RAM is the
+scarce resource.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is an embedding API: <code>content</code> is the
+product.</strong> <code>content/public/</code> is the engine&#39;s API (RenderProcessHost,
+WebContents, SiteInstance, ContentBrowserClient), <code>chrome/</code> is
+one embedder, and Android WebView, ChromeOS, headless, and
+Electron/CEF all build on the same seam. <code>ContentBrowserClient</code>
+(content/public/browser/content_browser_client.h:314) is the
+embedder&#39;s SPI — 3,455 lines of hooks with a self-aware warning:
+&quot;Use this &#39;escape hatch&#39; sparingly, to avoid the embedder
+interface ballooning.&quot; Compare <a href="../servo/">Servo</a>&#39;s
+<code>ServoBuilder</code>/delegates (engine-first, shell-later) and
+<a href="../vscode/">VS Code</a>&#39;s extension host: all three became platforms
+by putting the embedder seam in before the product needed it.</li>
+<li><strong>Risky code becomes a process, not a patch.</strong> The utility
+process pattern (one sandbox class per trust domain,
+sandbox.mojom) means adding a media codec or a font parser is a
+BUILD target plus an enum entry, and the blast radius is a
+process — <a href="../haproxy/">HAProxy</a>&#39;s &quot;budgeted&quot; philosophy applied
+to capability rather than latency. Mojo&#39;s <code>[ServiceSandbox=…]</code>
+attribute declares the sandbox right in the IDL.</li>
+<li><strong>Interfaces are the API design unit.</strong> <code>.mojom</code> files declare
+methods, enums, and structs; the generator produces bindings,
+validation, and JS glue. Versioning is by field ordinals, so a
+renderer one milestone behind the browser still parses — an
+upgrade-compatibility contract across millions of
+simultaneously-running versions of the same system.</li>
+<li><strong>Honest warts.</strong> <code>WebContentsImpl</code> is a 13,000-line god object
+(web_contents_impl.cc) that even its neighbors mock
+(render_frame_host_manager.h:185 &quot;TODO(brettw) Clean this up!&quot;);
+two IPC systems (legacy IPC routing + mojo) coexist during the
+decades-long migration — <code>RenderProcessHost</code> still implements
+<code>IPC::Listener</code> while every new surface is mojo; and the mirror
+tree means every renderer-side frame feature must budget a
+browser-side twin, which is why site isolation took years, not
+months.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-os-processes-over-in-process-isolation">Trade-off 1: OS processes over in-process isolation</h3>
+<ul>
+<li><strong>Tension:</strong> web content is hostile, and proving 45M lines of
+parser/layout/JS memory-safe is hopeless — but the browser must
+keep working anyway.</li>
+<li><strong>Choice:</strong> sandbox <em>first</em> (deny-by-default syscall filters,
+sandbox/policy/linux/bpf_renderer_policy_linux.cc), then place
+the sandbox boundary at an OS process, then route every
+capability through the trusted broker (<code>URLLoaderFactory</code> pipes
+for the network, CompositorFrame submission for pixels,
+LocalFrameHost calls for privileged actions).</li>
+<li><strong>Evidence:</strong> <code>sandbox.mojom</code> — the whole process taxonomy as
+capability classes; <code>RenderProcessHostImpl::Init</code> passing a
+mojo invitation + GPU pipe to an unborn child (:2004); the
+zygote fork path (child_process_launcher_helper_linux.cc:88)
+making sandboxed process creation cheap; and
+<code>GetMaxRendererProcessCount</code> (:1522) pricing the choice in RAM.</li>
+<li><strong>Given up:</strong> tens of MB and a page-table per site; an IPC hop
+for nearly everything (subresource loads serialize through the
+network service); startup latency (hence spares and zygotes).</li>
+<li><strong>Verdict:</strong> right when the workload is hostile and machine-wide
+compromise is unacceptable — which is precisely a browser, and
+precisely why Chrome won the security argument while its
+process-agnostic rivals stalled. Wrong for a single-tenant,
+embedded engine: <a href="../servo/">Servo</a> keeps the same message
+discipline but defaults to threads and buys isolation with Rust&#39;s
+type system instead of page tables — and Chromium itself keeps
+<code>run_renderer_in_process()</code> (render_process_host_impl.cc:2077)
+for tests, paying proof that both worlds are wanted.</li>
+</ul>
+<h3 id="trade-off-2-one-typed-generated-ipc-substrate-for-every-boundary">Trade-off 2: one typed, generated IPC substrate for every boundary</h3>
+<ul>
+<li><strong>Tension:</strong> with many process classes and dozens of teams, ad-hoc
+IPC protocols rot, drift, and become attack surface.</li>
+<li><strong>Choice:</strong> everything crosses process boundaries as mojo —
+declared in ~1,900 <code>.mojom</code> files, compiled to typed bindings
+with wire-format validation and field-ordinal versioning;
+capabilities are pipes (<code>Remote</code>/<code>PendingReceiver</code>), granted by
+the broker per execution context, and deferrable by policy
+(browser_interface_broker_impl.h:33 — prerendering holds
+binders until activation).</li>
+<li><strong>Evidence:</strong> the broker maps populated &quot;statically at compile
+time&quot; per host type; <code>NavigationClient::CommitNavigation</code>
+passing an entire capability bundle as one typed call
+(navigation_client.mojom:297); associated interfaces under an
+AgentSchedulingGroup to preserve cross-interface ordering
+(agent_scheduling_group_host.h:40).</li>
+<li><strong>Given up:</strong> simplicity — the type system makes casual
+&quot;just call a function&quot; cross-process work impossible, forces
+interface reviews, and leaves two IPC worlds coexisting while
+the migration finishes; plus a generator toolchain in the build.</li>
+<li><strong>Verdict:</strong> right when boundaries are many, teams are many, and
+the message surface <em>is</em> the security perimeter. This is
+<a href="../redis/">Redis</a>&#39; commands.json and <a href="../pytorch/">PyTorch</a>&#39;s
+native_functions.yaml at OS scale: generate the surface from
+data so implementation, validation, and docs cannot drift — and
+here, so a compromised peer cannot speak anything but the
+typed dialect. Wrong for a small fixed set of in-house
+processes, where it is ceremony.</li>
+</ul>
+<h3 id="trade-off-3-mirrored-state-and-re-verification-over-trusting-the-renderer">Trade-off 3: mirrored state and re-verification over trusting the renderer</h3>
+<ul>
+<li><strong>Tension:</strong> the renderer owns the live DOM (only it can run the
+spec&#39;s algorithms), yet the browser must make security decisions
+about that DOM (can this process show this origin? navigate
+here? read these cookies?) without trusting its tenant.</li>
+<li><strong>Choice:</strong> the browser keeps its own frame tree
+(FrameTreeNode + FrameReplicationState) updated by explicit
+replication, requires renderer requests for tree structure
+(<code>FrameHost::CreateChildFrame</code>), re-verifies every privileged
+request against policy (<code>ChildProcessSecurityPolicy:: CanAccessDataForOrigin</code>; the &quot;jail/citadel checks&quot; of
+docs/process_model_and_site_isolation.md), and treats
+inconsistency as a killable offense (bad_message.h&#39;s 409
+reasons).</li>
+<li><strong>Evidence:</strong> browsing_instance.h&#39;s rule that a BrowsingInstance&#39;s
+same-site frames must share a process — enforced by checking the
+mirror at commit (<code>GetFrameHostForNavigation</code>); viz refusing to
+trust even a renderer&#39;s &quot;I painted something&quot; claim
+(compositor_frame.h:57).</li>
+<li><strong>Given up:</strong> double bookkeeping and its whole bug class —
+drift between mirror and truth (the enum <code>WastedSpeculativeRFHCase</code>
+is one such budget); every new web feature pays a browser-side
+twin; latency on every privileged action.</li>
+<li><strong>Verdict:</strong> right when the data&#39;s owner may be your attacker —
+in any broker over untrusted workers (a cluster scheduler over
+its agents, a kernel over user space). Wrong inside one trust
+domain, where it is pure overhead: <a href="../servo/">Servo</a>&#39;s layout
+reading the DOM in-thread is the counterexample — safe there
+because the <em>owner</em> is trusted-by-construction, not by decree.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>docs/process_model_and_site_isolation.md</code> — the authoritative
+in-tree design doc; read its &quot;Goals&quot; and &quot;Abstractions&quot; first:
+every class below exists to implement a sentence in this file.</li>
+<li><code>sandbox/policy/mojom/sandbox.mojom</code> — the process taxonomy as
+an enum with one doc comment per sandbox class; note what
+<code>kRenderer</code> is <em>not</em> allowed.</li>
+<li><code>content/public/browser/render_process_host.h</code> — the
+supervisor&#39;s handle as pure interface: routing, observers,
+<code>EnableSendQueue</code>, <code>ShutdownForBadMessage</code>. Then
+<code>render_process_host_impl.cc:1522 GetMaxRendererProcessCount</code>
+and <code>:5430 GetProcessHostForSiteInstance</code> — the allocation
+ladder, policy as a cascade of fallbacks.</li>
+<li><code>content/browser/renderer_host/render_process_host_impl.cc:1913 Init</code> — process birth: sandbox delegate, mojo invitation with
+the GPU pipe pre-attached, <code>run_renderer_in_process()</code> escape
+hatch. Then <code>content/browser/child_process_launcher_helper_ linux.cc:81 LaunchProcessOnLauncherThread</code> — the zygote fork
+and OOM-score tuning.</li>
+<li><code>content/browser/browsing_instance.h</code> (class comment) and
+<code>content/browser/site_instance_impl.h</code> — principals and the
+same-site sharing rule; then <code>content/browser/site_instance_ group.h:76</code> — the newer tuning knob separating principals from
+processes, and <code>content/browser/renderer_host/ agent_scheduling_group_host.h:40</code> for ordering guarantees as a
+schedulable unit.</li>
+<li><code>content/browser/renderer_host/frame_tree.h</code> and
+<code>frame_tree_node.h</code> — the browser&#39;s mirror tree; find
+<code>current_replication_state()</code> and ask who writes it and when.</li>
+<li><code>content/browser/renderer_host/render_frame_host_manager.h:134</code>
+— the long class comment narrating a cross-process navigation;
+  then <code>.cc:1931 GetFrameHostForNavigation</code> and <code>:4483 CreateSpeculativeRenderFrameHost</code> — where site isolation
+actually decides.</li>
+<li><code>content/browser/renderer_host/navigation_controller_impl.cc: 1745 LoadURLWithParamsForResult</code> → <code>navigation_request.cc:6196 OnStartChecksComplete</code> — the browser-side navigation machine;
+skim the throttle result handling only.</li>
+<li><code>content/common/navigation_client.mojom:297</code> and
+<code>content/common/frame.mojom:427</code> — the commit contract and the
+frame interfaces, including <code>[SupportsUrgent]</code> priority IPC;
+then the receiving end, <code>content/renderer/render_frame_impl.cc: 2671 CommitNavigation</code> — inventory every capability the
+renderer is handed.</li>
+<li><code>mojo/public/cpp/bindings/remote.h</code> (doc comment) and
+<code>mojo/public/cpp/system/invitation.h:46</code> — pipes as
+capabilities, invitations as birthright; then
+<code>third_party/blink/public/mojom/browser_interface_broker.mojom</code>
+with <code>content/browser/browser_interface_broker_impl.h:33</code> —
+the broker and its compile-time binder maps.</li>
+<li><code>third_party/blink/renderer/platform/widget/widget_base.cc:185</code>
+— where a renderer binds its <code>CompositorFrameSink</code>; then
+<code>components/viz/common/quads/compositor_frame.h</code>,
+<code>services/viz/public/mojom/compositing/compositor_frame_sink.mojom</code>,
+and <code>components/viz/service/display/surface_aggregator.h</code> —
+the frame currency and the merger; finish at
+<code>content/gpu/gpu_main.cc:250</code> (sync-IPC ban).</li>
+<li><code>content/browser/bad_message.h</code> (count the reasons) and
+<code>content/browser/security/cpsp/ child_process_security_policy_impl.rs</code> — distrust made
+executable, and a security core mid-rewrite in Rust over a
+cxx bridge.</li>
+<li><code>base/task/thread_pool.h</code>, <code>content/public/browser/ browser_thread.h:81</code>, and <code>docs/threading_and_tasks.md</code> —
+the message-over-locks concurrency contract every file above
+obeys.</li>
+<li><code>content/public/browser/content_browser_client.h:306</code> and the
+directory sizes (<code>content/browser</code> vs <code>chrome/browser</code>) — the
+engine/product split as the final API lesson; compare with
+<a href="../servo/">Servo</a>&#39;s embedder API from the other direction.</li>
+</ol>
+<p>You have now traced one navigation from omnibox to first presented
+frame — through a broker that mirrors what it cannot trust, a
+sandbox that makes trust unnecessary, and a message system that
+makes the whole boundary auditable — and you have the map to dive
+into any one layer (blink, viz, network, mojo) knowing how it got
+its boundary.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Let the security model draw the architecture</strong> — decide what
+code may not be trusted, fence it with OS primitives, and the
+process map, IPC design, and supervision policy all fall out;
+seen in sandbox.mojom&#39;s taxonomy existing <em>before</em> any process
+spawns.</li>
+<li><strong>Separate security principals from processes</strong> — make the
+must-share unit (SiteInstance) a different type from the
+resource-tuning unit (SiteInstanceGroup), so platform memory
+budgets tune isolation without touching the security rules.</li>
+<li><strong>Supervise with starved handles</strong> — the browser&#39;s process host
+holds ids, pipes, and priorities but no page content, so crash
+response is O(1) and the supervisor can&#39;t be corrupted through
+its own state (render_process_host.h vs Servo&#39;s pipeline.rs).</li>
+<li><strong>Make IPC capabilities, granted by a broker</strong> — pipes as
+values, a single <code>GetInterface</code> choke point with per-context
+binder maps and deferrable policies; every grant auditable and
+revocable in one place (browser_interface_broker_impl.h).</li>
+<li><strong>Generate the entire message surface from IDL</strong> — 1,900 .mojom
+files mean validation, versioning, and bindings are uniform
+across dozens of teams and process classes; drift becomes a
+build error, not a CVE.</li>
+<li><strong>Treat invalid input from your workers as a killable,
+catalogued event</strong> — 409 BadMessageReasons with telemetry:
+compromise detection is a first-class subsystem, not a
+crash-report afterthought (bad_message.h).</li>
+<li><strong>Amortize process creation</strong> — zygote forks and pre-launched
+spare renderers turn &quot;spawn a sandboxed process&quot; from a
+page-load cost into a background one
+(child_process_launcher_helper_linux.cc, SpareRenderProcessHostManager).</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 14–18 hours for this
+path — the codebase is among the largest ever assembled (~45M
+lines across ~510k files), and this dive deliberately stays on the
+architecture spine (process model, navigation, IPC, compositing) rather than
+any subsystem&#39;s internals; budget each of Blink, V8, and the
+network service as separate future expeditions (V8 already has
+its own catalog entry).</li>
+<li>Prerequisites: comfortable C++ (interfaces, callbacks,
+refcounting); processes vs threads and what a syscall filter
+is (the <a href="../runc/">runc</a> dive is excellent warm-up for sandbox
+primitives); the same-origin policy and the shape of the HTML
+spec&#39;s browsing contexts (the <a href="../servo/">Servo</a> dive teaches
+the engine-side vocabulary); roughly what compositing is
+(layers → quads → frames). No prior Chromium experience needed
+— but read dive sections 1 and 6 of servo.md first for the
+shared vocabulary of frames, event loops, and pipelines.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>In the clone: <code>docs/process_model_and_site_isolation.md</code> (the
+design doc this dive paraphrases), <code>docs/navigation_concepts.md</code>
+and <code>docs/navigation.md</code> (Life of a Navigation — the same spine
+as the Walkthrough), <code>docs/design/sandbox.md</code> +
+<code>sandbox_faq.md</code>, <code>docs/mojo_and_services.md</code>,
+<code>docs/threading_and_tasks.md</code>.</li>
+<li>The <a href="../servo/">Servo</a> dive in this atlas — the paired engine:
+same distrust, answered with ownership types and in-process
+message passing; read the two trade-off sections side by side.</li>
+<li>chromium.org&#39;s Site Isolation pages and
+<code>docs/security/compromised-renderers.md</code> (in-tree) for the
+threat model behind jail/citadel checks.</li>
+<li>The web.dev series &quot;Inside look at modern web browser&quot; (parts
+1–4) — the multi-process story told at blog level, good
+orientation before the code.</li>
+<li><a href="../nodejs/">Node.js</a> and <a href="../cpython/">CPython</a> in this atlas
+for the other side of V8 and GC&#39;d runtimes; <a href="../nginx/">nginx</a>
+and <a href="../haproxy/">HAProxy</a> for supervisor+expendable-worker
+patterns with far narrower workers; <a href="../vscode/">VS Code</a> for a
+second look at an engine that became a platform via an embedder
+seam.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../haproxy/"><span class="dir">← Previous dive</span>HAProxy: a proxy where every hot path runs against a visible budget</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 29 of 29 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
