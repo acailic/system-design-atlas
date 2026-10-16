@@ -207,7 +207,7 @@ projects:
     license: Apache-2.0
     domains: [web-server, proxy-lb]
     difficulty: gentle
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 3, clarity: 5, teachability: 5, domain_fit: 4 }
     why: >
       A modern web server where the idioms do the hard work: Go's

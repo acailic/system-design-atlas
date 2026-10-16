@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">28 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">29 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -248,6 +248,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every waiter works alone with a to-do list that is never allowed to get long. Each waiter (a thread) has a to-do list ordered by when you wrote the item down (the run queue, an…</span>
   <span class="dc-meta"><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/caddy/" data-domains="web-server proxy-lb" data-search="caddy: the runtime is the architecture — config as a document, goroutines instead of state machines">
+  <span class="dc-name">Caddy</span>
+  <span class="dc-headline">the runtime is the architecture — config as a document, goroutines instead of state machines</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A hotel where every guest gets their own helper — and the rulebook can be swapped without waking anyone. In nginx's ice-cream shop the workers take tiny turns so nobody waits; in Caddy's hotel the…</span>
+  <span class="dc-meta"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-gentle">gentle</span></span>
+</a>
   </div>
 </section>
 
@@ -279,7 +285,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 28 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 34 projects; 29 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="https://github.com/torvalds/linux" rel="noopener">Linux kernel ↗</a></span><span class="cat-status cataloged">cataloged</span>
@@ -312,7 +318,7 @@ transferable design moves you can apply to your own systems.</li>
   <div class="cat-why">The web server that broke Apache's thread-per-connection model and owns the top of the web-tier market share because of it: a master/worker process model where a supervisor holds the listening sockets, workers…</div></li>
 <li><span class="cat-name"><a href="dive/httpd/">Apache httpd</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The server that dominated the early web and stayed dominant for decades because of one architectural bet: extensibility as the product. The module API (handlers, filters, per-directory config like .htaccess) and…</div></li>
-<li><span class="cat-name"><a href="https://github.com/caddyserver/caddy" rel="noopener">Caddy ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<li><span class="cat-name"><a href="dive/caddy/">Caddy</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A modern web server where the idioms do the hard work: Go's goroutines where nginx hand-rolls state machines, an HTTP middleware chain, and automatic-HTTPS as a first-class subsystem rather than a bolt-on. Read…</div></li></ul>
 </details>
 <details class="catalog-group">
