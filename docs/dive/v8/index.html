@@ -179,7 +179,7 @@ bet retracted, wider bet placed.</p>
     Note over I,D: 10,000 calls later: add(&quot;a&quot;, 1)
     I-&gt;&gt;D: guard fails → DeoptimizationEntry_Eager (builtins-x64.cc:5594)
     D-&gt;&gt;D: DoComputeOutputFrames rebuilds Ignition frames&lt;br/&gt;from TranslatedState (translated-state.h:48)
-    D--&gt;&gt;I: resume in interpreter; feedback byte widens (kAny)
+    D--&gt;&gt;I: resume in interpreter, feedback byte widens (kAny)
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
 <div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="lazy-compile-with-room-for-guesses">Lazy compile, with room for guesses</h3>
 <p>The script is
