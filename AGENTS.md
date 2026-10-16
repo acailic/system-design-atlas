@@ -63,8 +63,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
   lives *in the bytecode* as operand bytes ("embedded feedback",
   `kFeedbackIsEmbedded`, globals.h) with in-place baseline patching
   (Sparkplug+, already shipped per src/flags/feature-flags.h); the
-  `--minor-ms` flag is gone — the Scavenger is the only young-gen
-  collector; IsolateGroup lives in src/init/ (not src/execution/);
+  MinorMS is not the shipped young-gen collector — the Scavenger
+  (Cheney semispace) is the default, with MinorMS behind the
+  off-by-default experimental `--minor-ms` flag
+  (flag-definitions.h:3857, read at scavenger.cc:990) and
+  MinorMarkSweepCollector still in-tree (minor-mark-sweep.h);
+  IsolateGroup lives in src/init/ (not src/execution/);
   and `turbolev` (Maglev graph builder feeding TurboFan) is
   flag-gated, so the sea-of-nodes path is still the default.
 - Parallel dive PRs collide in catalog.yaml/README.md/PATTERNS.md and the generated `docs/` (dive-count footers, index, sitemap): rebase onto main, union-resolve the source files (both dives' entries stay), recount README's "tracks N further" sentence by actually counting non-deep-dived catalog entries, then rebuild `docs/` instead of hand-merging generated HTML.
