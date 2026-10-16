@@ -47,7 +47,9 @@ restart; [Elasticsearch](deep-dives/elasticsearch.md) — the translog
 is the WAL that decouples "searchable" (refresh) from "durable" (flush);
 [ZooKeeper](deep-dives/zookeeper.md) — FileTxnLog appends every
 proposal and fsyncs before the follower acks, so election is just
-"highest log wins."
+"highest log wins"; [RocksDB](deep-dives/rocksdb.md) — one WAL
+multiplexed over column families whose CF-tagged record types double
+as a prepare/commit/rollback transaction protocol.
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -152,7 +154,10 @@ resync periods as a safety net under the event stream;
 background thread moving buckets under the same stripe locks the
 request path uses; [Lua](deep-dives/lua.md) — the GC advances in
 allocation-debt-paced steps (`luaC_step`) so a guest language never
-pauses its host's frame budget.
+pauses its host's frame budget; [RocksDB](deep-dives/rocksdb.md) —
+compaction budgets made explicit: a token-bucket rate limiter throttles
+background I/O while a stall ladder turns overload into published,
+steerable slowdown states.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -191,7 +196,9 @@ phones to airliners; [LevelDB](deep-dives/leveldb.md) — `Env` as the
 whole OS surface; [nginx](deep-dives/nginx.md) — event-module vtables
 (epoll/kqueue/select behind one macro);
 [libuv](deep-dives/libuv.md) — the whole product is this pattern: one
-loop core, one `uv__io_poll` per platform.
+loop core, one `uv__io_poll` per platform;
+[RocksDB](deep-dives/rocksdb.md) — `Env` later split into `FileSystem`
++ `SystemClock` when the single OS seam itself grew too broad.
 
 **Why it recurs:** portability is architectural, not a build flag; the
 interface is where testing doubles (in-memory VFS, memdb) come from.

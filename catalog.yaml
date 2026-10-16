@@ -151,7 +151,7 @@ projects:
     license: GPL-2.0 OR Apache-2.0
     domains: [storage-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 3 }
     why: >
       LevelDB's design pushed to production extremes: column families, tiered
