@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RocksDB: LevelDB paged into Flash-scale production — column families, budgets, and a tuning surface — System Design Atlas</title>
+<meta name="description" content="LevelDB is the textbook LSM engine; RocksDB is what that textbook became after a decade of carrying production traffic (Facebook's MySQL storage, TiKV, Flink state) on Flash hardware shared ">
+<meta property="og:title" content="RocksDB: LevelDB paged into Flash-scale production — column families, budgets, and a tuning surface — System Design Atlas">
+<meta property="og:description" content="LevelDB is the textbook LSM engine; RocksDB is what that textbook became after a decade of carrying production traffic (Facebook's MySQL storage, TiKV, Flink state) on Flash hardware shared ">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/rocksdb/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/rocksdb/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-put-on-a-column-family-into-the-shared-wal-and-back-out-of-get">Walkthrough: one Put on a column family, into the shared WAL and back out of Get</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>RocksDB: LevelDB paged into Flash-scale production — column families, budgets, and a tuning surface</h1>
+    <div class="meta-chips"><span class="chip domain">storage-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/facebook/rocksdb" rel="noopener">GPLv2 OR Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>a215c38a8ed34848edc152f7435eabc128208111</code> · 2026-10-14 · <a href="https://github.com/facebook/rocksdb" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">LevelDB is the textbook LSM engine; RocksDB is what that textbook became
+after a decade of carrying production traffic (Facebook&#39;s MySQL storage,
+TiKV, Flink state) on Flash hardware shared with everything else. The
+skeleton is unchanged — WAL, memtable skip list, immutable SSTables,
+levels, manifest — so read the <a href="../leveldb/">LevelDB dive</a> first; this
+dive teaches what production <em>did to</em> that design: <strong>one WAL and one
+manifest multiplexed across column families, a stall ladder and token
+bucket that turn overload into explicit budgets, compaction as a
+pluggable filing style, and reads that skip the big lock entirely</strong>. It
+is an education in how constraints, not taste, evolve an architecture.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>From one kid&#39;s desk to an office building.</strong> LevelDB was one desk:
+one diary (the WAL), one scratch page (the memtable), one tidy-up robot
+(compaction). RocksDB turned the desk into a shared building: many rooms
+(column families), each with its own scratch pages and folder drawers
+and even its own filing style (leveled or tiered compaction) — but only
+ONE front desk and ONE diary. Every visitor queues at the front desk
+(the write group); the first in line takes the whole crowd&#39;s papers and
+writes them into the shared diary in one pen stroke (one WAL append for
+many tenants), then everyone scribbles into their own room&#39;s scratch
+page. A budget office (the rate limiter) says how many pages per hour
+the printers and shredders may move, and a building inspector (the write
+controller) slows or halts the front desk when rooms overflow.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when one machine runs storage for
+many workloads at once, fairness and memory bounds stop being tuning
+advice and become part of the data structure — so the budget moved into
+the engine itself.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph write[&quot;write path — write groups (lock-free queue)&quot;]
+        PUT[&quot;Write batch, cf handle — DBImpl::WriteImpl&lt;br/&gt;db/db_impl/db_impl_write.cc 881&quot;]
+        PPW[&quot;PreprocessWrite 2157 —&lt;br/&gt;WAL size / WBM / stall ladder&quot;]
+        WG[&quot;WriteThread::EnterAsBatchGroupLeader 443 —&lt;br/&gt;compat rules, ≤ 1 MiB group&quot;]
+        WAL[&quot;one WAL append for the group&lt;br/&gt;(WriteGroupToWAL 2365)&lt;br/&gt;LevelDB&#39;s 32 KB block format + recyclable records&quot;]
+        INS[&quot;MemTableInserter 2045 —&lt;br/&gt;each CF-tagged record → that CF&#39;s memtable&lt;br/&gt;(InlineSkipList, concurrent inserts)&quot;]
+    end
+    subgraph cf[&quot;column families — per-room state&quot;]
+        CFD1[&quot;ColumnFamilyData 1&lt;br/&gt;memtable list + VersionStorageInfo&lt;br/&gt;+ MutableCFOptions (db/column_family.h 301)&quot;]
+        CFD2[&quot;ColumnFamilyData N&lt;br/&gt;its own compaction picker, filters, options&quot;]
+    end
+    subgraph bg[&quot;background — env thread pools&quot;]
+        FLUSH[&quot;flush pool (HIGH pri)&lt;br/&gt;FlushJob → BuildTable (db/builder.cc 74)&quot;]
+        COMP[&quot;compaction pool (LOW pri)&lt;br/&gt;leveled / universal / FIFO pickers&lt;br/&gt;subcompactions; RateLimiter throttles bytes&quot;]
+        MAN[&quot;MANIFEST — per-CF VersionEdits&lt;br/&gt;kColumnFamily = 200 (db/version_edit.h 53)&quot;]
+    end
+    subgraph read[&quot;read path — no DB mutex&quot;]
+        GET[&quot;DBImpl::GetImpl&lt;br/&gt;thread-local SuperVersion swap&lt;br/&gt;(db/column_family.cc 1401)&quot;]
+        VER[&quot;mem → imm → current Version&lt;br/&gt;full/partitioned Bloom + Ribbon filters&quot;]
+    end
+
+    PUT --&gt; PPW --&gt; WG --&gt; WAL --&gt; INS
+    INS --&gt; CFD1 &amp; CFD2
+    CFD1 &amp; CFD2 --&gt; FLUSH --&gt; COMP --&gt; MAN
+    GET --&gt; VER
+    VER -.-&gt;|&quot;immutable files&quot;| COMP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li>One <code>DBImpl</code> owns the write thread, the WAL set, the manifest, and the
+thread pools; each <code>ColumnFamilyData</code> (<code>db/column_family.h:301</code>) owns
+its memtable list, its level layout (<code>VersionStorageInfo</code>), and its
+mutable options — the per-room state. <code>ColumnFamilySet</code> is the
+building directory.</li>
+<li>The <strong>spine</strong> — one <code>Put</code> on a named column family — is:
+<code>DBImpl::WriteImpl</code> (881) → <code>write_thread_.JoinBatchGroup</code> (1113) →
+leader: <code>PreprocessWrite</code> (2157) → <code>EnterAsBatchGroupLeader</code> (1210) →
+<code>WriteGroupToWAL</code> (2365) → <code>InsertInto</code> per-CF memtables (1126).</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-put-on-a-column-family-into-the-shared-wal-and-back-out-of-get">Walkthrough: one Put on a column family, into the shared WAL and back out of Get</h2>
+<p class="walkthrough-intro">The complete life of a RocksDB record — through the building LevelDB
+kept as a single desk. Step through it on the site, or read straight
+down.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Caller (Put, cf &quot;users&quot;)
+    participant WT as WriteThread queue
+    participant L as group leader
+    participant W as WAL (shared, all CFs)
+    participant M as users CF memtable (skip list)
+    participant BG as flush/compaction pools
+    participant R as Reader (Get)
+    C-&gt;&gt;WT: JoinBatchGroup (write_thread.cc 404)
+    WT-&gt;&gt;L: leader elected (lock-free newest_writer_ list)
+    L-&gt;&gt;L: PreprocessWrite 2157 — stall ladder, WBM, WAL switch
+    L-&gt;&gt;WT: EnterAsBatchGroupLeader 443 — group ≤ 1 MiB, compat rules
+    L-&gt;&gt;W: WriteGroupToWAL 2365 — one append, seq range assigned
+    Note over L,W: whole group durable together, atomic across CFs
+    L-&gt;&gt;M: InsertInto → MemTableInserter::SeekToColumnFamily&lt;br/&gt;(write_batch.cc 2045)
+    M-&gt;&gt;BG: memtable full → flush (HIGH pri) under WriteBufferManager budget
+    BG-&gt;&gt;BG: compaction (LOW pri): leveled or universal picker,&lt;br/&gt;RateLimiter grants bytes
+    BG-&gt;&gt;L: install via VersionSet::LogAndApply 6605 (per-CF edit)
+    R-&gt;&gt;R: GetImpl — thread-local SuperVersion (column_family.cc 1401), no mutex
+    R-&gt;&gt;M: mem → imm → levels; Bloom/Ribbon filters skip files
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="caller-picks-a-room">Caller picks a room</h3>
+<p>The batch is a flat byte string: a
+12-byte header (8-byte sequence + 4-byte count,
+<code>db/write_batch_internal.h:82</code>) followed by records, each tagged with a
+value type — and for non-default column families, a CF-tagged variant
+of that type plus the CF id (<code>kTypeColumnFamilyValue = 0x5</code> …
+<code>kTypeColumnFamilyRangeDeletion = 0xE</code>, <code>db/dbformat.h:41-78</code>). The same
+enum carries transaction markers (<code>kTypeBeginPrepareXID</code>,
+<code>kTypeCommitXID</code>, <code>kTypeRollbackXID</code>): the WAL stopped being a dumb log
+and became a protocol.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-front-desk-queue">The front desk queue</h3>
+<p><code>JoinBatchGroup</code>
+(<code>db/write_thread.cc:404</code>) CAS-links the writer onto a lock-free
+<code>newest_writer_</code> stack and, unless it is first, parks it with an atomic
+state wait (<code>AwaitState</code>). Whoever linked first becomes
+<code>STATE_GROUP_LEADER</code> — no mutex ever guards the queue itself.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-leader-checks-the-building">The leader checks the building</h3>
+<p><code>PreprocessWrite</code>
+(<code>db/db_impl/db_impl_write.cc:2157</code>) is LevelDB&#39;s <code>MakeRoomForWrite</code>
+grown into a ladder: WAL size over budget → <code>SwitchWAL</code>; the shared
+<code>WriteBufferManager::ShouldFlush()</code> (<code>include/rocksdb/write_buffer_manager.h:144</code>)
+→ schedule flushes; <code>WriteController</code> stopped or delaying →
+<code>DelayWrite</code>; WBM over hard limit → stall writers across all DBs
+sharing the manager.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="one-pen-stroke-for-the-whole-group">One pen stroke for the whole group</h3>
+<p><code>EnterAsBatchGroupLeader</code> (<code>db/write_thread.cc:443</code>) walks the queue
+and admits writers with compatible options — sync and non-sync never
+mix, WAL-disabled never mixes in, group capped at 1 MiB
+(<code>max_write_batch_group_size_bytes = 1 &lt;&lt; 20</code>,
+<code>include/rocksdb/options.h:1473</code>). The merged group is appended to the
+WAL in one call (<code>WriteGroupToWAL</code>, db_impl_write.cc:2365) — the record
+format is still LevelDB&#39;s 32 KB <code>&lt;crc|length|type&gt;</code> blocks, extended
+with recyclable records carrying the log number (<code>db/log_format.h</code>,
+types 5-8). One sequence range covers the whole group.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="scribble-into-each-room-s-scratch-page">Scribble into each room&#39;s scratch page</h3>
+<p>The leader replays
+the group through <code>WriteBatchInternal::InsertInto</code> (db_impl_write.cc:1126)
+into a <code>MemTableInserter</code> (<code>db/write_batch.cc:2045</code>), whose
+<code>SeekToColumnFamily</code> resolves each CF id via
+<code>ColumnFamilyMemTablesImpl::Seek</code> (<code>db/column_family.h:996</code>) and inserts
+into that CF&#39;s <code>InlineSkipList</code> (<code>memtable/skiplistrep.cc:18</code>) — the
+memtable skip list gained lock-free concurrent inserts precisely so the
+leader can hand followers their own inserts
+(<code>allow_concurrent_memtable_write</code> → <code>LaunchParallelMemTableWriters</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="the-page-fills-under-budget">The page fills, under budget</h3>
+<p>A flush can fire per-CF
+(memtable count, L0 trigger <code>level0_file_num_compaction_trigger = 4</code>)
+or building-wide (WBM crossing its shared soft limit).
+<code>MaybeScheduleFlushOrCompaction</code> (<code>db/db_impl/db_impl_compaction_flush.cc:3664</code>)
+dispatches flush jobs to the HIGH-priority pool and compactions to the
+LOW-priority pool; the flush writes an immutable SST via <code>BuildTable</code>
+(<code>db/builder.cc:74</code>), and every output byte asks the <code>GenericRateLimiter</code>
+token bucket for permission (<code>util/rate_limiter.cc:210</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="each-room-tidies-its-own-way">Each room tidies its own way</h3>
+<p>Compaction strategy is a
+per-CF picker: <code>LevelCompactionBuilder::PickCompaction</code>
+(<code>db/compaction/compaction_picker_level.cc:532</code>) scores levels
+(files-size / <code>MaxBytesForLevel</code>) exactly like LevelDB; the universal
+(tiered) picker merges whole <strong>sorted runs</strong> — an L0 file or an entire
+non-zero level — and fires on size amplification or run-count
+(<code>UniversalCompactionBuilder::PickCompaction</code>,
+<code>db/compaction/compaction_picker_universal.cc:69</code>, size-amp pick at
+line 193). The <code>CompactionIterator</code>
+(<code>db/compaction/compaction_iterator.h:142</code>) merges, drops versions
+below the oldest snapshot, and can split the key range into parallel
+subcompactions. Installation is still a manifest write:
+<code>VersionSet::LogAndApply</code> (<code>db/version_set.cc:6605</code>) appends per-CF
+edits, each record prefixed with <code>kColumnFamily = 200</code>
+(<code>db/version_edit.h:53-55</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="same-lsm-bargain-multiplexed-and-budgeted">Same LSM bargain, multiplexed and budgeted</h3>
+<p>The key was
+durable with its whole write group at step 4, in its room at step 5,
+and ordered later — exactly LevelDB&#39;s sequence, but one WAL append
+served many tenants, and every background byte was paid for out of a
+budget. Reads (<code>DBImpl::GetImpl</code> in
+<code>db/db_impl/db_impl_sync_and_async.h:155</code>) grab the CF&#39;s SuperVersion
+from thread-local storage — swap, not lock (<code>db/column_family.cc:1401</code>)
+— then walk mem → imm → levels past Bloom or Ribbon filters without the
+DB mutex.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="columnfamilydata-columnfamilyset-db-column-family-h-301">ColumnFamilyData / ColumnFamilySet (<code>db/column_family.h:301</code>)</h3>
+<p>Every per-CF concern is folded into one object: memtable list, level
+layout, mutable options, its own compaction picker, its own stall
+ladder state. The header&#39;s ASCII diagram (top of the file) is the map:
+handles → ColumnFamilySet → many ColumnFamilyData, each holding
+SuperVersions over Version + memtables. Why: a column family is
+LevelDB&#39;s whole <code>DBImpl</code> state minus the WAL and manifest, factored so
+those two stay <em>shared</em> (one log, one install point, atomic batches
+across CFs). Creation is a <code>VersionEdit</code> with <code>kColumnFamilyAdd</code>
+persisted in the MANIFEST (<code>ColumnFamilySet::CreateColumnFamily</code>,
+<code>db/column_family.cc:2012</code>) — not a file-format fork.</p>
+<h3 id="superversion-thread-local-swap-db-column-family-h-209">SuperVersion + thread-local swap (<code>db/column_family.h:209</code>)</h3>
+<p>A SuperVersion bundles the pointer triple <code>{mem, imm, current}</code> a read
+needs. Threads cache it in thread-local storage; a background install
+swaps <code>kSVObsolete</code> into every thread&#39;s slot
+(<code>ResetThreadLocalSuperVersions</code> from <code>InstallSuperVersion</code>,
+<code>db/column_family.cc:1449</code>), and readers re-check with a CAS on return
+(<code>GetThreadLocalSuperVersion</code>, line 1401). Why: the common read path
+never takes the DB mutex — generations, not locks. This is LevelDB&#39;s
+ref-counted <code>Version</code> idea pushed all the way off the lock.</p>
+<h3 id="the-cf-tagged-writebatch-db-write-batch-internal-h-82-db-dbformat-h-41">The CF-tagged WriteBatch (<code>db/write_batch_internal.h:82</code>, <code>db/dbformat.h:41</code>)</h3>
+<p>A flat byte string (header + records) whose record types double as a
+routing and transaction protocol: CF variants for WAL records,
+prepare/commit/rollback markers for transactions, blob indexes,
+user-defined-timestamp markers. Why: one append format gives group
+commit across CFs <em>and</em> 2PC <em>and</em> recovery replay into the right rooms,
+with no second log.</p>
+<h3 id="genericratelimiter-util-rate-limiter-cc-210">GenericRateLimiter (<code>util/rate_limiter.cc:210</code>)</h3>
+<p>A token bucket refilled every 100 ms (default), with one FIFO per I/O
+priority (IO_USER/HIGH/MID/LOW), randomized fairness between the
+non-user queues (<code>GeneratePriorityIterationOrderLocked</code>), and optional
+auto-tuning that raises/lowers the rate by 5% around a 50-90% drain
+band (<code>TuneLocked</code>). Why a <em>budget office</em>: on a shared host, &quot;how
+much background I/O is allowed&quot; is a correctness-of-SLO question, not a
+nicety — flushes and compactions <code>RequestToken</code> before writing.</p>
+<h3 id="filter-blocks-full-partitioned-bloom-or-ribbon-util-dynamic-bloom-h-34-include-rocksdb-filter-policy-h">Filter blocks: full, partitioned, Bloom or Ribbon (<code>util/dynamic_bloom.h:34</code>, <code>include/rocksdb/filter_policy.h</code>)</h3>
+<p>LevelDB put a small Bloom per data block; RocksDB defaults to a <strong>full
+filter</strong> (one per SST — one probe answers for the file), offers
+partitioned filters for cache-granular blocks, and adds <strong>Ribbon</strong>
+filters (~30% smaller for the same FP rate at ~3x build CPU). The
+<code>bloom_before_level</code> knob encodes the production insight: hot small
+levels want fast Bloom, cold deep levels want dense Ribbon
+(<code>include/rocksdb/filter_policy.h:180-215</code>).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Writers:</strong> the queue is a lock-free intrusive list
+(<code>newest_writer_</code>, <code>db/write_thread.cc:404-441</code>); the leader writes
+the WAL for the group, then either inserts all memtables itself or
+launches parallel memtable writers (each follower inserts its own
+batch into the CF&#39;s lock-free skip list). <code>two_write_queues_</code> adds a
+second write thread so WritePrepared transactions can write WAL and
+memtables concurrently.</li>
+<li><strong>Readers:</strong> SuperVersion thread-local swap (above) — no mutex, no
+copy; snapshots are still just sequence numbers.</li>
+<li><strong>Stall ladder (<code>GetWriteStallConditionAndCause</code>,
+<code>db/column_family.cc:1021</code>):</strong> three causes — memtable count, L0
+file count, pending-compaction bytes (soft 64 GiB / hard 256 GiB
+defaults) — each with a <em>Delayed</em> and a <em>Stopped</em> severity, plus the
+WBM&#39;s cross-DB stall. The WriteController hands out delay and stop
+<em>tokens</em> (<code>db/write_controller.h:41,46</code>); <code>no_slowdown</code> writers get
+<code>Incomplete</code> instead of waiting. This is LevelDB&#39;s two triggers
+turned into a designed control surface with published events
+(<code>OnStallConditionsChanged</code> events,
+<code>include/rocksdb/listener.h:866</code>).</li>
+<li><strong>Background:</strong> env thread pools — flushes on HIGH, compactions on
+LOW, bounded by <code>max_background_flushes/compactions</code>
+(<code>MaybeScheduleFlushOrCompaction</code>, 3664). Compactions may split into
+subcompactions for range parallelism.</li>
+<li><strong>Failure/recovery:</strong> startup replays the MANIFEST per CF
+(<code>version_edit_handler.cc</code>), then the shared WALs, routing each
+CF-tagged record to its room (<code>DBImpl::RecoverLogFiles</code>,
+<code>db/db_impl/db_impl_open.cc:1237</code>); transaction markers let
+uncommitted prepares be skipped or committed on recovery. A WAL
+cannot be retired until every CF has flushed past it — the price of
+one shared log. Orphan SSTs from crashed flushes are adopted or GC&#39;d
+after the install, same rule as LevelDB: <em>installation is the
+manifest write</em>.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph fg[&quot;foreground&quot;]
+        WQ[&quot;lock-free writer queue&lt;br/&gt;group leader + followers&quot;]
+        STALL[&quot;stall ladder — column_family.cc 1021&lt;br/&gt;memtables / L0 files / pending bytes&lt;br/&gt;each: Delayed then Stopped&quot;]
+    end
+    subgraph budgets[&quot;explicit budgets&quot;]
+        WBM[&quot;WriteBufferManager&lt;br/&gt;shared memory soft limit&lt;br/&gt;(write_buffer_manager.h 144)&quot;]
+        RL[&quot;GenericRateLimiter&lt;br/&gt;token bucket, 4 IO priorities&lt;br/&gt;(rate_limiter.cc 210)&quot;]
+    end
+    subgraph bgd[&quot;background pools&quot;]
+        HI[&quot;HIGH: flush&quot;]
+        LO[&quot;LOW: compaction&lt;br/&gt;leveled / universal / FIFO per CF&quot;]
+    end
+    WQ --&gt;|PreprocessWrite| STALL
+    STALL --&gt; HI
+    WBM -.-&gt;|&quot;ShouldFlush / ShouldStall&quot;| STALL
+    HI --&gt; LO
+    RL -.-&gt;|&quot;grants output bytes&quot;| HI &amp; LO
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li>The public surface (<code>include/rocksdb/</code>) keeps LevelDB&#39;s shape —
+<code>DB::Put/Get/Delete/Write</code>, <code>Iterator</code>, <code>WriteBatch</code> — but every
+operation takes a <code>ColumnFamilyHandle*</code>, and the surface grew a
+second tier: <code>TransactionDB</code> / <code>OptimisticTransactionDB</code> (three
+write policies, <code>include/rocksdb/utilities/transaction_db.h:28-36</code>),
+<code>DBWithTTL</code>, backups, checkpoints, <code>SstFileWriter</code> ingestion, a
+secondary read-only mode, external compaction via <code>CompactionService</code>.</li>
+<li><strong>Seams, all pluggable:</strong> <code>MemTableRep</code> (skip list, hash-skiplist,
+vector), <code>TableFactory</code> (block-based, plain, cuckoo), <code>FilterPolicy</code>
+(Bloom/Ribbon/custom), <code>MergeOperator</code>, <code>CompactionFilter</code>,
+<code>Comparator</code> with user-defined timestamps, <code>Env</code> split into
+<code>FileSystem</code> + <code>SystemClock</code>, <code>EventListener</code> (stall, flush,
+compaction events), <code>Statistics</code>/<code>PerfContext</code>, <code>WriteBufferManager</code>,
+<code>RateLimiter</code>, <code>ConcurrentTaskLimiter</code>.</li>
+<li>Honest wart: <strong>options became a language.</strong> Hundreds of interacting
+knobs (per-CF mutable via <code>SetOptions</code>), a <code>Configurable</code> system to
+serialize them, whole wikis of tuning guidance. This is the tax of
+being everyone&#39;s storage engine — the interface that stayed small
+(LevelDB&#39;s) couldn&#39;t have survived; the one that grew pays in
+operability.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-shared-wal-multiplexed-over-column-families">Trade-off 1: one shared WAL multiplexed over column families</h3>
+<ul>
+<li><strong>Tension:</strong> tenants want isolated lifecycle (retire old logs, tune,
+drop) but writes must be atomic across rooms and cheap to make
+durable.</li>
+<li><strong>Choice:</strong> a single WAL whose records carry CF ids; one append per
+write group covers all CFs; the MANIFEST carries CF create/drop.</li>
+<li><strong>Evidence:</strong> <code>WriteGroupToWAL</code> (db_impl_write.cc:2365) writes the
+merged group once; <code>MemTableInserter::SeekToColumnFamily</code>
+(write_batch.cc:2045) routes on replay; CF ops are <code>VersionEdit</code>
+tags (<code>db/version_edit.h:53-55</code>).</li>
+<li><strong>Given up:</strong> per-CF WAL independence — a WAL lives until <em>every</em> CF
+has flushed past it (<code>SwitchWAL</code> coupling in <code>PreprocessWrite</code>);
+recovery replays all rooms; one hot tenant&#39;s flush pressure touches
+the shared budget (WBM).</li>
+<li><strong>Verdict:</strong> right when cross-CF atomicity and one fsync for many
+tenants matter (most applications); wrong if tenants are truly
+adversarial strangers — give them separate DBs.</li>
+</ul>
+<h3 id="trade-off-2-tiered-universal-compaction-as-a-peer-of-leveled">Trade-off 2: tiered (universal) compaction as a peer of leveled</h3>
+<ul>
+<li><strong>Tension:</strong> leveled compaction re-reads/re-writes data as it sinks
+through levels (write amplification); Flash-era workloads would
+rather pay reads than rewrites.</li>
+<li><strong>Choice:</strong> compaction is a per-CF picker. Universal merges whole
+sorted runs and triggers on size amplification or run count
+(<code>PickCompactionToReduceSizeAmp</code>, compaction_picker_universal.cc:193);
+leveled stays the default; FIFO exists for TTL-ish caches.</li>
+<li><strong>Evidence:</strong> the two builders side by side —
+<code>LevelCompactionBuilder::PickCompaction</code>
+(compaction_picker_level.cc:532, score = level size / target) vs
+<code>UniversalCompactionBuilder</code> sorting runs by age/size
+(compaction_picker_universal.cc:69, <code>SortedRun</code> struct).</li>
+<li><strong>Given up:</strong> tiered trades bounded read amplification away — point
+reads and scans touch more sorted runs, so filters and
+<code>max_read_amp</code> tuning become load-bearing.</li>
+<li><strong>Verdict:</strong> right for write-heavy streams where SSD writes are the
+scarce resource; wrong for read-hot indexes, where leveled + Bloom
+wins. RocksDB&#39;s answer is telling: don&#39;t choose globally — make
+strategy per-room.</li>
+</ul>
+<h3 id="trade-off-3-explicit-budgets-token-bucket-stall-ladder-over-best-effort-background-work">Trade-off 3: explicit budgets (token bucket + stall ladder) over best-effort background work</h3>
+<ul>
+<li><strong>Tension:</strong> LevelDB&#39;s stalls existed (slowdown/stop triggers) but
+compaction I/O was unregulated; on a shared host that starves
+co-tenants and SLOs.</li>
+<li><strong>Choice:</strong> all background I/O passes the rate limiter (user-settable
+bytes/sec per priority); memory has a shared WBM budget; overload
+surfaces as a published stall ladder with tokens.</li>
+<li><strong>Evidence:</strong> <code>GenericRateLimiter::RequestImpl</code> (rate_limiter.cc:210)
+with per-priority FIFOs and partial grants;
+<code>WriteBufferManager::ShouldFlush/ShouldStall</code>
+(write_buffer_manager.h:144,169);
+<code>GetWriteStallConditionAndCause</code> (column_family.cc:1021).</li>
+<li><strong>Given up:</strong> peak throughput (budgets deliberately leave headroom)
+and a real tuning burden — the knobs in trade-off 2 and here
+interact.</li>
+<li><strong>Verdict:</strong> right whenever the engine shares a machine or an SLO
+(the MySQL/TiKV reality it was built for); wrong for a dedicated
+appliance chasing benchmark numbers, where ceilings only cost you.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>include/rocksdb/db.h</code> + <code>include/rocksdb/write_batch.h</code> — compare
+against LevelDB&#39;s <code>db.h</code>: every method grew a
+<code>ColumnFamilyHandle*</code>; note the surface tiers
+(transactions, TTL, backups live in <code>include/rocksdb/utilities/</code>).</li>
+<li><code>db/column_family.h</code> (whole file header comment) — the ASCII
+diagram of handles → ColumnFamilySet → ColumnFamilyData →
+SuperVersion → Version/memtables is the architecture in one picture.</li>
+<li><code>db/db_impl/db_impl_write.cc:DBImpl::WriteImpl</code> (881) — the write
+spine; identify the three states a writer can end in
+(completed-by-leader, parallel memtable writer, group leader).</li>
+<li><code>db/write_thread.cc:JoinBatchGroup</code> (404) and
+<code>EnterAsBatchGroupLeader</code> (443) — the lock-free queue mechanics and
+the group compatibility rules (sync/WAL/size).</li>
+<li><code>db/db_impl/db_impl_write.cc:PreprocessWrite</code> (2157) — the stall
+ladder, WBM flush, and WAL-size switch; then
+<code>WriteGroupToWAL</code> (2365) and <code>MergeBatch</code> (2277) for the one-append
+trick.</li>
+<li><code>db/write_batch.cc:MemTableInserter</code> (2045) with
+<code>SeekToColumnFamily</code>, and <code>db/dbformat.h:41-78</code> — record types as
+routing/transaction protocol; then
+<code>db/column_family.h:ColumnFamilyMemTablesImpl</code> (996).</li>
+<li><code>db/log_format.h</code> (~35 lines) — diff against LevelDB&#39;s identical
+file: recyclable records, compression-type and timestamp records,
+WAL-verification records.</li>
+<li><code>db/column_family.cc:GetThreadLocalSuperVersion</code> (1401) and
+<code>InstallSuperVersion</code> (1449) — the kSVInUse/kSVObsolete swap; read
+the invariant comment carefully.</li>
+<li><code>db/db_impl/db_impl_sync_and_async.h</code> (<code>GetImpl</code> body, line 155) —
+read spine: SuperVersion → snapshot seq → <code>sv-&gt;mem-&gt;Get</code> →
+<code>sv-&gt;imm-&gt;Get</code> → <code>sv-&gt;current-&gt;Get</code>.</li>
+<li><code>db/db_impl/db_impl_compaction_flush.cc:MaybeScheduleFlushOrCompaction</code>
+(3664) — pool split and limits; then <code>db/builder.cc:BuildTable</code>
+(74) for the flush output.</li>
+<li><code>db/compaction/compaction_picker_level.cc:LevelCompactionBuilder::PickCompaction</code>
+(532) then <code>db/compaction/compaction_picker_universal.cc</code> (69, 193)
+— one mechanism, two filing styles; then
+<code>db/compaction/compaction_iterator.h:142</code> for the merge/drop rules.</li>
+<li><code>util/rate_limiter.cc:RequestImpl</code> (210) +
+<code>RefillBytesAndGrantRequestsLocked</code> — the budget office; then
+<code>db/version_set.cc:LogAndApply</code> (6605) — installation is still the
+manifest write, now grouped per CF like the write path.</li>
+</ol>
+<p>You have now traced the same key the LevelDB dive traced — WAL,
+memtable, flush, compaction, manifest, Get — through a building instead
+of a desk, and seen every production pressure that reshaped it.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Multiplex tenants over one log</strong> (CF-tagged records): one fsync
+buys atomic multi-tenant batches — isolation where it pays (options,
+layout), sharing where it counts (durability).</li>
+<li><strong>Make the read path generation-based, not lock-based</strong>: publish
+immutable SuperVersions and swap thread-local slots (kSVInUse /
+kSVObsolete) — readers never queue behind installers.</li>
+<li><strong>Ladder your backpressure and budget your I/O</strong>: delay tokens →
+stop tokens → cross-instance stalls, plus a token bucket with
+priorities, turn &quot;overloaded&quot; into a managed state machine instead of
+a failure.</li>
+<li><strong>Separate compaction policy from mechanism</strong>: pickers choose <em>what</em>
+to merge; the job machinery only executes — that seam is why
+leveled, tiered, FIFO, and even remote compaction services coexist.</li>
+<li><strong>Match filter technology to level temperature</strong> (Bloom hot, Ribbon
+deep): the same dial-thinking applied to read amplification, not
+just write amplification.</li>
+<li><strong>When your API surface becomes a language, own it</strong>: Configurable
+serialization and per-CF <code>SetOptions</code> beat pretending hundreds of
+knobs aren&#39;t there.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — the pairing dive is mandatory
+(<a href="../leveldb/">LevelDB</a>); at ~900K lines of C++ (tests included) you
+read along the spine, not cover to cover.</li>
+<li>Budget: ~10-12 hours for the reading path; the <code>db/</code> + <code>db/compaction/</code><ul>
+<li><code>db/db_impl/</code> core repays several focused sittings.</li>
+</ul>
+</li>
+<li>Prerequisites: LevelDB dive&#39;s concepts (WAL framing, levels, manifest
+edits), C++11 atomics and thread-local storage, token-bucket basics,
+Bloom-filter math (bits per key vs FP rate).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The RocksDB wiki (<a href="https://github.com/facebook/rocksdb/wiki">https://github.com/facebook/rocksdb/wiki</a>) — read
+&quot;Column Families&quot;, &quot;Universal Compaction&quot;, &quot;Rate Limiter&quot;, and
+&quot;Write Stalls&quot; as the production post-mortems of LevelDB&#39;s design.</li>
+<li>The <a href="../leveldb/">LevelDB deep-dive</a> in this atlas — the before
+picture this dive deliberately builds on.</li>
+<li>The in-repo Ribbon filter post: <code>docs/_posts/2021-12-29-ribbon-filter.markdown</code>.</li>
+<li>MyRocks (MySQL on RocksDB) and TiKV (KV on RocksDB) design docs —
+what the budget and CF machinery looks like from a consumer.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../haproxy/"><span class="dir">← Previous dive</span>HAProxy: a proxy where every hot path runs against a visible budget</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 29 of 29 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
