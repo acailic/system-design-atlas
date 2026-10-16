@@ -116,7 +116,7 @@ flowchart TD
 - **The spine** — one HTTPS request — is: TLS listener → Go's
   per-connection goroutine → handshake (`GetConfigForClient` picks a
   connection policy by SNI, `modules/caddytls/connpolicy.go:118`;
-  `GetCertificate` may issue on-demand, `connpolicy.go:288`) →
+  `GetCertificate` may issue on-demand, `connpolicy.go:292`) →
   `Server.ServeHTTP` (`modules/caddyhttp/server.go:598`) → header
   hygiene + ACME-challenge shortcut (`serveHTTP`, 846; challenge served
   *before* user handlers at 759) → the pre-compiled route chain
@@ -170,7 +170,7 @@ policy's `tls.Config` — each site effectively has its own TLS world
 (cipher suites, client auth, ALPN) behind one shared listener.
 
 **Step 3 — The certificate is a subsystem call.** The policy's
-`GetCertificate` closure (`connpolicy.go:288`) looks up the pre-built
+`GetCertificate` closure (`connpolicy.go:292`) looks up the pre-built
 CertMagic config for the name (`tls.go:getConfigForName`, 897) and
 delegates. The cert is in the cache because at startup
 `automaticHTTPSPhase2` (`modules/caddyhttp/autohttps.go:869`) called
@@ -255,7 +255,7 @@ inheritance rules.
 match wins, unmatched handshakes are refused. Why: thousands of sites
 with different TLS requirements behind one socket — per-handshake work
 is a map lookup, not a policy scan. Each policy's inner
-`GetCertificate` closure (288) resolves the name to a pre-built
+`GetCertificate` closure (292) resolves the name to a pre-built
 CertMagic config, which is where issuance, renewal, and on-demand logic
 live.
 
