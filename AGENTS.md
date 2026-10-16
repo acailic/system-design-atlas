@@ -58,4 +58,13 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 - When adding a deep-dive, also update: `status:` in catalog.yaml, the coverage list in README.md, and (if the codebase instantiates a recurring lesson) the "Seen in" lists in PATTERNS.md — see CONTRIBUTING.md checklist.
 - Upstream refactors happen: redis/sqlite/git/kafka/etcd have all recently moved core code (git's odb/ layer, kafka's log engine to storage module Java, etcd's raft extracted to etcd-io/raft, VS Code ext-host paths). Always grep for the function, never trust memory of layout.
+- V8 (dive #31, pinned 2026-10-16) drifted from common lore in four
+  places worth remembering if revisited: binary-op/compare feedback now
+  lives *in the bytecode* as operand bytes ("embedded feedback",
+  `kFeedbackIsEmbedded`, globals.h) with in-place baseline patching
+  (Sparkplug+, already shipped per src/flags/feature-flags.h); the
+  `--minor-ms` flag is gone — the Scavenger is the only young-gen
+  collector; IsolateGroup lives in src/init/ (not src/execution/);
+  and `turbolev` (Maglev graph builder feeding TurboFan) is
+  flag-gated, so the sea-of-nodes path is still the default.
 - Parallel dive PRs collide in catalog.yaml/README.md/PATTERNS.md and the generated `docs/` (dive-count footers, index, sitemap): rebase onto main, union-resolve the source files (both dives' entries stay), recount README's "tracks N further" sentence by actually counting non-deep-dived catalog entries, then rebuild `docs/` instead of hand-merging generated HTML.

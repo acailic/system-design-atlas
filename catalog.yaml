@@ -392,7 +392,7 @@ projects:
     license: BSD-3-Clause
     domains: [runtime, language]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 3 }
     why: >
       The fastest widely-deployed JS engine: Ignition interpreter, TurboFan

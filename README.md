@@ -98,9 +98,10 @@ Deep-dives (the exemplars — more added over time):
 - [PyTorch](deep-dives/pytorch.md) — define-by-run autograd: the eager pass records its own tape over a C++ dispatcher
 - [Servo](deep-dives/servo.md) — supervised message-passing pipelines: the constellation, a DOM pointer vocabulary for Rust + GC, layout as an in-thread visitor, runtime-switchable process topology
 - [HAProxy](deep-dives/haproxy.md) — budgeted tasklet scheduler, ebtree run queues, socket-handoff seamless reload
+- [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
 
-The catalog tracks 6 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — the Linux kernel, RocksDB, V8,
+The catalog tracks 5 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — the Linux kernel, RocksDB,
 and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors. Linux and Chromium are cataloged for
