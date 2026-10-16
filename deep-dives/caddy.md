@@ -418,7 +418,8 @@ flowchart TD
 - **Evidence:** `caddyfile/adapter.go:32` `Adapt` ends in
   `json.Marshal(cfg)` — the Caddyfile is never interpreted at runtime;
   `StrictUnmarshalJSON` (`modules.go:342`) makes unknown fields fatal;
-  `routes.go:160` "pre-compile the middleware handler chain";
+  `routes.go:180` "pre-compile the middleware handler chain"
+  (`ProvisionHandlers`, 160);
   `matchers.go:256` normalizes and sorts host lists at provision time
   so request-time matching binary-searches.
 - **Given up:** runtime loading of code (compile-time module graph —
@@ -496,7 +497,7 @@ flowchart TD
    before user handlers (ACME challenge in `ServeHTTP` at 759, header
    hygiene, strict SNI-Host enforcement).
 10. `modules/caddytls/connpolicy.go` — `ConnectionPolicies.TLSConfig`
-    (98) for the SNI index, then `buildStandardTLSConfig` (278) for
+    (98) for the SNI index, then `buildStandardTLSConfig` (279) for
     the `GetCertificate` closure; follow into
     `tls.go:getConfigForName` (897) and `ondemand.go:119` for the
     permission gate on handshake-time issuance.
