@@ -140,7 +140,7 @@ concurrency: an <code>If-Match</code> header with a config hash is checked in
 <li><strong>The spine</strong> — one HTTPS request — is: TLS listener → Go&#39;s
 per-connection goroutine → handshake (<code>GetConfigForClient</code> picks a
 connection policy by SNI, <code>modules/caddytls/connpolicy.go:118</code>;
-<code>GetCertificate</code> may issue on-demand, <code>connpolicy.go:288</code>) →
+<code>GetCertificate</code> may issue on-demand, <code>connpolicy.go:292</code>) →
 <code>Server.ServeHTTP</code> (<code>modules/caddyhttp/server.go:598</code>) → header
 hygiene + ACME-challenge shortcut (<code>serveHTTP</code>, 846; challenge served
 <em>before</em> user handlers at 759) → the pre-compiled route chain
@@ -192,7 +192,7 @@ policy&#39;s <code>tls.Config</code> — each site effectively has its own TLS w
 (cipher suites, client auth, ALPN) behind one shared listener.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-certificate-is-a-subsystem-call">The certificate is a subsystem call</h3>
 <p>The policy&#39;s
-<code>GetCertificate</code> closure (<code>connpolicy.go:288</code>) looks up the pre-built
+<code>GetCertificate</code> closure (<code>connpolicy.go:292</code>) looks up the pre-built
 CertMagic config for the name (<code>tls.go:getConfigForName</code>, 897) and
 delegates. The cert is in the cache because at startup
 <code>automaticHTTPSPhase2</code> (<code>modules/caddyhttp/autohttps.go:869</code>) called
@@ -270,7 +270,7 @@ inheritance rules.</p>
 match wins, unmatched handshakes are refused. Why: thousands of sites
 with different TLS requirements behind one socket — per-handshake work
 is a map lookup, not a policy scan. Each policy&#39;s inner
-<code>GetCertificate</code> closure (288) resolves the name to a pre-built
+<code>GetCertificate</code> closure (292) resolves the name to a pre-built
 CertMagic config, which is where issuance, renewal, and on-demand logic
 live.</p>
 <h3 id="the-certificate-cache-automation-policies-modules-caddytls-tls-go">The certificate cache + automation policies (<code>modules/caddytls/tls.go</code>)</h3>
