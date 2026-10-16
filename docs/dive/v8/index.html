@@ -109,7 +109,7 @@ cheaply retracting (deopt + GC), not on the language itself.</p>
     EMB[&quot;embedder: Chrome / Node / d8&lt;br/&gt;v8::Isolate + v8::Platform&quot;]
 
     SRC --&gt; FE --&gt; IGN --&gt; T1
-    T1 --&gt;|&quot;budget interrupt, ~1k calls&quot;| T3
+    T1 --&gt;|&quot;budget interrupt, ~400 calls&quot;| T3
     T1 --&gt;|&quot;Sparkplug, early&quot;| T2
     T3 --&gt;|&quot;~3k calls&quot;| T4
     T2 &amp; T3 &amp; T4 -.-&gt;|&quot;guard fails → deopt&quot;| T1
@@ -172,7 +172,7 @@ bet retracted, wider bet placed.</p>
     S-&gt;&gt;I: lazy compile → BytecodeArray: Ldar, Add, Return
     I-&gt;&gt;F: Add handler (interpreter-generator.cc:1052) runs Smi path,&lt;br/&gt;records kSignedSmall via binary-op-assembler.cc:27
     I-&gt;&gt;T: FeedbackCell budget hits zero →&lt;br/&gt;Runtime_BytecodeBudgetInterrupt_Ignition
-    T-&gt;&gt;T: ShouldOptimize: invocation counts&lt;br/&gt;(maglev 1000 / turbofan 3000)
+    T-&gt;&gt;T: ShouldOptimize: invocation counts&lt;br/&gt;(maglev 400 / turbofan 3000)
     T-&gt;&gt;O: queue Maglev, then TurboFan job
     O-&gt;&gt;O: PrepareJobImpl (main thread, heap broker) →&lt;br/&gt;ExecuteJobImpl (background: graph, inlining, lowering) →&lt;br/&gt;FinalizeJobImpl (install + dependencies Commit)
     O--&gt;&gt;I: optimized add(int32/double + guards), entry via JSDispatchTable
@@ -217,8 +217,8 @@ negative: the trampoline calls <code>Runtime_BytecodeBudgetInterrupt_Ignition</c
 (<code>src/runtime/runtime-internal.cc:482</code>) →
 <code>TieringManager::OnInterruptTick</code> (<code>src/execution/tiering-manager.cc:585</code>)
 → <code>ShouldOptimize</code> (<code>:434</code>) against invocation counts: Maglev at
-~1000 invocations, TurboFan at ~3000
-(<code>src/flags/flag-definitions.h:1120</code> and <code>:1140</code>). No timers, no
+~400 invocations on desktop (1000 under <code>ANDROID</code>), TurboFan at ~3000
+(<code>src/flags/flag-definitions.h:1123</code> and <code>:1140</code>). No timers, no
 profilers — promotion is paid for in the hot path itself.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="optimize-off-the-hot-path">Optimize off the hot path</h3>
 <p>The TurboFan job is a
@@ -552,7 +552,8 @@ engine runs on: IC states and binary-operation feedback. These
 enums are the contract between every tier.</li>
 <li><code>src/execution/tiering-manager.cc:585 OnInterruptTick</code> and <code>:434 ShouldOptimize</code> — the promotion decision; cross-check thresholds
 in <code>src/flags/flag-definitions.h:1115–1140</code> (feedback at 8 calls,
-Maglev at 1000, TurboFan at 3000, OSR at 500).</li>
+Maglev at 400 on desktop, 1000 on Android, TurboFan at 3000, OSR
+at 500).</li>
 <li><code>src/compiler/pipeline.cc:505</code> — <code>PipelineCompilationJob</code>: read
 <code>PrepareJobImpl</code> (<code>:692</code>), <code>ExecuteJobImpl</code> (<code>:761</code>), and
 <code>FinalizeJobImpl</code> (<code>:804</code>) in order; notice which thread each
