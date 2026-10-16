@@ -152,7 +152,10 @@ resync periods as a safety net under the event stream;
 background thread moving buckets under the same stripe locks the
 request path uses; <a href="../dive/lua/">Lua</a> — the GC advances in
 allocation-debt-paced steps (<code>luaC_step</code>) so a guest language never
-pauses its host&#39;s frame budget.</p>
+pauses its host&#39;s frame budget; <a href="../dive/linux/">linux</a> —
+kswapd reclaims memory in budgeted background passes so allocation
+never stalls on a full scan, and readahead turns one small read into
+a window of prefetched I/O so the next reads hit the page cache.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -195,7 +198,11 @@ snapshots from the procarray; <a href="../dive/kubernetes/">Kubernetes</a> —
 resourceVersion optimistic concurrency over every object; <a href="../dive/leveldb/">LevelDB</a> —
 compaction drops versions below the oldest live snapshot; <a href="../dive/etcd/">etcd</a>
 — the whole keyspace is revision-stamped history, watch replays it,
-compaction truncates it.</p>
+compaction truncates it; <a href="../dive/linux/">linux</a> — RCU is the
+same bet at memory granularity: readers walk page-cache and dentry
+structures under <code>rcu_read_lock</code> with no locks at all, writers
+publish replacements atomically, and reclamation waits a grace
+period (<code>synchronize_rcu</code>).</p>
 <p><strong>Why it recurs:</strong> locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.</p>
 <p><strong>Reach for it when:</strong> read concurrency matters more than write
@@ -235,7 +242,11 @@ ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
 <a href="../dive/servo/">Servo</a> — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
-so shells and C hosts (servoshell, ffi/capi) extend without forking.</p>
+so shells and C hosts (servoshell, ffi/capi) extend without forking;
+<a href="../dive/linux/">linux</a> — vtables at every layer joint
+(<code>file_operations</code>, <code>sched_class</code>) let thousands of filesystems and
+drivers — and, via sched_ext, even whole CPU scheduling policies as
+BPF programs — extend a monolith without forking it.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -272,7 +283,10 @@ autograd kernels, backward nodes, and dispatch registrations for
 2,000+ operators from one schema pair;
 <a href="../dive/servo/">Servo</a> — 576 WebIDL files are code-generated
 into Rust DOM bindings and JS glue, so the web API surface cannot
-drift from its implementations.</p>
+drift from its implementations; <a href="../dive/linux/">linux</a> —
+<code>syscall_64.tbl</code> is the frozen syscall ABI as one data file, from
+which the dispatch switch, the <code>__x64_sys_*</code> stubs, and the tracing
+table are all generated.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>
