@@ -568,7 +568,7 @@ projects:
     license: BSD-3-Clause AND others
     domains: [browser-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 2 }
     why: >
       The most dominant browser engine ever and the codebase behind
@@ -576,9 +576,9 @@ projects:
       utility processes), Mojo IPC, the V8/Blink split. Its process
       architecture — splitting rendering into sandboxed, killable
       processes — is what let Chrome win on security and stability while
-      rivals stayed monolithic. Cataloged for completeness and targeted
-      reading only; the atlas-level lesson is how a security model forced
-      the architecture, at the cost of enormous IPC complexity.
+      rivals stayed monolithic. The atlas-level lesson is how a security
+      model forced the architecture, at the cost of enormous IPC
+      complexity.
 
   # ── distributed systems ───────────────────────────────────────────────
 
