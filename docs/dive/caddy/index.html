@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines — System Design Atlas</title>
+<meta name="description" content="Caddy is the web server that took the same requirements nginx solved in C — thousands of concurrent connections, zero-downtime reload, TLS at scale — and answered them by deleting the mechan">
+<meta property="og:title" content="Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines — System Design Atlas">
+<meta property="og:description" content="Caddy is the web server that took the same requirements nginx solved in C — thousands of concurrent connections, zero-downtime reload, TLS at scale — and answered them by deleting the mechan">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/caddy/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/caddy/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-https-request-handshake-to-deferred-log-line">Walkthrough: one HTTPS request, handshake to deferred log line</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines</h1>
+    <div class="meta-chips"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-gentle">difficulty: gentle</span><span class="chip">license: <a href="https://github.com/caddyserver/caddy" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>0584875297136c982cba95d0f889d6b851ace083</code> · 2026-10-16 · <a href="https://github.com/caddyserver/caddy" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Caddy is the web server that took the same requirements nginx solved in
+C — thousands of concurrent connections, zero-downtime reload, TLS at
+scale — and answered them by <em>deleting the mechanisms</em>. There is no
+event loop, no worker process model, and no hand-rolled HTTP parser in
+the core: Go&#39;s runtime provides the concurrency (<code>go srv.Serve(ln)</code> and
+goroutine-per-connection under it), Go&#39;s <code>net/http</code> provides the
+protocol machinery, and the one thing Caddy itself designs carefully is
+<strong>the configuration lifecycle</strong> — a typed JSON document provisioned into
+compiled closures and atomically swapped while both old and new
+generations serve on the same ports via <code>SO_REUSEPORT</code>. The second
+thing it designs that nobody else made architectural is <strong>automatic
+HTTPS</strong>: certificate issuance is a subsystem that rewrites your config
+during provisioning, serves ACME challenges before your own handlers,
+and can issue a certificate mid-handshake. This deep-dive teaches where
+the idioms of a managed runtime genuinely replace hand-built
+architecture — and where Caddy still had to build architecture anyway
+(reload, graceful shutdown), the parts that stay hard in any language.</p>
+<p>Read it against the <a href="../nginx/">nginx</a> dive (what disappears when the
+runtime schedules your I/O) and the <a href="../httpd/">Apache httpd</a> dive (how
+a runtime-extension platform compares to a compile-time module graph).</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A hotel where every guest gets their own helper — and the rulebook can
+be swapped without waking anyone.</strong> In nginx&#39;s ice-cream shop the workers
+take tiny turns so nobody waits; in Caddy&#39;s hotel the town simply
+provides endless helpers (goroutines), so when a guest (connection)
+arrives, one helper walks them all the way to their room — the helper
+can <em>wait</em> at the elevator without blocking anyone, because waiting is
+the town&#39;s job, not the helper&#39;s. The hotel has one big rulebook (the
+JSON config): to change it, the front desk (the core) builds a <em>brand
+new</em> rulebook first, hires new staff on it, lets them work at the same
+doors at the same time (both rulebooks listen on the same port
+together), and only then retires the old staff once they finish with
+their current guests. And the hotel orders name badges (TLS
+certificates) automatically for every name on its mailboxes — from the
+official badge office (the ACME certificate authority) — before guests
+arrive, or even while one is ringing the bell (on-demand TLS, issued
+during the handshake).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when the language runtime already
+schedules thousands of waiting helpers cheaply, your design budget is
+better spent on the two things the runtime can&#39;t give you — swapping
+the whole configuration atomically, and making certificates somebody
+else&#39;s problem.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    CLI[&quot;caddy run --config Caddyfile&lt;br/&gt;cmd/commandfuncs.go:cmdRun (189)&quot;]
+    ADAPT[&quot;Caddyfile ADAPTER (a compiler, not the core)&lt;br/&gt;caddyconfig/caddyfile/adapter.go:Adapt (32)&lt;br/&gt;→ tokens → httpcaddyfile ServerType.Setup (59)&quot;]
+    JSON[&quot;Caddy JSON — the native config format&lt;br/&gt;(typed document, strict decode: modules.go:342)&quot;]
+    subgraph core[&quot;caddy core (caddy.go)&quot;]
+        LOAD[&quot;Load (115) → changeConfig (158)&lt;br/&gt;→ unsyncedDecodeAndRun (337)&quot;]
+        PROV[&quot;provisionContext (484): load modules,&lt;br/&gt;Provision each app, pre-compile routes&quot;]
+        RUN[&quot;run (419): Start each app;&lt;br/&gt;swap currentCtx; stop old apps&quot;]
+        ADMIN[&quot;Admin API — localhost:2019&lt;br/&gt;admin.go:newAdminHandler (222)&lt;br/&gt;POST /load = same path as SIGUSR1&quot;]
+    end
+    subgraph apps[&quot;apps = modules with a lifecycle (App interface)&quot;]
+        HTTP[&quot;caddyhttp app — listeners, routing&lt;br/&gt;modules/caddyhttp/app.go:Start (480)&quot;]
+        TLS[&quot;caddytls app — cert automation&lt;br/&gt;modules/caddytls/tls.go:Start (406)&quot;]
+        PKI[&quot;caddypki, caddyevents, ...&quot;]
+    end
+    subgraph netgo[&quot;Go runtime + net/http (not Caddy code)&quot;]
+        G1[&quot;go srv.Serve(ln) per listener&lt;br/&gt;(app.go:632)&quot;]
+        G2[&quot;goroutine per connection&lt;br/&gt;blocking-style handlers&quot;]
+    end
+
+    CLI --&gt; ADAPT --&gt; JSON --&gt; LOAD
+    ADMIN --&gt; LOAD
+    LOAD --&gt; PROV --&gt; RUN
+    RUN --&gt; HTTP
+    RUN --&gt; TLS
+    HTTP --&gt;|auto-HTTPS phase 1 rewrites config during provisioning| TLS
+    HTTP --&gt; G1 --&gt; G2
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The core</strong> (<code>caddy.go</code>, ~1,300 lines) is a config lifecycle engine,
+not a server. The <code>Config</code> struct holds two kinds of fields: decoded
+scalars (<code>Admin</code>, <code>Logging</code>) and <em>raw module payloads</em> —
+<code>json.RawMessage</code> fields tagged <code>caddy:&quot;namespace=...&quot;</code> that the core
+does not understand at all. The server machinery lives entirely in
+apps loaded from that raw payload.</li>
+<li><strong>Apps are modules with a lifecycle</strong>: an <code>App</code> is anything with
+<code>Start()/Stop()</code> (<code>caddy.go:App</code>). The standard distribution wires
+~133 registered modules (<code>caddy.RegisterModule</code> calls in <code>init()</code>
+functions; <code>modules/standard/imports.go</code> imports them all as blank
+imports — that import list <em>is</em> the build). At load time each app is
+instantiated, <code>Provision</code>ed, <code>Validate</code>d, then <code>Start</code>ed; on failure
+everything provisioned is rolled back by cancelling the config&#39;s
+context (<code>caddy.go:run</code>, 419 — each started app that fails is stopped
+again, and the error path cancels the context so every provisioned
+module cleans up).</li>
+<li><strong>The Caddyfile is an adapter, not the config</strong>. The native format is
+JSON; <code>Adapter.Adapt</code> (<code>caddyconfig/caddyfile/adapter.go:32</code>) parses
+tokens, hands server blocks to a registered <code>ServerType.Setup</code>
+(<code>caddyconfig/httpcaddyfile/httptype.go:59</code>, ~1,800 lines — the
+single biggest file in the Caddyfile world), and marshals the
+resulting <code>*caddy.Config</code> to JSON. The core never sees a Caddyfile.</li>
+<li><strong>The admin API is the control plane</strong>: a localhost HTTP endpoint
+(default <code>localhost:2019</code>, <code>admin.go:1455</code>) exposing <code>/load</code> (the
+same entry point as CLI reloads — <code>cmd/commandfuncs.go:cmdReload</code>,
+372, just POSTs there), <code>/id/...</code> paths addressing config fragments
+by user-assigned <code>@id</code>, and <code>/stop</code>. Config changes carry optimistic
+concurrency: an <code>If-Match</code> header with a config hash is checked in
+<code>changeConfig</code> (<code>caddy.go:158</code>).</li>
+<li><strong>The spine</strong> — one HTTPS request — is: TLS listener → Go&#39;s
+per-connection goroutine → handshake (<code>GetConfigForClient</code> picks a
+connection policy by SNI, <code>modules/caddytls/connpolicy.go:118</code>;
+<code>GetCertificate</code> may issue on-demand, <code>connpolicy.go:288</code>) →
+<code>Server.ServeHTTP</code> (<code>modules/caddyhttp/server.go:598</code>) → header
+hygiene + ACME-challenge shortcut (<code>serveHTTP</code>, 846; challenge served
+<em>before</em> user handlers at 759) → the pre-compiled route chain
+(<code>primaryHandlerChain</code>, built in <code>app.go:Provision</code>, 188) → handlers
+(<code>MiddlewareHandler.ServeHTTP(w, r, next)</code> — plain blocking calls) →
+error chain → deferred access log.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-https-request-handshake-to-deferred-log-line">Walkthrough: one HTTPS request, handshake to deferred log line</h2>
+<p class="walkthrough-intro">A fresh visitor hits <code>https://example.com</code> on a Caddy instance whose
+certificate was obtained at startup. Step through it on the site, or
+read top to bottom — and notice what is <em>absent</em>: no callbacks
+installing callbacks, no state machine, just a stack of blocking
+function calls on one goroutine.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as Go net/http (per-conn goroutine)
+    participant CP as TLS conn policy (connpolicy.go)
+    participant CM as CertMagic (cert cache)
+    participant R as Route chain (wrapRoute closures)
+    participant H as handler (reverse_proxy / file_server)
+    C-&gt;&gt;S: TCP connect to :443
+    S-&gt;&gt;CP: ClientHello SNI=example.com
+    CP-&gt;&gt;CP: indexedBySNI lookup → first matching policy
+    CP-&gt;&gt;CM: GetCertificate(hello)
+    CM--&gt;&gt;CP: cached cert (issued at startup, phase 2)
+    S-&gt;&gt;R: ServeHTTP → serveHTTP → primaryHandlerChain
+    R-&gt;&gt;R: matchers evaluated per route, first match compiles stack
+    R-&gt;&gt;H: handler.ServeHTTP(w, r, next) — blocking call
+    H--&gt;&gt;R: response written up the chain
+    R-&gt;&gt;S: return nil (or error → error chain)
+    S-&gt;&gt;S: deferred access log fires
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-knock-and-who-answers-it">The knock, and who answers it</h3>
+<p><code>caddy run</code> loaded the
+config hours ago: <code>App.Start</code> (<code>modules/caddyhttp/app.go:480</code>) called
+<code>listenAddr.Listen</code> (<code>listeners.go:135</code>) for each address, wrapped the
+listener in TLS (<code>tls.NewListener</code>, <code>app.go:599</code>) and handed it to
+<code>go srv.server.Serve(ln)</code> (<code>app.go:632</code>). That one goroutine accepts;
+Go&#39;s <code>net/http</code> spawns a goroutine per connection. Caddy code does not
+manage either.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-handshake-picks-a-world">The handshake picks a world</h3>
+<p>The listener&#39;s <code>tls.Config</code>
+carries <code>GetConfigForClient</code> (<code>modules/caddytls/connpolicy.go:118</code>),
+which Caddy built by indexing every connection policy by SNI name at
+provision time. It finds the policy for <code>example.com</code> and returns that
+policy&#39;s <code>tls.Config</code> — each site effectively has its own TLS world
+(cipher suites, client auth, ALPN) behind one shared listener.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-certificate-is-a-subsystem-call">The certificate is a subsystem call</h3>
+<p>The policy&#39;s
+<code>GetCertificate</code> closure (<code>connpolicy.go:288</code>) looks up the pre-built
+CertMagic config for the name (<code>tls.go:getConfigForName</code>, 897) and
+delegates. The cert is in the cache because at startup
+<code>automaticHTTPSPhase2</code> (<code>modules/caddyhttp/autohttps.go:869</code>) called
+<code>tlsApp.Manage</code> (<code>modules/caddytls/tls.go:605</code>) for every qualifying
+domain — <em>after</em> all listeners were already serving, deliberately, so
+the ACME challenge solver can never win the race for ports 80/443
+(the port-race comment above the function, lines 858–868).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="into-the-chain">Into the chain</h3>
+<p><code>Server.ServeHTTP</code> (<code>server.go:598</code>) wraps
+the request in a <code>Replacer</code> (the <code>{http.request.*}</code> placeholder
+system), arms slowloris-defenses and the deferred access log, then
+<code>serveHTTP</code> (846) does hygiene (RFC 9112 Host checks, underscore-header
+drops) and one special case <em>before</em> user code: if the request looks
+like an ACME HTTP challenge, <code>tlsApp.HandleHTTPChallenge</code> (<code>server.go:759</code>)
+answers it — certificate renewal rides on the same ports your site
+does, which is why it must outrank your handlers.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="routing-is-pre-compiled">Routing is pre-compiled</h3>
+<p>The request enters
+<code>primaryHandlerChain</code>, compiled once during provisioning:
+<code>RouteList.Compile</code> (<code>modules/caddyhttp/routes.go:239</code>) folds every
+route into a chain of <code>wrapRoute</code> closures (256). Each closure
+evaluates its matchers at request time (<code>MatcherSets.AnyMatchWithError</code>),
+skips itself on no-match, enforces route-group mutual exclusion, and on
+match stacks the route&#39;s handlers around the rest of the chain. A
+<code>MatchHost</code> with a large list binary-searches — hosts were normalized
+and sorted at provision time (<code>matchers.go:256</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="a-handler-is-a-blocking-function">A handler is a blocking function</h3>
+<p>The matched handler —
+say <code>reverse_proxy</code> — runs as ordinary sequential code:
+<code>Handler.ServeHTTP</code> (<code>reverseproxy.go:618</code>) prepares the request, then
+loops <code>proxyLoopIteration</code> (740): select upstream by policy, dial,
+stream, retry on failure. In nginx this same trip is the multi-page
+<code>ngx_http_upstream</code> state machine; here the goroutine may <em>block</em> on
+the upstream because blocking is the scheduler&#39;s problem.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="errors-go-through-their-own-chain">Errors go through their own chain</h3>
+<p>A non-nil return from
+the chain jumps to <code>errorHandlerChain</code> (compiled from the <code>errors</code>
+config, <code>app.go:Provision</code>) — error handling is routing, not an
+afterthought — and finally the deferred access log writes the request
+and its duration. The connection goroutine returns to the pool.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-request-zero-architecture">One request, zero architecture</h3>
+<p>From handshake to log
+line, no Caddy code multiplexed anything, registered a callback, or
+managed memory: the runtime did all three. Caddy&#39;s own code was the
+compiled chain, the TLS policy index, and the subsystem calls — exactly
+the parts a runtime cannot provide.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-config-document-with-raw-module-payloads-caddy-go-config">The config document with raw module payloads (<code>caddy.go:Config</code>)</h3>
+<p><code>Config</code> mixes decoded fields with <code>json.RawMessage</code> module slots
+(<code>StorageRaw</code>, <code>AppsRaw</code> as a <code>ModuleMap</code>) tagged
+<code>caddy:&quot;namespace=caddy.storage inline_key=module&quot;</code>. Decoding is
+<strong>strict</strong> — <code>StrictUnmarshalJSON</code> (<code>modules.go:342</code>) sets
+<code>DisallowUnknownFields()</code>, so a typo in the config is a load error, not
+a silent default. Why: the same document serves humans (via adapters),
+the admin API (addressable by <code>/id/</code> paths, indexed by
+<code>indexConfigObjects</code>, <code>caddy.go:290</code>), and the compiler
+(<code>provisionContext</code>), and raw payloads keep the core decoupled from
+every module — the core literally cannot name a handler type.</p>
+<h3 id="the-compiled-route-chain-modules-caddyhttp-routes-go">The compiled route chain (<code>modules/caddyhttp/routes.go</code>)</h3>
+<p>At provisioning, each <code>Route</code> loads its matcher modules and handlers
+and <em>pre-wraps</em> them (<code>ProvisionHandlers</code>, 160 — &quot;pre-compile the
+middleware handler chain&quot; is the code&#39;s own comment);
+<code>RouteList.Compile</code> (239) then folds the list back-to-front into nested
+closures, and <code>wrapRoute</code> (256) keeps only matcher evaluation deferred
+to request time. Route <code>Group</code>s are enforced via a per-request set in
+the context — first matching route in a group wins. Why: the hot path
+becomes &quot;evaluate cheap matchers, call pre-linked closures&quot; — no
+per-request module loading, no interpretation; and grouping gives
+nginx-location-style mutual exclusivity without nginx&#39;s location
+inheritance rules.</p>
+<h3 id="connection-policies-indexed-by-sni-modules-caddytls-connpolicy-go">Connection policies indexed by SNI (<code>modules/caddytls/connpolicy.go</code>)</h3>
+<p><code>ConnectionPolicies.TLSConfig</code> (98) builds one outer <code>tls.Config</code> whose
+<code>GetConfigForClient</code> (118) is a lookup: policies are pre-indexed into
+<code>map[string][]*ConnectionPolicy</code> by SNI name (loop at 108–116), first
+match wins, unmatched handshakes are refused. Why: thousands of sites
+with different TLS requirements behind one socket — per-handshake work
+is a map lookup, not a policy scan. Each policy&#39;s inner
+<code>GetCertificate</code> closure (288) resolves the name to a pre-built
+CertMagic config, which is where issuance, renewal, and on-demand logic
+live.</p>
+<h3 id="the-certificate-cache-automation-policies-modules-caddytls-tls-go">The certificate cache + automation policies (<code>modules/caddytls/tls.go</code>)</h3>
+<p>The TLS app owns a <code>certmagic.Cache</code> shared across <em>configurations</em>
+(<code>tls.go:48</code>, created in <code>Provision</code> at 220) — reloads don&#39;t drop
+certificates — and maps names to <code>certmagic.Config</code>s through
+<code>AutomationPolicy</code> objects (<code>getAutomationPolicyForName</code>, 906).
+<code>Manage</code> (605) bins domains by policy and manages each batch
+asynchronously (<code>ManageAsync</code>), so a slow CA cannot block startup.
+Why: certs have a lifetime that outlives any single config generation;
+the cache is the seam that makes reload cheap and issuance idempotent.</p>
+<h3 id="the-listener-usage-pool-listeners-go-usagepool-go">The listener usage pool (<code>listeners.go</code> + <code>usagepool.go</code>)</h3>
+<p>Every socket Caddy opens goes through <code>listenReusable</code>
+(<code>listen_unix.go:107</code>), which sets <code>SO_REUSEPORT</code> (217) <em>and</em> records
+the listener in <code>listenerPool</code> — a <code>UsagePool</code> (<code>usagepool.go:58</code>) that
+counts how many live configurations reference each socket
+(<code>ListenerUsage</code>, <code>listeners.go:542</code>). Why: this count is what lets
+graceful shutdown make decisions (&quot;is anyone else still using this
+port?&quot;), which is the quiet enabler of zero-downtime reload (section 3).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><p><strong>Goroutine-per-connection, by delegation.</strong> Caddy spawns exactly one
+goroutine per listener (<code>go srv.server.Serve(ln)</code>, <code>app.go:632</code>);
+<code>net/http</code> spawns one per connection; handlers block freely. There is
+no Caddy scheduler, no accept mutex, no connection state machine —
+the trade nginx made against threads is simply out of scope. A
+handler panic is recovered by <code>net/http</code> per connection (one request
+dies, not the process — the recovered panics are routed to ERROR by
+<code>serverErrorLogger</code>, <code>app.go:696</code>), but there is <strong>no master/worker
+containment</strong>: a crash of the process itself is the OS service
+manager&#39;s problem. Where nginx isolates faults architecturally,
+Caddy delegates that too.</p>
+</li>
+<li><p><strong>Zero-downtime reload by overlap, not by handoff.</strong> The unit of
+reload is the whole config. <code>unsyncedDecodeAndRun</code> (<code>caddy.go:337</code>)
+provisions and starts the <em>new</em> config first, swaps <code>currentCtx</code>
+(atomic pointer swap under <code>currentCtxMu</code>), and only then stops the
+old apps (<code>unsyncedStop</code>). This is only possible because both
+generations can hold listeners on the same ports simultaneously —
+<code>SO_REUSEPORT</code> on TCP (<code>listen_unix.go:217</code>), duplicated file
+descriptors for Unix sockets (<code>listen_reuseUnixSocket.go</code>). The
+kernel load-balances new connections across both generations until
+the old one drains. Contrast: nginx&#39;s master re-spawns workers on
+inherited fds; HAProxy passes sockets over a unix socket — Caddy
+needs neither ritual, but pays with a brief doubled listener set.</p>
+</li>
+<li><p><strong>Shutdown is staged by who still needs the port.</strong> <code>App.stop</code>
+(<code>app.go:723</code>) checks <code>ListenerUsage(...) &lt; 2</code> — if any listener is
+not shared with the new generation and a <code>ShutdownDelay</code> is set, it
+sleeps first (LBs stop sending new traffic), then calls
+<code>http.Server.Shutdown</code> per server with a GracePeriod context —
+<strong>default infinite</strong>: Caddy waits forever for in-flight requests
+unless you bound it. Config-change shutdowns return immediately and
+let the grace periods finish in the background
+(<code>pendingServerShutdowns</code>), so rapid reloads don&#39;t serialize on
+stragglers; process exit (<code>exitProcess</code>, <code>caddy.go:758</code>) does wait.</p>
+</li>
+<li><p><strong>Config changes are transactional on the raw tree.</strong> <code>changeConfig</code>
+(<code>caddy.go:158</code>) mutates a generic-decoded copy of the current
+config, marshals it, and if running the new config fails, <em>restores
+the previous raw config</em> so the admin API&#39;s view never diverges from
+reality. Reload failure leaves the old world exactly as it was.</p>
+</li>
+<li><p><strong>Signals</strong>: SIGTERM/SIGINT → graceful <code>exitProcess</code>; SIGQUIT →
+immediate exit; <strong>SIGUSR1 → reload from the last source file</strong>
+(<code>sigtrap_posix.go:36</code>, wired by <code>cmdRun</code> via <code>SetLastConfig</code>,
+<code>cmd/commandfuncs.go:271</code>) — nginx-like ergonomics, one signal,
+inside one process.</p>
+</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph reload[&quot;one reload (caddy run + SIGUSR1, or POST /load)&quot;]
+        A[&quot;new config: Provision → Validate → Start&lt;br/&gt;(old apps still serving)&quot;]
+        B[&quot;SO_REUSEPORT: both generations&lt;br/&gt;hold :443 — kernel spreads conns&quot;]
+        C[&quot;swap currentCtx (atomic)&lt;br/&gt;unsyncedStop(oldCtx) → graceful drain&lt;br/&gt;GracePeriod default: infinite&quot;]
+        A --&gt; B --&gt; C
+    end
+    D[&quot;handler panic → net/http recover&lt;br/&gt;one request lost, process lives&quot;]
+    E[&quot;process crash → systemd restarts&lt;br/&gt;(no supervisor inside)&quot;]
+    reload -.-&gt;|ListenerUsage ≥ 2 → no ShutdownDelay| C
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><p><strong>The real API is the config format.</strong> Caddy&#39;s public surface is a
+typed JSON document: every extension point is a
+<code>caddy:&quot;namespace=...&quot;</code> slot (<code>http.handlers</code>, <code>http.matchers</code>,
+<code>tls.issuance</code>, <code>tls.permission</code>, <code>caddy.storage</code>, <code>admin.api</code>, ...)
+filled by name. <code>Context.LoadModule</code> (<code>context.go:188</code>) resolves a
+namespace slot through reflection: it reads the struct tag, looks the
+module up in the registry (<code>modules.go:RegisterModule</code>, 138 — called
+from each module&#39;s <code>init()</code>), unmarshals the raw JSON into a fresh
+instance, and zeroes the raw field so the bytes can be GC&#39;d. Module
+lifecycle is interface-optional: <code>Provisioner</code> (296), <code>Validator</code>
+(305), <code>CleanerUpper</code> (315) — a module implements what it needs.</p>
+</li>
+<li><p><strong>The Caddyfile extends by the same seam</strong>: a module that wants
+friendly syntax implements <code>UnmarshalCaddyfile(d *Dispenser)</code>
+(<code>caddyfile/adapter.go:Unmarshaler</code>), and
+<code>caddyfile.UnmarshalModule</code> connects directive names to module IDs.
+Directive <em>order</em> in a site block is a registry the HTTP server-type
+sorts (<code>httptype.go</code>&#39;s directive ordering), which is what saves the
+user from writing encode-after-templates correctly by hand.</p>
+</li>
+<li><p><strong>Admin API as the single control surface</strong>: <code>POST /load</code> replaces
+the config (same code path as signals); <code>/id/&lt;name&gt;</code> patches a
+fragment addressed by a user-set <code>@id</code> field; <code>If-Match</code> gives
+compare-and-swap on the whole config (<code>caddy.go:158</code>). External
+tooling (and <code>caddy reload</code>) is just an HTTP client.</p>
+</li>
+<li><p><strong>Honest wart</strong>: the module graph is <strong>compile-time</strong>. Go has no
+portable dlopen, so third-party plugins ship as <em>build-time</em> blank
+imports — <code>modules/standard/imports.go</code> is the stock list, and the
+sanctioned way to add one is rebuilding via xcaddy. httpd&#39;s <code>mod_so</code>
+and nginx&#39;s dynamic modules load at runtime; Caddy trades that
+operational flexibility for one static binary and a fully typed
+extension surface.</p>
+</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-goroutine-per-connection-blocking-handlers-over-evented-state-machines">Trade-off 1: goroutine-per-connection blocking handlers over evented state machines</h3>
+<ul>
+<li><strong>Tension:</strong> serve many thousands of concurrent connections without
+per-connection threads, and keep the code writable.</li>
+<li><strong>Choice:</strong> delegate the multiplexing problem to the Go runtime:
+blocking-style handlers, goroutine per connection, one <code>Serve</code>
+goroutine per listener.</li>
+<li><strong>Evidence:</strong> <code>app.go:632</code> (<code>go srv.server.Serve(ln)</code>) is the whole
+concurrency wiring for a server; <code>reverseproxy.go:618</code> <code>ServeHTTP</code> is
+a plain retry loop (740) that <em>blocks</em> on upstreams — in nginx the
+identical behavior is the <code>ngx_http_upstream</code> callback architecture
+this atlas walked in its dive.</li>
+<li><strong>Given up:</strong> per-connection memory floor (a goroutine stack vs
+nginx&#39;s few-KB connection struct), and the discipline an event loop
+forces: a CPU-hog handler stalls only its goroutine here, but a
+memory-hungry one multiplies across connections with nothing like
+nginx&#39;s pools bounding it.</li>
+<li><strong>Verdict:</strong> right when handler logic is rich and connection counts
+are merely &quot;large&quot; (tens of thousands, not millions per box), and
+radically better for extensibility — module authors write sequential
+code. Wrong when you are selling connections-per-megabyte; that&#39;s
+the niche where nginx&#39;s C event loop still wins, and where Caddy
+users reach for <code>max_header_bytes</code>-style caps to compensate.</li>
+</ul>
+<h3 id="trade-off-2-one-typed-config-document-provisioned-and-compiled-over-a-runtime-interpreted-directive-tree">Trade-off 2: one typed config document, provisioned and compiled, over a runtime-interpreted directive tree</h3>
+<ul>
+<li><strong>Tension:</strong> be simultaneously scriptable (API), friendly (Caddyfile),
+and fast (no interpretation per request).</li>
+<li><strong>Choice:</strong> a single canonical JSON document; friendly syntaxes are
+adapters that <em>compile to</em> it; provisioning turns the document into
+closures compiled once per config generation.</li>
+<li><strong>Evidence:</strong> <code>caddyfile/adapter.go:32</code> <code>Adapt</code> ends in
+<code>json.Marshal(cfg)</code> — the Caddyfile is never interpreted at runtime;
+<code>StrictUnmarshalJSON</code> (<code>modules.go:342</code>) makes unknown fields fatal;
+<code>routes.go:160</code> &quot;pre-compile the middleware handler chain&quot;;
+<code>matchers.go:256</code> normalizes and sorts host lists at provision time
+so request-time matching binary-searches.</li>
+<li><strong>Given up:</strong> runtime loading of code (compile-time module graph —
+see section 4&#39;s wart), and the ability to hand-edit a live config in
+its friendly form (the API speaks JSON; the Caddyfile is a build
+input, and <code>caddy reload</code> re-adapts it each time).</li>
+<li><strong>Verdict:</strong> right when you can ship the world as one binary and one
+document — the strictness is what keeps 133 modules composable
+without a spec lawyer. Wrong for embedding as a library inside
+another program&#39;s control plane that needs dynamic code — the seam
+would have to be plugins again.</li>
+</ul>
+<h3 id="trade-off-3-certificate-management-as-an-architectural-subsystem-over-tls-as-configuration">Trade-off 3: certificate management as an architectural subsystem over TLS as configuration</h3>
+<ul>
+<li><strong>Tension:</strong> make HTTPS the default without making certificate
+renewal, challenge serving, and failure a user problem.</li>
+<li><strong>Choice:</strong> certificates are managed state (a cache shared across
+config generations, renewal goroutines, storage-backed coordination),
+and automatic HTTPS <em>rewrites the user&#39;s config</em> during provisioning:
+adds TLS connection policies, invents redirect servers on the HTTP
+port, and appends per-domain automation policies.</li>
+<li><strong>Evidence:</strong> <code>autohttps.go:77</code> phase 1 builds redirect routes and
+even whole servers; phase 2 (869) starts <code>Manage</code> only after
+listeners are up so ACME&#39;s solver can&#39;t steal the ports
+(comment at 858–868); ACME challenges are answered before user handlers
+(<code>server.go:759</code> → <code>tls.go:810</code>); on-demand issuance at handshake
+time is permission-gated by a module (<code>ondemand.go:119</code>
+<code>PermissionByHTTP.CertificateAllowed</code> — an HTTP <code>ask</code> endpoint must
+approve the name) because anyone can send a ClientHello.</li>
+<li><strong>Given up:</strong> startup determinism (issuance is network I/O with
+retries; a CA outage delays first service on new names — mitigated
+but not eliminated by cache + storage), and some transparency: the
+effective config is your config <em>plus</em> what phase 1 injected (visible
+via <code>caddy adapt</code> or the admin API&#39;s config dump).</li>
+<li><strong>Verdict:</strong> right when the product promise is &quot;TLS you never think
+about&quot; — Caddy&#39;s defining feature is exactly this trade. Wrong in
+closed networks without ACME reachability, which is why the same
+machinery auto-routes internal names to the local CA
+(<code>InternalIssuer</code> policies created in phase 1) — the subsystem knows
+when its default issuer is the wrong one.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>cmd/commandfuncs.go:cmdRun</code> (189) — startup: load/adapt config,
+<code>caddy.Load</code>, then <code>select {}</code>; note <code>SetLastConfig</code> (271) arming
+SIGUSR1 and the <code>--watch</code> dev loop.</li>
+<li><code>caddy.go:Load</code> (115) → <code>changeConfig</code> (158) → <code>unsyncedDecodeAndRun</code>
+(337) — the reload transaction: mutate raw tree, run new world,
+swap <code>currentCtx</code>, stop old, autosave; find the revert path on
+failure.</li>
+<li><code>caddy.go:provisionContext</code> (484) and <code>run</code> (419) — module
+lifecycle: storage, admin endpoint, app-by-app
+<code>Provision</code>/<code>Validate</code>/<code>Start</code> with rollback of already-started
+apps. The core&#39;s entire job lives in these 250 lines.</li>
+<li><code>modules.go:StrictUnmarshalJSON</code> (342) + <code>context.go:LoadModule</code>
+(188) — the seam itself: struct tags, namespaces, reflection, and
+the zeroing of raw fields for GC.</li>
+<li><code>caddyconfig/caddyfile/adapter.go:Adapt</code> (32) + skim
+<code>caddyconfig/httpcaddyfile/httptype.go:Setup</code> (59) — a friendly
+syntax implemented as a compiler onto the canonical format; watch
+directives pile into &quot;piles&quot; that later become routes.</li>
+<li><code>modules/caddyhttp/app.go:Provision</code> (188) — per-server setup:
+defaults (timeouts, strict-SNI-host), route compilation (367–385),
+and the call into <code>automaticHTTPSPhase1</code> that will mutate this very
+config.</li>
+<li><code>modules/caddyhttp/autohttps.go:automaticHTTPSPhase1</code> (77) — domain
+qualification, redirect route/server invention, internal-name
+policies; then <code>App.Start</code> (480) for listeners and
+<code>automaticHTTPSPhase2</code> (869) for the manage call — read the
+port-race comment (858–868) twice.</li>
+<li><code>modules/caddyhttp/routes.go:wrapRoute</code> (256) — request-time
+routing as closures; then <code>matchers.go:MatchHost.Provision</code> (256)
+for the provision-vs-request split.</li>
+<li><code>modules/caddyhttp/server.go:ServeHTTP</code> (598) → <code>serveHTTP</code> (846) →
+<code>enforcementHandler</code> (962) — the spine entry; note what happens
+before user handlers (ACME challenge at 759, header hygiene,
+strict SNI-Host enforcement).</li>
+<li><code>modules/caddytls/connpolicy.go</code> — <code>ConnectionPolicies.TLSConfig</code>
+(98) for the SNI index, then <code>buildStandardTLSConfig</code> (278) for
+the <code>GetCertificate</code> closure; follow into
+<code>tls.go:getConfigForName</code> (897) and <code>ondemand.go:119</code> for the
+permission gate on handshake-time issuance.</li>
+<li><code>listen_unix.go:listenReusable</code> (107) and <code>reusePort</code> (217), then
+<code>listeners.go:ListenerUsage</code> (542) — the socket-level trick that
+makes overlapping generations possible.</li>
+<li><code>modules/caddyhttp/app.go:stop</code> (723) — graceful shutdown:
+ShutdownDelay keyed on <code>ListenerUsage &lt; 2</code>, infinite default
+GracePeriod, background drain on reload, full wait on exit; close
+the loop against <code>caddy.go:exitProcess</code> (758) and
+<code>sigtrap_posix.go:36</code>.</li>
+</ol>
+<p>You have now traced one visitor from TCP connect through a
+handshake-time certificate decision into a pre-compiled route chain —
+and, separately, watched a whole new configuration take over the same
+ports under live traffic, which is the part the runtime could not do
+for you.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Compile config once, evaluate cheap matchers at request time</strong>:
+provisioning turns documents into closures (<code>routes.go:239</code>), so the
+hot path never re-reads its own configuration — the same shape as
+nginx&#39;s phase engine, one language-level simpler.</li>
+<li><strong>Start the new world before stopping the old one</strong>: provision →
+start → atomic swap → graceful stop (<code>caddy.go:337</code>), made safe by
+<code>SO_REUSEPORT</code> socket overlap — zero-downtime reload without a
+master process or fd-passing rituals.</li>
+<li><strong>Make the friendly format a compiler over the canonical one</strong>: the
+Caddyfile is an adapter that outputs JSON (<code>adapter.go:32</code>); there is
+exactly one thing to validate, diff, and expose on an API.</li>
+<li><strong>Buy concurrency from the runtime and spend the budget on
+architecture</strong>: no event loop exists here; the design budget went
+into the config lifecycle and cert automation instead — evidence
+that &quot;which problems disappear&quot; is a real planning question when you
+choose a runtime.</li>
+<li><strong>Security defaults as config rewriting</strong>: automatic HTTPS doesn&#39;t
+prompt — it rewrites your config (redirect servers, connection
+policies) during provisioning (<code>autohttps.go:77</code>). Ship opinions by
+transforming the input, not by asking.</li>
+<li><strong>Gate speculative work behind a permission seam</strong>: on-demand
+issuance at handshake time is only safe because any handshake can
+trigger it, so Caddy makes <em>approval</em> a pluggable module
+(<code>ondemand.go:119</code>) — resource-triggered actions need an explicit
+policy hook.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>gentle</strong> — idiomatic Go, generous comments, and no
+hand-rolled infrastructure to decode; the challenge is conceptual
+(module lifecycle, provisioning phases), not mechanical.</li>
+<li>Budget: ~4 hours for the reading path; steps 2–3 and 6–8 alone (the
+config lifecycle and auto-HTTPS) are a rewarding 2 hours.</li>
+<li>Prerequisites: Go&#39;s goroutines/channels at reading level, <code>net/http</code>
+handler style (<code>func(w, r) error</code> variants here), TLS SNI/ALPN
+vocabulary, and what ACME issuance is (any intro suffices). The
+<a href="../nginx/">nginx</a> dive makes a superb <em>pre</em>-requisite: every Caddy
+mechanism you meet is paired against the C machinery it deletes.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Caddy docs, &quot;Automatic HTTPS&quot; and &quot;Caddyfile concepts&quot;
+(<a href="https://caddyserver.com/docs/">https://caddyserver.com/docs/</a>) — user-level framing of what phase 1
+implements; &quot;Conventions&quot; documents the data/config directories.</li>
+<li>CertMagic (<a href="https://github.com/caddyserver/certmagic">https://github.com/caddyserver/certmagic</a>) — the library
+doing issuance, renewal, and storage coordination beneath
+<code>tls.go:Manage</code>; reading its README first makes the Caddy call sites
+self-explanatory.</li>
+<li>Go&#39;s <code>net/http</code> server and <code>SO_REUSEPORT</code> load balancing — the two
+runtime capabilities this architecture leans on; Vincent Bernat&#39;s
+&quot;Load balancing with SO_REUSEPORT&quot; covers the kernel side.</li>
+<li>The <a href="../nginx/">nginx</a> and <a href="../httpd/">Apache httpd</a> dives in this
+atlas — read all three as one comparison: state machines vs hook
+platforms vs delegated runtime.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../chromium/"><span class="dir">← Previous dive</span>Chromium: a security model that forced a multi-process operating system for web content</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 34 of 34 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
