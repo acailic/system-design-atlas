@@ -117,9 +117,10 @@ flowchart TD
   per-connection goroutine → handshake (`GetConfigForClient` picks a
   connection policy by SNI, `modules/caddytls/connpolicy.go:118`;
   `GetCertificate` may issue on-demand, `connpolicy.go:292`) →
-  `Server.ServeHTTP` (`modules/caddyhttp/server.go:598`) → header
-  hygiene + ACME-challenge shortcut (`serveHTTP`, 846; challenge served
-  *before* user handlers at 759) → the pre-compiled route chain
+  `Server.ServeHTTP` (`modules/caddyhttp/server.go:598`) → ACME-challenge
+  shortcut + header hygiene (challenge served *before* user handlers,
+  inside `ServeHTTP` at 759; hygiene in `serveHTTP`, 846) →
+  the pre-compiled route chain
   (`primaryHandlerChain`, built in `app.go:Provision`, 188) → handlers
   (`MiddlewareHandler.ServeHTTP(w, r, next)` — plain blocking calls) →
   error chain → deferred access log.
@@ -182,11 +183,12 @@ the ACME challenge solver can never win the race for ports 80/443
 **Step 4 — Into the chain.** `Server.ServeHTTP` (`server.go:598`) wraps
 the request in a `Replacer` (the `{http.request.*}` placeholder
 system), arms slowloris-defenses and the deferred access log, then
-`serveHTTP` (846) does hygiene (RFC 9112 Host checks, underscore-header
-drops) and one special case *before* user code: if the request looks
+answers one special case *before* user code: if the request looks
 like an ACME HTTP challenge, `tlsApp.HandleHTTPChallenge` (`server.go:759`)
-answers it — certificate renewal rides on the same ports your site
-does, which is why it must outrank your handlers.
+takes it and `ServeHTTP` returns — otherwise `serveHTTP` (846) does the
+hygiene (RFC 9112 Host checks, underscore-header drops). Certificate
+renewal rides on the same ports your site does, which is why the
+challenge must outrank your handlers.
 
 **Step 5 — Routing is pre-compiled.** The request enters
 `primaryHandlerChain`, compiled once during provisioning:
@@ -200,7 +202,9 @@ and sorted at provision time (`matchers.go:256`).
 
 **Step 6 — A handler is a blocking function.** The matched handler —
 say `reverse_proxy` — runs as ordinary sequential code:
-`Handler.ServeHTTP` (`reverseproxy.go:618`) prepares the request, then
+`(*Handler).ServeHTTP`
+(`modules/caddyhttp/reverseproxy/reverseproxy.go:618`) prepares the
+request, then
 loops `proxyLoopIteration` (740): select upstream by policy, dial,
 stream, retry on failure. In nginx this same trip is the multi-page
 `ngx_http_upstream` state machine; here the goroutine may *block* on
@@ -388,8 +392,9 @@ flowchart TD
   blocking-style handlers, goroutine per connection, one `Serve`
   goroutine per listener.
 - **Evidence:** `app.go:632` (`go srv.server.Serve(ln)`) is the whole
-  concurrency wiring for a server; `reverseproxy.go:618` `ServeHTTP` is
-  a plain retry loop (740) that *blocks* on upstreams — in nginx the
+  concurrency wiring for a server;
+  `modules/caddyhttp/reverseproxy/reverseproxy.go:618` `(*Handler).ServeHTTP`
+  is a plain retry loop (740) that *blocks* on upstreams — in nginx the
   identical behavior is the `ngx_http_upstream` callback architecture
   this atlas walked in its dive.
 - **Given up:** per-connection memory floor (a goroutine stack vs
@@ -488,8 +493,8 @@ flowchart TD
    for the provision-vs-request split.
 9. `modules/caddyhttp/server.go:ServeHTTP` (598) → `serveHTTP` (846) →
    `enforcementHandler` (962) — the spine entry; note what happens
-   before user handlers (ACME challenge at 759, header hygiene,
-   strict SNI-Host enforcement).
+   before user handlers (ACME challenge in `ServeHTTP` at 759, header
+   hygiene, strict SNI-Host enforcement).
 10. `modules/caddytls/connpolicy.go` — `ConnectionPolicies.TLSConfig`
     (98) for the SNI index, then `buildStandardTLSConfig` (278) for
     the `GetCertificate` closure; follow into
