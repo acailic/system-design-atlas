@@ -455,7 +455,7 @@ flowchart LR
 - **The public surface is the syscall ABI, and it is data.** One file,
   `arch/x86/entry/syscalls/syscall_64.tbl`, maps numbers to symbols;
   new calls are appended, numbers are never reused or renumbered — a
-  a pre-0.9 binary still rings the same doorbells on v7.2 — the
+  pre-0.9 binary still rings the same doorbells on v7.2 — the
   kernel's own stable-API document puts it plainly: "I have old
   programs that were built on a pre 0.9something kernel that still
   work just fine" (`Documentation/process/stable-api-nonsense.rst`).
