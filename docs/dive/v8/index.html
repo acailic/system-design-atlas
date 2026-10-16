@@ -187,7 +187,7 @@ pre-parsed; <code>add</code> is a stub until first call. Then
 <code>Runtime_CompileLazy</code> → <code>Compiler::Compile</code> runs the real parser and
 <code>BytecodeGenerator::VisitArithmeticExpression</code>
 (<code>src/interpreter/bytecode-generator.cc:8039</code>) emits <code>Ldar a; Add b; Return</code> — where <code>Add</code> reserves an operand byte for its feedback
-(<code>kFeedbackIsEmbedded</code>, <code>src/common/globals.h:973</code>). The bytecode is
+(<code>kFeedbackIsEmbedded</code>, <code>src/common/globals.h:972</code>). The bytecode is
 born with a place to learn.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="first-call-execute-and-observe">First call: execute and observe</h3>
 <p>The call lands in
@@ -285,7 +285,7 @@ invalidate code that bet on the old shape.</p>
 <li><p><strong>Feedback: an embedded byte lattice, plus IC slots.</strong>
 <strong>What:</strong> arithmetic/comparison bytecodes carry their feedback as a
 byte operand inside the <code>BytecodeArray</code> (operand indices pinned at
-<code>src/common/globals.h:978</code>); its values form a bitmask lattice
+<code>src/common/globals.h:981</code>); its values form a bitmask lattice
 (<code>kSignedSmall = 0x1</code> … <code>kAny = 0x1FF</code>, <code>globals.h:2531</code>) that
 combines by widening. Property ICs instead hold slots in a
 <code>FeedbackVector</code> (<code>src/objects/feedback-vector.h:306</code>) whose state
@@ -534,8 +534,8 @@ lattice. Then <code>src/objects/map-updater.cc:1102</code> to see how
 generalization deprecates old maps.</li>
 <li><code>src/interpreter/bytecode-generator.cc:8039</code> — watch <code>a + b</code>
 become bytecode; find the <code>kFeedbackIsEmbedded</code> constant it uses
-(<code>src/common/globals.h:973</code>) and the operand-index constants
-below it (<code>:978</code>).</li>
+(<code>src/common/globals.h:972</code>) and the operand-index constants
+below it (<code>:981</code>).</li>
 <li><code>src/builtins/x64/builtins-x64.cc:1075</code> — the trampoline: budget
 decrement, stack-limit check, dispatch-table load, <code>call</code>, and
 the loop back to <code>do_dispatch</code>. Read it as assembly-level prose:
@@ -551,7 +551,7 @@ slot. Then the whole Add ladder in <code>src/ic/binary-op-assembler.cc:27</code>
 engine runs on: IC states and binary-operation feedback. These
 enums are the contract between every tier.</li>
 <li><code>src/execution/tiering-manager.cc:585 OnInterruptTick</code> and <code>:434 ShouldOptimize</code> — the promotion decision; cross-check thresholds
-in <code>src/flags/flag-definitions.h:1115–1140</code> (feedback at 8 calls,
+in <code>src/flags/flag-definitions.h:1115–1142</code> (feedback at 8 calls,
 Maglev at 400 on desktop, 1000 on Android, TurboFan at 3000, OSR
 at 500).</li>
 <li><code>src/compiler/pipeline.cc:505</code> — <code>PipelineCompilationJob</code>: read
