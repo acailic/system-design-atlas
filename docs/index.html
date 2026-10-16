@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">30 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">31 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -261,6 +261,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A kitchen where the orders are sticky notes. In most kitchens, one chef per customer, and hiring a chef is slow and expensive (an OS thread with a big fixed stack). Here, every order is written on…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/rocksdb/" data-domains="storage-engine" data-search="rocksdb: leveldb paged into flash-scale production — column families, budgets, and a tuning surface">
+  <span class="dc-name">RocksDB</span>
+  <span class="dc-headline">LevelDB paged into Flash-scale production — column families, budgets, and a tuning surface</span>
+  <span class="dc-eli"><b>Like you're 10:</b> From one kid's desk to an office building. LevelDB was one desk: one diary (the WAL), one scratch page (the memtable), one tidy-up robot (compaction). RocksDB turned the desk into a shared…</span>
+  <span class="dc-meta"><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -292,7 +298,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 35 projects; 30 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 35 projects; 31 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -316,7 +322,7 @@ transferable design moves you can apply to your own systems.</li>
 <summary>storage-engine <span class="count">(2)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/leveldb/">LevelDB</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The cleanest published LSM-tree (log-structured merge tree) engine, small enough to read in a week: a memtable backed by a skip list, an append-only WAL, leveled compaction of immutable SSTables, and a manifest that…</div></li>
-<li><span class="cat-name"><a href="https://github.com/facebook/rocksdb" rel="noopener">RocksDB ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<li><span class="cat-name"><a href="dive/rocksdb/">RocksDB</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">LevelDB's design pushed to production extremes: column families, tiered compaction, rate limiting, Bloom filters per level, transactions via a write batch pipeline. Read after LevelDB to see what the elegant textbook…</div></li></ul>
 </details>
 <details class="catalog-group">
