@@ -1,0 +1,777 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux kernel: one frozen door, ten thousand pluggable rooms — System Design Atlas</title>
+<meta name="description" content="The Linux kernel is the most deployed piece of software in existence — billions of devices, one codebase, thirty-plus years of daily change by thousands of engineers who have never met. The ">
+<meta property="og:title" content="Linux kernel: one frozen door, ten thousand pluggable rooms — System Design Atlas">
+<meta property="og:description" content="The Linux kernel is the most deployed piece of software in existence — billions of devices, one codebase, thirty-plus years of daily change by thousands of engineers who have never met. The ">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/linux/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/linux/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-read-doorbell-to-bytes-and-back">Walkthrough: one read(), doorbell to bytes and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Linux kernel: one frozen door, ten thousand pluggable rooms</h1>
+    <div class="meta-chips"><span class="chip domain">os-kernel</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/torvalds/linux" rel="noopener">GPL-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>8d3ae59288f1e7d58d76558a6ee96d533bc5019f</code> · v7.2, 2026-08-16 · <a href="https://github.com/torvalds/linux" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">The Linux kernel is the most deployed piece of software in existence —
+billions of devices, one codebase, thirty-plus years of daily change by
+thousands of engineers who have never met. The design lesson this dive
+teaches is <strong>contract discipline at planetary scale</strong>: exactly one
+interface is frozen forever (the syscall ABI — syscall number 0 has meant
+<code>read</code> since the first release), while everything behind that door is
+<em>designed to be
+rewritten</em> — including whole subsystems. The mechanism that makes that
+possible is the humble C struct of function pointers: a vtable at every
+layer boundary (<code>file_operations</code>, <code>sched_class</code>, <code>address_space_operations</code>),
+so new filesystems, scheduling policies, and drivers slot in without
+touching the core. Around the seams, the kernel scales by <em>sharding</em>
+rather than locking: per-CPU copies of hot data, lock-free reads under
+RCU, and a fair-share scheduler (EEVDF) that turns each CPU into
+thousands of virtual ones.</p>
+<p>Read it against <a href="../redis/">Redis</a> (a kernel-shaped server: one loop,
+vtables everywhere) and <a href="../libuv/">libuv</a> (which rents from the kernel
+the readiness interface this dive&#39;s spine touches); the kernel is the
+ur-example of both patterns. Focus is the four load-bearing subsystems —
+syscall entry, VFS, the page cache, and the scheduler — not the whole
+tree: tens of millions of lines are read with a map, never cover to
+cover.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A giant hotel whose front desk never changes, but whose rooms are
+rebuilt every night.</strong> Every guest (a program) rings the same numbered
+doorbells that were installed 30 years ago (the syscall table — bell
+number 0 always means &quot;read me a book&quot;): the desk&#39;s layout is the one
+promise the hotel never breaks. Whatever you ask for — a book (a file),
+a message to a friend (a socket) — the desk clerk looks it up on a
+clipboard of phone numbers (the <code>file_operations</code> vtable) and hands your
+request to the right specialist, so the hotel can hire new specialists
+any day without retraining the clerk. Each receptionist (a CPU core)
+serves thousands of guests by giving everyone tiny turns, and keeps a
+note of who got less than their fair share so far (the scheduler&#39;s
+&quot;lag&quot;); the guest most owed and soonest due gets the next turn. If the
+book you want isn&#39;t on the shelves (the page cache), you take a nap in a
+numbered bed instead of blocking the desk (the task sleeps, marked
+<code>TASK_KILLABLE</code>, and the receptionist immediately serves someone else);
+when the courier (block I/O) delivers the book, he taps your shoulder
+(the wake-up) and you get back in line. And if a guest hands the clerk a
+bad address, the clerk doesn&#39;t get hurt — a safety net under the counter
+(the exception table) catches the fall and hands back &quot;invalid address.&quot;</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> freezing the front door is what
+lets the inside be rebuilt constantly — you can only afford to replace a
+subsystem every few years if the outside contract never moves.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph user[&quot;user space — its own address space per process&quot;]
+        APP[&quot;app calls read(fd, buf, count)&lt;br/&gt;(glibc puts nr=0 in rax)&quot;]
+    end
+
+    subgraph door[&quot;the frozen door — arch/x86/entry/&quot;]
+        ENT[&quot;entry_SYSCALL_64 entry_64.S:87&lt;br/&gt;swapgs · kernel CR3 · per-CPU stack · pt_regs&quot;]
+        DISP[&quot;do_syscall_64 syscall_64.c:87&lt;br/&gt;→ x64_sys_call switch :35&quot;]
+    end
+
+    subgraph core[&quot;kernel core — one privileged address space&quot;]
+        VFS[&quot;VFS fs/ — vfs_read fs/read_write.c:554&lt;br/&gt;f_op-&gt;read_iter (vtable seam)&quot;]
+        SCHED[&quot;scheduler kernel/sched/ — __schedule core.c:7061&lt;br/&gt;sched_class walk · EEVDF fair.c:1136&quot;]
+        MM[&quot;memory mm/ — page cache filemap.c:2783&lt;br/&gt;folio + XArray · fault handler · SLUB/buddy&quot;]
+        BPF[&quot;eBPF kernel/bpf/ — verifier.c bpf_check :19771&lt;br/&gt;(proven-safe guest code)&quot;]
+    end
+
+    subgraph bottom[&quot;pluggable rooms — registered, not linked&quot;]
+        FS[&quot;filesystems fs/ext4, fs/xfs, …&lt;br/&gt;ext4_aops inode.c:3950&quot;]
+        BLK[&quot;block layer + drivers&lt;br/&gt;mpage_readahead → submit_bio&quot;]
+        SCX[&quot;sched_ext kernel/sched/ext/&lt;br/&gt;your scheduler as a BPF program&quot;]
+    end
+
+    HW[&quot;hardware: CPUs, memory, disks&quot;]
+
+    APP --&gt;|&quot;syscall instruction, ring 3→0&quot;| ENT --&gt; DISP --&gt;|&quot;__x64_sys_read → ksys_read&quot;| VFS
+    VFS --&gt;|&quot;a_ops-&gt;readahead&quot;| FS --&gt; BLK --&gt; HW
+    VFS --&gt; MM
+    MM --&gt;|&quot;folio not uptodate: sleep&quot;| SCHED
+    SCHED --&gt;|&quot;wake: folio_end_read&quot;| MM
+    SCHED --&gt; SCX
+    core -.-&gt;|&quot;modules: loadable at runtime&quot;| bottom
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The kernel is a library that runs in privileged mode, not a
+process.</strong> There is no kernel &quot;main loop&quot; and no message passing: a
+kernel subsystem is just another function on your call stack, entered
+through the syscall door. The layer map above is a <em>call</em> map — from
+<code>vfs_read</code> to <code>ext4_aops</code> to the block layer is ordinary C calls
+(some through vtables), in the caller&#39;s context, on the caller&#39;s
+behalf. Everything the atlas teaches about event loops
+(<a href="../redis/">Redis</a>, <a href="../nginx/">nginx</a>) lives one ring lower: the
+kernel <em>is</em> the thing those loops rent.</li>
+<li><strong>The frozen layer: syscall entry</strong> (<code>arch/x86/entry/</code>). Owned by the
+architecture: it transitions CPU state (segment, stack, address space
+via <code>SWITCH_TO_KERNEL_CR3</code>), materializes the register file as a
+<code>struct pt_regs</code> (<code>arch/x86/include/asm/ptrace.h:103</code>), and dispatches
+by number. The numbers themselves live in one data file,
+<code>arch/x86/entry/syscalls/syscall_64.tbl</code> — 443 lines; <code>read</code> is 0,
+<code>write</code> is 1, unchanged for decades.</li>
+<li><strong>The policy-free layer: VFS</strong> (<code>fs/</code>). <code>vfs_read</code>
+(<code>fs/read_write.c:554</code>) knows <em>what a read is</em> (permission, bounds,
+position, accounting) and nothing about bytes on disks: it ends in
+<code>file-&gt;f_op-&gt;read_iter</code> — a function pointer chosen by whoever opened
+the file. ext4, a pipe, a socket, <code>/dev/null</code>: same door, different
+clipboard.</li>
+<li><strong>The caching layer: the page cache</strong> (<code>mm/filemap.c</code>). One shared
+cache in front of <em>all</em> storage: pages keyed by (mapping, index) in an
+XArray. Reads copy out of it; misses populate it via readahead; the
+memory-reclaim code shrinks it when memory runs short — the kernel&#39;s
+biggest and most contended cache.</li>
+<li><strong>The CPU broker: the scheduler</strong> (<code>kernel/sched/</code>). Every blocking
+operation in the kernel funnels into <code>__schedule</code>
+(<code>kernel/sched/core.c:7061</code>), which asks a chain of scheduling
+classes — ordered <em>by memory address</em> (<code>SCHED_DATA</code>,
+<code>include/asm-generic/vmlinux.lds.h:153</code>: stop → deadline → rt → fair →
+ext → idle) — for the next task, and swaps register state.</li>
+<li><strong>Where the spine is:</strong> <code>read(fd, buf, count)</code> from the syscall
+instruction → <code>entry_SYSCALL_64</code> → <code>do_syscall_64</code> → <code>x64_sys_call</code>
+→ <code>ksys_read</code> → <code>vfs_read</code> → <code>f_op-&gt;read_iter</code> (<code>ext4_file_read_iter</code>)
+→ <code>filemap_read</code> → page-cache hit (copy) or miss (readahead → bio →
+sleep → <code>__schedule</code> → interrupt → wake → retry → copy) → return via
+<code>sysret</code>. The Walkthrough walks exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-read-doorbell-to-bytes-and-back">Walkthrough: one read(), doorbell to bytes and back</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant U as user program (rax=0)
+    participant E as entry_SYSCALL_64
+    participant D as do_syscall_64 / ksys_read
+    participant V as vfs_read → ext4_file_read_iter
+    participant PC as filemap_read (page cache)
+    participant IO as readahead → mpage → submit_bio
+    participant S as __schedule / pick_eevdf
+    participant IRQ as I/O completion → folio_end_read
+
+    U-&gt;&gt;E: syscall instruction (ring 3 → 0)
+    E-&gt;&gt;D: pt_regs on kernel stack; rax preset to -ENOSYS
+    D-&gt;&gt;V: fdget_pos(fd) → vfs_read → f_op-&gt;read_iter
+    V-&gt;&gt;PC: generic_file_read_iter → filemap_read
+    alt folio in cache &amp; uptodate
+        PC-&gt;&gt;PC: copy_folio_to_iter → copy_to_user
+    else miss
+        PC-&gt;&gt;IO: page_cache_sync_ra → ext4_aops-&gt;readahead → submit_bio
+        PC-&gt;&gt;S: folio_put_wait_locked(TASK_KILLABLE) → io_schedule
+        S-&gt;&gt;S: pick_next_task → pick_eevdf → __switch_to (next task runs)
+        IRQ-&gt;&gt;PC: mpage_read_end_io → folio_end_read: PG_locked cleared
+        IRQ-&gt;&gt;S: wake_up_process → task runnable, TIF_NEED_RESCHED
+        PC-&gt;&gt;PC: retry: folio now uptodate → copy_to_user
+    end
+    PC--&gt;&gt;D: bytes copied, f_pos advanced
+    D--&gt;&gt;U: return value in rax → sysretq (rcx==rip, r11==flags)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-doorbell">The doorbell</h3>
+<p>Userspace puts the syscall number in <code>rax</code>
+(0 = <code>read</code>) and arguments in <code>rdi</code>, <code>rsi</code>, <code>rdx</code>, then executes the
+<code>syscall</code> instruction, which the CPU answers by jumping to a
+model-specific register — pointing at <code>entry_SYSCALL_64</code>
+(<code>arch/x86/entry/entry_64.S:87</code>). Three lines of assembly do the
+security-critical swap: <code>swapgs</code> (switch to the kernel&#39;s GS base so
+per-CPU data is reachable), <code>SWITCH_TO_KERNEL_CR3</code> (mitigate
+Meltdown-class attacks), and
+<code>movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp</code> — the kernel stack of
+<em>this</em> CPU&#39;s current task. The registers are
+then pushed in <code>pt_regs</code> order, and — a small masterstroke —
+<code>PUSH_AND_CLEAR_REGS rax=$-ENOSYS</code>: the return slot starts as &quot;invalid
+syscall,&quot; so any dispatch failure already holds the right answer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="one-door-one-dispatcher">One door, one dispatcher</h3>
+<p><code>do_syscall_64</code>
+(<code>arch/x86/entry/syscall_64.c:87</code>) first runs
+<code>syscall_enter_from_user_mode</code> — the choke point where seccomp filters,
+ptrace, and audit hook every entry — then bounds-checks the number with
+<code>array_index_nospec</code> (Spectre hardening) and dispatches through
+<code>x64_sys_call</code> (<code>arch/x86/entry/syscall_64.c:35</code>), a giant <code>switch</code>
+generated from the syscall table, whose cases call thin <code>__x64_sys_*</code>
+stubs that pull arguments out of <code>pt_regs</code>. The generated switch
+compiles to a jump table; the old <code>sys_call_table[]</code> array survives a
+few lines above only because tracing still wants the addresses. Our case
+lands in <code>SYSCALL_DEFINE3(read)</code> (<code>fs/read_write.c:723</code>), which calls
+<code>ksys_read</code> (<code>fs/read_write.c:705</code>) — the same function the kernel calls
+internally when <em>it</em> needs to read a file. One door, no side entrances.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-vfs-counter">The VFS counter</h3>
+<p><code>ksys_read</code> resolves the fd to a
+<code>struct file</code> with <code>fdget_pos</code> (<code>fs/file.c:1252</code>) — which takes the file-position
+lock so concurrent reads can&#39;t tear <code>f_pos</code> — then hands off to
+<code>vfs_read</code> (<code>fs/read_write.c:554</code>). <code>vfs_read</code> is policy, not
+mechanism: check the file was opened for reading (<code>f_mode</code>), probe the
+user buffer without touching it (<code>access_ok</code>), verify bounds
+(<code>rw_verify_area</code>), clamp to <code>MAX_RW_COUNT</code> — then end in two function
+pointer calls: legacy <code>f_op-&gt;read</code> or, for every modern filesystem,
+<code>new_sync_read</code> (<code>fs/read_write.c:483</code>), which packages the request as a
+<code>kiocb</code> + <code>iov_iter</code> and calls <code>f_op-&gt;read_iter</code>. That pointer was
+decided when the file was opened; for an ext4 file it is
+<code>ext4_file_read_iter</code> (<code>fs/ext4/file.c:130</code>). The kernel never asks
+&quot;what kind of file is this&quot; — it asks the file.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-cache-lookup">The cache lookup</h3>
+<p><code>ext4_file_read_iter</code> handles ext4&#39;s
+special cases (DAX, direct I/O) and defers the common case to
+<code>generic_file_read_iter</code>, which lands in <code>filemap_read</code>
+(<code>mm/filemap.c:2783</code>): a loop of look-then-copy. The lookup,
+<code>filemap_get_pages</code> (<code>mm/filemap.c:2682</code>), calls <code>filemap_get_read_batch</code>
+(<code>mm/filemap.c:2470</code>), which walks the page cache — <code>mapping-&gt;i_pages</code>,
+an XArray (<code>include/linux/fs.h:474</code>) — <em>entirely under <code>rcu_read_lock()</code></em>
+with no locks taken: each entry found is pinned with <code>folio_try_get</code>,
+and if it changed underneath, the walk just retries. Reads of the
+hottest structure in the system synchronize by refcount, not by lock.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="hit-copy-to-the-stranger-s-memory">Hit: copy to the stranger&#39;s memory</h3>
+<p>A cached, up-to-date
+folio is copied with <code>copy_folio_to_iter</code> (<code>include/linux/uio.h:201</code>) →
+<code>copy_page_to_iter</code> (<code>lib/iov_iter.c:361</code>) → <code>_copy_to_user</code>
+(<code>lib/usercopy.c:22</code>) → <code>raw_copy_to_user</code>
+(<code>arch/x86/include/asm/uaccess_64.h:145</code>) → <code>copy_user_generic</code> — a string of tiny wrappers
+that end in one <code>rep movs</code>-style copy with the CPU&#39;s user-access bit
+(<code>stac</code>/<code>clac</code>) enabled. User memory is <em>not trusted</em>: it may be unmapped
+or changed concurrently. The safety net is the <strong>exception table</strong> —
+every usercopy instruction is annotated, and if the copy page-faults,
+<code>fixup_exception</code> (<code>arch/x86/mm/extable.c:299</code>) looks up the faulting
+instruction in <code>search_exception_tables</code>, and rewinds execution to a
+recovery stub that returns <code>-EFAULT</code> instead of crashing the kernel.
+Bad pointers become error codes, never oopses.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="miss-order-the-book-plug-the-batch">Miss: order the book, plug the batch</h3>
+<p>No folio found means
+readahead: <code>filemap_get_pages</code> calls <code>page_cache_sync_ra</code> →
+<code>page_cache_ra_unbounded</code> (<code>mm/readahead.c:222</code>), which allocates a
+<em>window</em> of folios around the request (the mapping&#39;s readahead heuristics
+pick the size), marks them locked-but-not-uptodate, and submits them via
+<code>read_pages</code> (<code>mm/readahead.c:160</code>) → <code>a_ops-&gt;readahead</code> — the second
+vtable seam — which for ext4 is <code>ext4_readahead</code>
+(<code>fs/ext4/readpage.c:415</code>, registered in <code>ext4_aops</code>,
+<code>fs/ext4/inode.c:3950</code>) →
+<code>mpage_readahead</code> (<code>fs/mpage.c:358</code>). The requests accumulate inside a
+<code>blk_plug</code> (batching) and leave as bios via <code>mpage_bio_submit_read</code>
+(<code>fs/mpage.c:70</code>, with <code>bi_end_io = mpage_read_end_io</code> installed). The
+disk is now working for us; the CPU is free.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="the-nap">The nap</h3>
+<p>Back in <code>filemap_get_pages</code>, the last folio of the
+batch is not yet uptodate, so <code>filemap_update_page</code> (<code>mm/filemap.c:2559</code>)
+hits its comment-marked destiny — &quot;This is where we usually end up
+waiting for a previously submitted readahead to finish&quot; — and calls
+<code>folio_put_wait_locked(folio, TASK_KILLABLE)</code>. This lands in
+<code>folio_wait_bit_common</code> (<code>mm/filemap.c:1250</code>): the task enqueues itself
+on a wait queue <em>hashed from the folio&#39;s address</em>
+(<code>folio_wait_table</code>, <code>mm/filemap.c:1074</code> — folios don&#39;t carry their own
+lock objects), does <code>set_current_state(TASK_KILLABLE)</code>, and calls
+<code>io_schedule()</code> (<code>kernel/sched/core.c:8149</code>) — which notes the task is
+about to sleep on I/O (for pressure-stall accounting) and calls
+<code>schedule()</code>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">8</span><div class="step-body"><h3 class="step-title" id="the-cpu-changes-hands">The CPU changes hands</h3>
+<p><code>__schedule</code>
+(<code>kernel/sched/core.c:7061</code>) takes the run-queue lock, deactivates the sleeping task
+(<code>try_to_block_task</code>), and asks <code>pick_next_task</code> for a replacement. The
+pick walks the scheduling classes <em>in address order</em> — the linker
+script <code>SCHED_DATA</code> (<code>include/asm-generic/vmlinux.lds.h:153</code>) lays out
+stop, deadline, rt, fair, ext (the BPF pluggable class), idle so that
+priority is pointer comparison (<code>sched_class_above</code>,
+<code>kernel/sched/sched.h:2823</code>). For a normal desktop the fair class wins,
+and its <code>pick_task_fair</code> reduces to <code>pick_eevdf</code>
+(<code>kernel/sched/fair.c:1136</code>): find the runnable entity with the earliest
+<em>virtual deadline</em> among those <em>eligible</em> (owed service: <code>vlag &gt;= 0</code>,
+checked by <code>entity_eligible</code>, <code>kernel/sched/fair.c:939</code>). The entities
+live in an augmented red-black tree (<code>cfs_rq-&gt;tasks_timeline</code>); a
+leftmost-first fast path usually answers in O(1), with a heap-style
+search over tree min-vruntimes as fallback. Then <code>__switch_to</code>
+(<code>arch/x86/kernel/process_64.c:610</code>) swaps the register/FP/address-
+space state, and the CPU runs someone else entirely. Our reader is off
+the CPU, costing nothing.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">9</span><div class="step-body"><h3 class="step-title" id="the-courier-taps-the-shoulder">The courier taps the shoulder</h3>
+<p>The disk finishes; the block
+layer&#39;s interrupt path runs the bio&#39;s <code>bi_end_io</code>:
+<code>mpage_read_end_io</code> (<code>fs/mpage.c:45</code>) iterates the bios&#39; folios and
+calls <code>folio_end_read</code> (<code>mm/filemap.c:1535</code>), which atomically XORs
+<code>PG_locked</code> and (on success) sets <code>PG_uptodate</code> in the folio&#39;s <em>flags</em> —
+the lock and the &quot;data is ready&quot; bit live in the page itself — and wakes
+the hashed wait queue. Each waiter&#39;s <code>wake_page_function</code>
+(<code>mm/filemap.c:1139</code>) is checked against the bit; the matching task is
+sent to <code>try_to_wake_up</code> (<code>kernel/sched/core.c:4251</code>), which re-enqueues
+it on a run queue and, if it preempts, marks the running task with
+<code>TIF_NEED_RESCHED</code> (<code>resched_curr</code>, <code>kernel/sched/core.c:1233</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">10</span><div class="step-body"><h3 class="step-title" id="return-through-the-same-door">Return through the same door</h3>
+<p>The woken task resumes
+inside <code>folio_wait_bit_common</code>, retries, finds the folio uptodate, and
+loops back up: <code>filemap_read</code>&#39;s loop copies the bytes (Step 5),
+<code>ksys_read</code> writes back the advanced <code>f_pos</code>, the byte count lands in
+<code>pt_regs-&gt;ax</code>. <code>do_syscall_64</code> runs <code>syscall_exit_to_user_mode</code>
+(signals, resched points, work), and because the saved state is a clean
+64-bit context (<code>rcx == rip</code>, <code>r11 == flags</code>), the fast exit applies:
+<code>syscall_return_via_sysret</code> pops registers, switches back to the user
+page tables, <code>swapgs</code>, <code>sysretq</code>. The program continues as if nothing
+happened — which is the entire point.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-door-held-one-turn-of-the-cpu-zero-wasted-waits">One door held, one turn of the CPU, zero wasted waits</h3>
+<p>Bytes sit in the user buffer; the syscall ABI never noticed that
+underneath it, four subsystems, two vtable seams, one lock-free cache
+lookup, one disk nap, one red-black-tree scheduling decision, and one
+interrupt-driven wake-up had to cooperate to keep the promise.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>struct pt_regs</code> — the ABI, frozen in a struct.</strong>
+<strong>What:</strong> the pushed register file (<code>rax</code>…<code>r15</code>, <code>rip</code>, <code>flags</code>,
+segment registers), defined for x86-64 at
+<code>arch/x86/include/asm/ptrace.h:103</code>; every syscall stub unpacks its arguments from it, every
+context switch swaps it.
+<strong>Why:</strong> the register order <em>is</em> the calling convention of the
+syscall ABI — stabilizing it structurally is why syscall number 0
+still dispatches to <code>read</code> while everything around it was rewritten.
+Wrapping &quot;whatever the CPU pushed&quot; in one struct also lets the same
+entry code serve interrupts, faults, and syscalls (<code>pt_regs</code> is the
+only argument <code>fixup_exception</code> needs to redirect execution).</p>
+</li>
+<li><p><strong><code>struct sched_entity</code> + <code>cfs_rq-&gt;tasks_timeline</code> — fair sharing as
+one augmented rbtree.</strong>
+<strong>What:</strong> per-task scheduling state (<code>include/linux/sched.h:575</code>):
+<code>vruntime</code> (virtual runtime), <code>vlag</code> (virtual lag — service owed,
+negative = received too much), <code>deadline</code> (virtual deadline =
+vruntime + slice/weight), plus an <code>rb_node</code>. The run queue
+(<code>cfs_rq</code>) holds them in an <em>augmented</em> red-black tree
+(<code>rb_root_cached</code>, <code>include/linux/rbtree_types.h:32</code>): each subtree
+caches its minimum <code>vruntime</code> and minimum <code>slice</code>, maintained on
+insert/erase by callbacks in <code>__enqueue_entity</code>
+(<code>kernel/sched/fair.c:1040</code>).
+<strong>Why:</strong> EEVDF needs two queries — &quot;who is eligible?&quot; and &quot;who has
+the earliest deadline among them?&quot; — and the augmentation lets
+<code>pick_eevdf</code>&#39;s heap-style search prune whole subtrees using cached
+minima, the same trick interval trees use. The rejected alternatives
+are visible in the tree&#39;s own history: a plain FIFO of runqueues (the
+pre-2007 O(1) scheduler) couldn&#39;t prove fairness; an un-augmented
+rbtree would force a full walk per pick. <code>rb_root_cached</code> adds one
+word (leftmost pointer) to make &quot;next&quot; O(1) in the common case.</p>
+</li>
+<li><p><strong><code>struct file</code> + <code>struct file_operations</code> — the object and its
+vtable.</strong>
+<strong>What:</strong> an open file (<code>fs/read_write.c</code> walks <code>f_mode</code>, <code>f_pos</code>,
+<code>f_op</code>) plus the operation table defined at <code>include/linux/fs.h:1921</code>
+— from <code>llseek</code> to <code>read_iter</code> to <code>mmap</code>, <code>fsync</code>, <code>uring_cmd</code>. ext4
+instantiates it at <code>fs/ext4/file.c:974</code> (<code>ext4_file_operations</code>).
+<strong>Why:</strong> this is the seam that makes &quot;everything is a file&quot; an
+engineering statement rather than a slogan: the same <code>vfs_read</code> copy
+path serves ext4, pipes, and <code>/dev/null</code> because they hand it
+different tables — dispatch costs one predictable indirect call.
+The struct ends in <code>__randomize_layout</code>, a reminder that every
+pointer-shaped contract here is also an attack surface, mitigated by
+compile-time shuffling.</p>
+</li>
+<li><p><strong><code>struct folio</code> + <code>mapping-&gt;i_pages</code> (XArray) — the cache as an
+index.</strong>
+<strong>What:</strong> a folio (one-to-many base pages) carrying its state in
+flags bits (<code>PG_locked</code>, <code>PG_uptodate</code>, checked/set atomically in
+<code>folio_end_read</code>), indexed in each file&#39;s <code>address_space</code> by page
+offset into an XArray (<code>include/linux/fs.h:474</code>).
+<strong>Why:</strong> page-cache lookups are the kernel&#39;s hottest read path, so
+the XArray is designed for exactly this: lock-free iteration under
+RCU (see <code>filemap_get_read_batch</code>) with slot-internal tags
+(dirty/writeback) folded into the same structure. And encoding
+lock-ness and uptodate-ness <em>in the cached object itself</em> (not in
+wrapper locks) is what lets an interrupt-path function like
+<code>folio_end_read</code> publish completion with two atomic bit operations
+and no lock objects at all.</p>
+</li>
+<li><p><strong><code>struct sched_class</code> — policy as a vtable, priority as an address.</strong>
+<strong>What:</strong> the scheduling-class interface (<code>kernel/sched/sched.h:2585</code>):
+<code>enqueue_task</code>, <code>dequeue_task</code>, <code>pick_task</code>, <code>wakeup_preempt</code>…
+Instances: <code>stop</code>, <code>deadline</code>, <code>rt</code>, <code>fair</code>, <code>ext</code>, <code>idle</code> — placed in
+that order by the <code>SCHED_DATA</code> linker block so class priority is
+pointer order (<code>include/asm-generic/vmlinux.lds.h:153</code>).
+<strong>Why:</strong> it keeps the scheduler core (<code>__schedule</code>) ignorant of
+policy, which is why Linux could swap CFS for EEVDF in one release
+and why <code>sched_ext</code> (<code>kernel/sched/ext/internal.h:288</code>,
+<code>struct sched_ext_ops</code>) can add a <em>user-authored</em> scheduling policy
+as a BPF program without the core noticing. Using linker layout for
+the priority order means <code>for_each_active_class</code> is a pointer walk —
+no dispatch table to maintain.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph cpu0[&quot;CPU 0&quot;]
+        RQ0[&quot;rq: cfs_rq rbtree&lt;br/&gt;fair class per-cpu&quot;]
+        SL0[&quot;SLUB cpu_sheaves&lt;br/&gt;main + spare sheafs&quot;]
+        PC0[&quot;per-CPU sections&lt;br/&gt;setup_percpu.c:111&quot;]
+    end
+    subgraph cpu1[&quot;CPU 1&quot;]
+        RQ1[&quot;rq: cfs_rq rbtree&quot;]
+        SL1[&quot;SLUB cpu_sheaves&quot;]
+    end
+    RQ0 &lt;--&gt;|&quot;load balance, rq-&gt;lock&quot;| RQ1
+    SL0 --&gt;|&quot;full sheaf → node barn&quot;| BARN[&quot;kmem_cache_node:&lt;br/&gt;node_barn (full/empty lists)&quot;]
+    SL1 --&gt;|&quot;full sheaf → node barn&quot;| BARN
+    RD[&quot;lock-free readers&lt;br/&gt;rcu_read_lock: page cache walk,&lt;br/&gt;__d_lookup_rcu dcache.c:2464&quot;]
+    WR[&quot;writers&lt;br/&gt;synchronize_rcu tree.c:3378&lt;br/&gt;waits a grace period&quot;]
+    RD -.-&gt;|&quot;never blocks&quot;| WR
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The unit of concurrency is the CPU, not the task.</strong> Each CPU owns a
+run queue (<code>cpu_rq</code>), and most hot kernel data is <em>replicated</em>
+per-CPU (<code>setup_per_cpu_areas</code>, <code>arch/x86/kernel/setup_percpu.c:111</code>)
+precisely so common operations need no shared write at all: the
+scheduler&#39;s queues, statistics counters, and — in v7.2&#39;s redesigned
+SLUB — the allocator itself. The new allocator gives each CPU a
+<code>struct slub_percpu_sheaves</code> (<code>mm/slub.c:433</code>): a <code>main</code> sheaf (an
+array of free object pointers) to pop from, a <code>spare</code>, and a per-node
+&quot;barn&quot; (<code>node_barn</code>, <code>mm/slub.c:409</code>) where full/empty sheaves are
+exchanged when a CPU&#39;s own supply runs out — allocation touches no
+shared line in the steady state, and the <em>slow</em> path
+(<code>___slab_alloc</code>, <code>mm/slub.c:4428</code>) is a refill, not a scan.</li>
+<li><strong>Locking is tiered by expected hold time, and sleeping under a
+spinlock is a bug.</strong> Spinlocks guard short, non-sleeping regions (the
+run-queue lock in <code>__schedule</code> is the canonical example); mutexes and
+folio locks are for regions that may sleep. The page cache shows the
+third tier: many &quot;locks&quot; aren&#39;t lock objects at all but atomic flag
+bits <em>in the folio</em> (<code>PG_locked</code>), with waiters parked on
+address-hashed wait queues (<code>folio_wait_table</code>, <code>mm/filemap.c:1074</code>)
+— no per-page allocation, no false sharing.</li>
+<li><strong>Readers never block writers: RCU.</strong> The page-cache walk in Step 4
+and the dentry lookup (<code>__d_lookup_rcu</code>, <code>fs/dcache.c:2464</code>) run
+under <code>rcu_read_lock()</code> (<code>include/linux/rcupdate.h:82</code>) with no locks
+and no refcounts on the <em>structure</em> (the folio refcount protects
+only the object). A writer replacing an entry then waits one <em>grace
+period</em> — all CPUs passing through a quiescent state — via
+<code>synchronize_rcu</code> (<code>kernel/rcu/tree.c:3378</code>) before freeing memory.
+This is the kernel&#39;s answer to the MVCC idea the atlas meets in
+<a href="../postgresql/">PostgreSQL</a>: readers see a stable snapshot and pay
+nothing for it; writers pay the deferral.</li>
+<li><strong>Failure is scoped: bad user pointers become <code>errno</code>s; oopses kill
+tasks; panics halt machines.</strong> The exception-table net (Step 5) turns
+the most common fault (user pointers) into a return value. A fault
+<em>outside</em> an annotated instruction kills only the offending task (an
+&quot;oops&quot;: its context is never scheduled again, the rest of the system
+keeps running — the mirror image of <a href="../haproxy/">HAProxy</a>&#39;s
+worker-kill philosophy, with processes as the containment unit).
+Only unrecoverable inconsistency halts the machine (<code>panic</code>).</li>
+<li><strong>Backpressure is memory reclaim, and its last resort is a killer.</strong>
+When memory runs short, the page cache is squeezed by <code>kswapd</code>
+(<code>mm/vmscan.c:7399</code>) walking LRU lists per node; a read that cannot
+get memory fast enough stalls (<code>psi_memstall_enter</code> marks the task)
+rather than fails. If reclaim cannot keep up, <code>out_of_memory</code>
+(<code>mm/oom_kill.c:1103</code>) scores and kills (<code>select_bad_process</code>,
+<code>mm/oom_kill.c:362</code>) the process that most cheaply frees memory —
+degradation with a visible event, not silent corruption.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is the syscall ABI, and it is data.</strong> One file,
+<code>arch/x86/entry/syscalls/syscall_64.tbl</code>, maps numbers to symbols;
+new calls are appended, numbers are never reused or renumbered — a
+a pre-0.9 binary still rings the same doorbells on v7.2 — the
+kernel&#39;s own stable-API document puts it plainly: &quot;I have old
+programs that were built on a pre 0.9something kernel that still
+work just fine&quot; (<code>Documentation/process/stable-api-nonsense.rst</code>).
+Everything else
+is explicitly <em>not</em> an ABI: &quot;we do not break userspace&quot; refers to
+this door only, as the kernel&#39;s own blunt document
+(<code>Documentation/process/stable-api-nonsense.rst</code>) explains to driver
+authors who ask for stable internal interfaces.</li>
+<li><strong>Extension seams are structs of function pointers at every layer
+boundary:</strong> <code>file_operations</code> (filesystems, but also sockets, pipes,
+devices — the same seam covers them all),
+<code>address_space_operations</code> (<code>ext4_aops</code>) for page-cache population,
+<code>sched_class</code> for CPU policy, and modules
+(<code>kernel/module/main.c:3422 load_module</code>) for loading whole
+subsystems at runtime — checked for signature and symbols against
+the <em>running</em> kernel (the internal API is unstable by policy, so a
+module is only valid for the exact build it was compiled against).</li>
+<li><strong>The newest seam runs guest code safely in the kernel: eBPF.</strong> A
+BPF program is loaded by <code>bpf_check</code> (<code>kernel/bpf/verifier.c:19771</code>),
+a static analyzer that <em>proves</em> — instruction by instruction
+(<code>do_check_main</code>, <code>kernel/bpf/verifier.c:18579</code>) — that the program
+terminates, touches only permitted memory, and fits helper contracts,
+before a single instruction executes. The proven-then-run model is
+what lets <code>sched_ext</code> expose <em>CPU scheduling itself</em> as a safe
+extension point: an ops struct of BPF functions
+(<code>kernel/sched/ext/internal.h:288</code>) implementing <code>select_cpu</code>,
+<code>enqueue</code>, <code>dispatch</code>, hot-swappable at runtime, with the kernel
+always able to fall back to the fair class.</li>
+<li><strong>Honest wart: the ABI freezes the 1970s, and extensions leak through
+it.</strong> The syscall interface is so stable it still encodes its
+ancestors&#39; mistakes — <code>ioctl</code> has become the escape hatch for
+anything that doesn&#39;t fit &quot;read/write a buffer&quot;, producing
+device-specific binary structs across the boundary that are stable
+<em>by convention</em> only, with compat_64 layers
+(<code>compat_ioctl</code> in <code>struct file_operations</code>) as the permanent tax.
+And the frozen-numbers policy means deprecating a syscall is
+effectively impossible: the kernel still implements <code>fork</code> against
+1980s semantics it would never design today.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-address-space-with-vtable-seams-over-isolated-services">Trade-off 1: one address space with vtable seams over isolated services</h3>
+<ul>
+<li><strong>Tension:</strong> a kernel needs defense in depth (bad drivers must not
+kill the machine) <em>and</em> raw speed (every syscall crosses the
+boundary); message-passing isolation pays a context switch per
+boundary crossing.</li>
+<li><strong>Choice:</strong> a monolith — drivers, filesystems, and core share one
+privileged address space and call each other directly (through
+vtables); fault containment is per-<em>task</em>, not per-<em>subsystem</em>.</li>
+<li><strong>Evidence:</strong> <code>fs/read_write.c:554 vfs_read</code> → <code>f_op-&gt;read_iter</code> is
+a plain indirect call in the caller&#39;s context — no IPC anywhere on
+the spine; the exception table (<code>arch/x86/mm/extable.c:299</code>) is the
+chosen mechanism for <em>the one fault class users cause directly</em>; and
+eBPF&#39;s verifier (<code>kernel/bpf/verifier.c:19771</code>) exists precisely
+because the kernel has no isolation to offer untrusted code by
+construction — it must <em>prove</em> safety instead.</li>
+<li><strong>Given up:</strong> a crashing filesystem takes the machine with it (a
+microkernel would restart it); security boundaries between
+subsystems are convention, not architecture (the whole hardening
+industry — SMEP, KPTI&#39;s CR3 switch in <code>entry_SYSCALL_64</code>, structure
+randomization like <code>__randomize_layout</code> on <code>file_operations</code> —
+exists to re-add walls the design omitted).</li>
+<li><strong>Verdict:</strong> right when the hot path is entry-dominated (syscalls
+are microseconds) and the code is curated by a central community
+that <em>does</em> review everything. Wrong when subsystems come from
+mutually distrusting vendors — which is exactly why phones
+(Qualcomm&#39;s microkernel-modem split) and cloud hypervisors draw the
+boundary one ring lower.</li>
+</ul>
+<h3 id="trade-off-2-fair-share-virtual-time-eevdf-over-strict-priorities-or-fifo">Trade-off 2: fair-share virtual time (EEVDF) over strict priorities or FIFO</h3>
+<ul>
+<li><strong>Tension:</strong> one CPU, thousands of tasks: any policy must answer
+&quot;who next?&quot; in nanoseconds while <em>also</em> being provably fair across
+seconds, and latency-sensitive tasks must win without being
+explicitly marked.</li>
+<li><strong>Choice:</strong> every fair-class task accumulates <code>vruntime</code>; its owed
+service is tracked as <code>vlag</code> (lag); each gets a virtual deadline
+<code>deadline = vruntime + slice/weight</code>
+(<code>update_deadline</code>, <code>kernel/sched/fair.c</code> — the code comments spell
+out <code>vd_i = ve_i + r_i/w_i</code>); the next task is the eligible one with
+the earliest deadline, found in an augmented rbtree.</li>
+<li><strong>Evidence:</strong> <code>kernel/sched/fair.c:1136 pick_eevdf</code> (leftmost-first
+with heap-style subtree pruning),
+<code>kernel/sched/fair.c:5968 place_entity</code> (on wakeup, lag is <em>preserved</em> — the comment derives
+the full placement algebra so a briefly-sleeping task neither gains
+nor loses its fair share), <code>kernel/sched/fair.c:79</code> (the default
+slice, 0.7 ms) and <code>entity_eligible</code> (<code>:939</code>) gating who may run at
+all.</li>
+<li><strong>Given up:</strong> the simplicity and O(1)-ness of runqueue FIFOs; some
+worst-case throughput (constant bookkeeping: the tree must be
+updated every enqueue/dequeue/preemption); and <em>precise</em> guarantees —
+lag decays for long sleepers (documented in
+<code>Documentation/scheduler/sched-eevdf.rst</code>), so fairness is
+statistical, not a hard promise.</li>
+<li><strong>Verdict:</strong> right for a general-purpose system serving mixed,
+unmarked workloads — latency sensitivity falls out of short slices
+(a task with a small slice has an earlier deadline) instead of
+requiring priority configuration. Wrong where workloads are known
+and static (batch HPC wants partitioned cores, not sharing), which
+is why the class ladder <em>above</em> fair (rt, deadline) still exists —
+and why <code>sched_ext</code> lets you replace this entire policy for your
+workload without patching the kernel.</li>
+</ul>
+<h3 id="trade-off-3-per-cpu-sharding-and-rcu-over-one-big-lock">Trade-off 3: per-CPU sharding and RCU over one big lock</h3>
+<ul>
+<li><strong>Tension:</strong> kernel data (run queues, allocator freelists, cache
+indices) is read and written by every CPU simultaneously; a single
+lock serializes the whole machine on one cache line.</li>
+<li><strong>Choice:</strong> replicate hot state per-CPU (run queues, counters,
+SLUB&#39;s sheaves) and make read-mostly shared structures traversable
+with no locks at all under RCU, deferring reclamation to grace
+periods.</li>
+<li><strong>Evidence:</strong> per-CPU allocator state (<code>struct slub_percpu_sheaves</code>,
+<code>mm/slub.c:433</code> — main/spare sheaves per CPU, shared &quot;barn&quot; lists
+only on overflow); lock-free page-cache walk (<code>filemap_get_read_batch</code>
+under <code>rcu_read_lock</code>, <code>mm/filemap.c:2470</code>) and dcache lookup
+(<code>__d_lookup_rcu</code>, <code>fs/dcache.c:2464</code>); the writer&#39;s side of the
+bargain, <code>synchronize_rcu</code> (<code>kernel/rcu/tree.c:3378</code>). This was
+earned the hard way: the pre-2.6 kernel really did have one Big
+Kernel Lock; its removal is the defining scalability project of the
+2000s.</li>
+<li><strong>Given up:</strong> memory (each CPU holds private free objects and queue
+copies — replication costs RAM); <em>consistency</em> (readers may see
+stale-but-valid snapshots: a just-unlinked dentry or a folio mid-
+promotion is fine to observe); and enormous complexity — RCU
+correctness arguments are among the hardest review burdens in the
+tree, and grace-period latency is a new worst case to manage.</li>
+<li><strong>Verdict:</strong> right whenever read-mostly data is hotter than the
+write rate — which is the common shape of infrastructure state
+(routing tables, configuration, caches — see the same instinct in
+<a href="../envoy/">Envoy&#39;s</a> read-copy snapshots and <a href="../kubernetes/">Kubernetes&#39;s</a>
+informer caches). Wrong for write-hot data with strong consistency
+needs (page <em>dirtying</em> uses locks/atomics, not RCU); there, shard
+by key instead, which is exactly what per-CPU structures are.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>arch/x86/entry/syscalls/syscall_64.tbl</code> — the ABI as a data file:
+443 lines, <code>0 common read sys_read</code>. Everything in this dive hangs
+off this table staying frozen.</li>
+<li><code>arch/x86/entry/entry_64.S:87 entry_SYSCALL_64</code> — the door: <code>swapgs</code>,
+kernel CR3, per-CPU stack switch, pt_regs construction, and the
+<code>rax=$-ENOSYS</code> default. Read the exit path below it too
+(<code>syscall_return_via_sysret</code>) to see the door open both ways.</li>
+<li><code>arch/x86/entry/syscall_64.c:87 do_syscall_64</code> and
+<code>:35 x64_sys_call</code> — dispatch: entry-from-user-mode hooks,
+<code>array_index_nospec</code>, the generated switch, and the old
+<code>sys_call_table[]</code> kept only for tracing.</li>
+<li><code>fs/read_write.c:723</code> → <code>:705</code> → <code>:554</code> → <code>:483</code> — the VFS counter
+end to end: <code>SYSCALL_DEFINE3(read)</code> → <code>ksys_read</code> (fdget_pos locks
+the position) → <code>vfs_read</code> (access_ok, rw_verify_area,
+<code>MAX_RW_COUNT</code>) → <code>new_sync_read</code> packaging a kiocb + iov_iter.</li>
+<li><code>include/linux/fs.h:1921 struct file_operations</code> beside
+<code>fs/ext4/file.c:974 ext4_file_operations</code> and
+<code>:130 ext4_file_read_iter</code> — the seam: 30+ slots of function pointers,
+instantiated per filesystem; notice <code>__randomize_layout</code> at the end.</li>
+<li><code>mm/filemap.c:2783 filemap_read</code> → <code>:2682 filemap_get_pages</code> →
+<code>:2470 filemap_get_read_batch</code> — the cache loop and the lock-free
+XArray walk under RCU; <code>include/linux/fs.h:474</code> is the index being
+walked.</li>
+<li><code>mm/readahead.c:222 page_cache_ra_unbounded</code> → <code>:160 read_pages</code> →
+<code>fs/ext4/readpage.c:415 ext4_readahead</code> (registered at
+<code>fs/ext4/inode.c:3950 ext4_aops</code>) →
+<code>fs/mpage.c:358 mpage_readahead</code> — the miss path: folios allocated and locked, bios
+built inside a <code>blk_plug</code>, <code>submit_bio</code> at <code>fs/mpage.c:74</code>.</li>
+<li><code>mm/filemap.c:2559 filemap_update_page</code> →
+<code>:1250 folio_wait_bit_common</code> — the nap: hashed wait queues
+(<code>folio_wait_table</code>, <code>:1074</code>), <code>set_current_state(TASK_KILLABLE)</code>,
+<code>io_schedule()</code>. Note the entire sleep protocol is ~40 lines using
+flags-in-folio, not lock objects.</li>
+<li><code>kernel/sched/core.c:7061 __schedule</code> → <code>:6124 __pick_next_task</code>,
+with <code>kernel/sched/sched.h:2585 struct sched_class</code> and
+<code>include/asm-generic/vmlinux.lds.h:153 SCHED_DATA</code> — the CPU broker:
+rq lock, task deactivation, the class walk where priority <em>is</em>
+address order. Then <code>arch/x86/kernel/process_64.c:610 __switch_to</code>
+for what a context switch physically swaps.</li>
+<li><code>kernel/sched/fair.c:1136 pick_eevdf</code> → <code>:5968 place_entity</code> →
+<code>:1040 __enqueue_entity</code> — EEVDF&#39;s three moves: pick (earliest
+virtual deadline among eligible, subtree-pruned), place (lag
+preservation on wakeup — read the comment&#39;s algebra), enqueue
+(augmented rbtree with cached subtree minima).</li>
+<li><code>kernel/sched/core.c:4251 try_to_wake_up</code> ←
+<code>mm/filemap.c:1535 folio_end_read</code> (called from
+<code>fs/mpage.c:45 mpage_read_end_io</code>) —
+the wake: two atomic bit-XORs publish completion, the wait queue
+routes to <code>wake_page_function</code> (<code>mm/filemap.c:1139</code>), the task
+re-enqueues and possibly sets <code>TIF_NEED_RESCHED</code>
+(<code>kernel/sched/core.c:1233 resched_curr</code>).</li>
+<li><code>lib/usercopy.c:22 _copy_to_user</code> →
+<code>arch/x86/include/asm/uaccess_64.h:145 raw_copy_to_user</code> →
+<code>arch/x86/mm/extable.c:299 fixup_exception</code> — the copy across the trust boundary and its
+safety net: <code>search_exception_tables(regs-&gt;ip)</code> rewinding a fault
+to <code>-EFAULT</code>.</li>
+</ol>
+<p>You have now traced one <code>read()</code> from the <code>syscall</code> instruction to
+bytes in user memory — through two vtable seams, a lock-free cache
+lookup, a disk-driven nap and red-black-tree wakeup, and back out the
+same frozen door — and met every recurring shape of kernel design on
+the way.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Freeze exactly one interface; design everything else to be
+replaceable</strong> — the syscall table is a data file that never renames,
+while schedulers and allocators were swapped wholesale: pick your
+product&#39;s equivalent of <code>syscall_64.tbl</code> and defend it with the same
+fanaticism, then stop promising anything else
+(<code>Documentation/process/stable-api-nonsense.rst</code> is the template
+for saying so out loud).</li>
+<li><strong>Make every layer boundary a struct of function pointers</strong> —
+<code>vfs_read</code> → <code>f_op-&gt;read_iter</code> and <code>read_pages</code> → <code>a_ops-&gt;readahead</code>
+show vtables at the two boundaries where variety is highest; a new
+filesystem is a new table, not a core patch.</li>
+<li><strong>Let hot readers run lock-free with refcounts as the lifeline</strong> —
+the page-cache walk pins folios under <code>rcu_read_lock</code> and retries on
+movement: any read-mostly index (config, catalog, cache) can adopt
+this shape; the writers pay for it, and only them.</li>
+<li><strong>Encode ordering in memory layout</strong> — <code>SCHED_DATA</code> makes scheduler
+class priority a pointer comparison, and <code>rb_root_cached</code> makes
+&quot;leftmost&quot; one word: when a chain of policies must be walked per
+operation, let the linker or the container carry the order.</li>
+<li><strong>Put wait queues in shared hashed tables, and locks in the object&#39;s
+bits</strong> — <code>folio_wait_bit_common</code> sleeps on a folio-address-hashed
+queue while the &quot;lock&quot; is <code>PG_locked</code> itself: per-object lock
+<em>allocations</em> are a tax you usually don&#39;t owe.</li>
+<li><strong>Prove safety before running foreign code, rather than sandboxing
+it at runtime</strong> — <code>bpf_check</code>&#39;s verifier buys kernel-resident
+extensions without isolation hardware; for plugin systems this is
+the difference between an extension marketplace and a liability.</li>
+<li><strong>Fail safe by default at the boundary</strong> —
+<code>PUSH_AND_CLEAR_REGS rax=$-ENOSYS</code> makes &quot;unhandled&quot; the pre-written answer, and the
+exception table makes the worst user input a return value: wire your
+entry points so the failure answer exists <em>before</em> dispatch.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 12–14 hours — the reading
+path alone is a focused day; split it entry+VFS / page cache+sleep /
+scheduler+wakeup into three sittings, and keep a running diagram of
+the spine as you go.</li>
+<li>Prerequisites: comfortable C, especially function-pointer structs and
+reading inline assembler (the <a href="../redis/">Redis</a> dive is a gentler
+warm-up for both); x86-64 basics — registers, the <code>syscall</code>
+instruction, rings (Intel SDM Vol. 3 or any osdev intro suffices);
+virtual memory (page tables, faults — the <a href="../runc/">runc</a> dive&#39;s
+pivot_root section touches adjacent machinery); red-black trees at
+the level of <code>Documentation/core-api/rbtree.rst</code> (in-tree, 2 pages).
+No prior kernel-hacking experience required — that&#39;s the point of
+following one spine.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>Documentation/scheduler/sched-eevdf.rst</code> — the kernel&#39;s own EEVDF
+explainer with the 1995 EEVDF paper and Zijlstra&#39;s 2023 proposal
+links;
+read after stop 10.</li>
+<li><code>Documentation/scheduler/sched-ext.rst</code> — sched_ext: scheduling
+policies as BPF programs, the newest instantiation of the vtable
+lesson.</li>
+<li><code>Documentation/process/stable-api-nonsense.rst</code> — the canonical
+statement of the frozen-door / replaceable-inside contract, in the
+kernel&#39;s own voice.</li>
+<li><code>Documentation/core-api/rbtree.rst</code> — the augmented-rbtree mechanics
+behind <code>tasks_timeline</code> (and its contrast with radix trees, the
+XArray&#39;s ancestor).</li>
+<li>The comment blocks quoted in this dive are themselves primary
+sources: <code>kernel/sched/fair.c</code>&#39;s lag algebra above <code>place_entity</code>,
+and the pre-amble of <code>arch/x86/entry/entry_64.S</code>.</li>
+<li>Books: Robert Love, <em>Linux Kernel Development</em> (the gentlest
+orientation); Wolfgang Mauerer, <em>Professional Linux Kernel
+Architecture</em>; Arpaci-Dusseau &amp; Arpaci-Dusseau, <em>Operating Systems:
+Three Easy Pieces</em> (free online — the VM and scheduling chapters are
+the best preparation for sections 2–5); Michael Kerrisk, <em>The Linux
+Programming Interface</em> (the user side of the frozen door).</li>
+<li>The <a href="../redis/">Redis</a>, <a href="../libuv/">libuv</a>, and <a href="../runc/">runc</a> dives
+in this atlas — three systems that are, in different ways, thin
+layers over the machinery this dive walked: an event loop, a
+readiness interface, and a namespace sandwich.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../haproxy/"><span class="dir">← Previous dive</span>HAProxy: a proxy where every hot path runs against a visible budget</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 29 of 29 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
