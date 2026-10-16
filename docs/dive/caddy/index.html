@@ -429,7 +429,8 @@ closures compiled once per config generation.</li>
 <li><strong>Evidence:</strong> <code>caddyfile/adapter.go:32</code> <code>Adapt</code> ends in
 <code>json.Marshal(cfg)</code> — the Caddyfile is never interpreted at runtime;
 <code>StrictUnmarshalJSON</code> (<code>modules.go:342</code>) makes unknown fields fatal;
-<code>routes.go:160</code> &quot;pre-compile the middleware handler chain&quot;;
+<code>routes.go:180</code> &quot;pre-compile the middleware handler chain&quot;
+(<code>ProvisionHandlers</code>, 160);
 <code>matchers.go:256</code> normalizes and sorts host lists at provision time
 so request-time matching binary-searches.</li>
 <li><strong>Given up:</strong> runtime loading of code (compile-time module graph —
@@ -508,7 +509,7 @@ for the provision-vs-request split.</li>
 before user handlers (ACME challenge in <code>ServeHTTP</code> at 759, header
 hygiene, strict SNI-Host enforcement).</li>
 <li><code>modules/caddytls/connpolicy.go</code> — <code>ConnectionPolicies.TLSConfig</code>
-(98) for the SNI index, then <code>buildStandardTLSConfig</code> (278) for
+(98) for the SNI index, then <code>buildStandardTLSConfig</code> (279) for
 the <code>GetCertificate</code> closure; follow into
 <code>tls.go:getConfigForName</code> (897) and <code>ondemand.go:119</code> for the
 permission gate on handshake-time issuance.</li>
