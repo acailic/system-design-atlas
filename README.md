@@ -98,8 +98,9 @@ Deep-dives (the exemplars — more added over time):
 - [PyTorch](deep-dives/pytorch.md) — define-by-run autograd: the eager pass records its own tape over a C++ dispatcher
 - [Servo](deep-dives/servo.md) — supervised message-passing pipelines: the constellation, a DOM pointer vocabulary for Rust + GC, layout as an in-thread visitor, runtime-switchable process topology
 - [HAProxy](deep-dives/haproxy.md) — budgeted tasklet scheduler, ebtree run queues, socket-handoff seamless reload
+- [Caddy](deep-dives/caddy.md) — goroutines instead of state machines, config as a provisioned document, automatic HTTPS as a subsystem
 
-The catalog tracks 6 further heavyweight and high-teaching-value
+The catalog tracks 5 further heavyweight and high-teaching-value
 candidates awaiting deep-dives — the Linux kernel, RocksDB, V8,
 and more —
 across databases, queues, runtimes, containers, ML, browser engines,

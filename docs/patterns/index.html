@@ -233,6 +233,10 @@ compatible implementations coexist in one program;
 <a href="../dive/pytorch/">PyTorch</a> — every extension (custom
 ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
+<a href="../dive/caddy/">Caddy</a> — every extension point is a
+namespace-addressed slot in one typed JSON config, resolved by
+reflection at provisioning time, which is how 133 modules compose
+behind one static binary;
 <a href="../dive/servo/">Servo</a> — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
 so shells and C hosts (servoshell, ffi/capi) extend without forking.</p>
