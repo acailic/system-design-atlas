@@ -47,9 +47,7 @@ restart; [Elasticsearch](deep-dives/elasticsearch.md) — the translog
 is the WAL that decouples "searchable" (refresh) from "durable" (flush);
 [ZooKeeper](deep-dives/zookeeper.md) — FileTxnLog appends every
 proposal and fsyncs before the follower acks, so election is just
-"highest log wins"; [RocksDB](deep-dives/rocksdb.md) — one WAL
-multiplexed over column families whose CF-tagged record types double
-as a prepare/commit/rollback transaction protocol.
+"highest log wins."
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -97,7 +95,12 @@ random pipeline death;
 [HAProxy](deep-dives/haproxy.md) — the
 master re-executes itself per reload and the old worker hands its
 listening sockets to the new one over a socketpair, so the supervisor
-ever only owns supervision, never a single connection.
+ever only owns supervision, never a single connection;
+[Chromium](deep-dives/chromium.md) — the
+browser process supervises sandboxed renderer processes it assumes
+are hostile: a dead renderer is a sad tab and a policy-ladder
+respawn, and a lying one is killed on a catalogued
+BadMessageReason.
 
 **Why it recurs:** crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.
@@ -130,9 +133,11 @@ processing model, so one page's hang cannot stall another site;
 [HAProxy](deep-dives/haproxy.md) — one poll loop per thread, but with
 the loop's own scheduler made explicit: budgeted tasklet run queues
 in ebtrees, weighted by class, policed by a CPU-time watchdog;
-[Go runtime](deep-dives/go.md) — the readiness demultiplexer hidden
-*under* a thread scheduler: epoll parks and readies whole goroutines,
-so the loop exists but user code never sees a callback.
+[Chromium](deep-dives/chromium.md) — every
+process is threads-over-queues: the browser's named UI/IO threads
+plus a trait-tagged ThreadPool, and renderers whose main thread is
+the HTML event loop — with PostTask messages, not locks, as the
+officially documented cross-thread contract.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -157,22 +162,7 @@ resync periods as a safety net under the event stream;
 background thread moving buckets under the same stripe locks the
 request path uses; [Lua](deep-dives/lua.md) — the GC advances in
 allocation-debt-paced steps (`luaC_step`) so a guest language never
-pauses its host's frame budget; [linux](deep-dives/linux.md) —
-kswapd reclaims memory in budgeted background passes so allocation
-never stalls on a full scan, and readahead turns one small read into
-a window of prefetched I/O so the next reads hit the page cache;
-[Go runtime](deep-dives/go.md) — the whole GC is this rule at war with
-an allocation rate: concurrent mark on a 25% CPU budget, allocation
-billed as scanning debt (`gcAssistAlloc`), and Green Tea batching
-spans to keep each unit of mark work cache-local;
-[RocksDB](deep-dives/rocksdb.md) — compaction budgets made explicit:
-a token-bucket rate limiter throttles background I/O while a stall
-ladder turns overload into published, steerable slowdown states;
-[V8](deep-dives/v8.md) — marking runs
-as allocation-paced steps on the main thread plus concurrent jobs on
-the embedder's platform, with the store-path write barrier as the
-mutator's tax that buys never stopping for one big collection
-(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`).
+pauses its host's frame budget.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -211,9 +201,7 @@ phones to airliners; [LevelDB](deep-dives/leveldb.md) — `Env` as the
 whole OS surface; [nginx](deep-dives/nginx.md) — event-module vtables
 (epoll/kqueue/select behind one macro);
 [libuv](deep-dives/libuv.md) — the whole product is this pattern: one
-loop core, one `uv__io_poll` per platform;
-[RocksDB](deep-dives/rocksdb.md) — `Env` later split into `FileSystem`
-+ `SystemClock` when the single OS seam itself grew too broad.
+loop core, one `uv__io_poll` per platform.
 
 **Why it recurs:** portability is architectural, not a build flag; the
 interface is where testing doubles (in-memory VFS, memdb) come from.
@@ -232,11 +220,7 @@ snapshots from the procarray; [Kubernetes](deep-dives/kubernetes.md) —
 resourceVersion optimistic concurrency over every object; [LevelDB](deep-dives/leveldb.md) —
 compaction drops versions below the oldest live snapshot; [etcd](deep-dives/etcd.md)
 — the whole keyspace is revision-stamped history, watch replays it,
-compaction truncates it; [linux](deep-dives/linux.md) — RCU is the
-same bet at memory granularity: readers walk page-cache and dentry
-structures under `rcu_read_lock` with no locks at all, writers
-publish replacements atomically, and reclamation waits a grace
-period (`synchronize_rcu`).
+compaction truncates it.
 
 **Why it recurs:** locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.
@@ -281,11 +265,7 @@ ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
 [Servo](deep-dives/servo.md) — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
-so shells and C hosts (servoshell, ffi/capi) extend without forking;
-[linux](deep-dives/linux.md) — vtables at every layer joint
-(`file_operations`, `sched_class`) let thousands of filesystems and
-drivers — and, via sched_ext, even whole CPU scheduling policies as
-BPF programs — extend a monolith without forking it.
+so shells and C hosts (servoshell, ffi/capi) extend without forking.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -332,14 +312,11 @@ autograd kernels, backward nodes, and dispatch registrations for
 2,000+ operators from one schema pair;
 [Servo](deep-dives/servo.md) — 576 WebIDL files are code-generated
 into Rust DOM bindings and JS glue, so the web API surface cannot
-drift from its implementations; [linux](deep-dives/linux.md) —
-`syscall_64.tbl` is the frozen syscall ABI as one data file, from
-which the dispatch switch, the `__x64_sys_*` stubs, and the tracing
-table are all generated; [V8](deep-dives/v8.md) — the
-interpreter itself is generated: one `IGNITION_HANDLER` DSL per
-bytecode (with Torque-built builtins beside it) compiles to
-machine-code handlers for every architecture, the same move as
-CPython's `bytecodes.c` but stopping at nothing short of code.
+drift from its implementations;
+[Chromium](deep-dives/chromium.md) — ~1,900
+.mojom IDL files compile into typed, versioned IPC bindings for
+every process boundary, so validation and version skew are build
+artifacts, not review diligence.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
@@ -375,39 +352,6 @@ operations that need a global view (rebalancing without client
 updates, multi-key transactions) become impossible or bolted on
 later — which is exactly the cliff both Memcached and early Kafka
 hit, and what ZooKeeper/etcd exist to catch on the coordination side.
-
-## 14. Speculate, guard, deoptimize
-
-**Shape:** run a slow-but-correct baseline; record what actually
-happens (types, shapes, call targets); compile guarded fast paths
-that assume the observations hold; when a guard fails, fall back to
-the baseline and record the wider truth. Wrong guesses are a
-designed control-flow path, not an error.
-
-**Seen in:** [V8](deep-dives/v8.md) — the full ladder: feedback
-bytes and IC states observed by Ignition, four tiers of guarded
-code, `Deoptimizer` rebuilding interpreter frames, and
-`CompilationDependencies` registering invalidations so a Map
-transition can retire whole batches of optimized code;
-[CPython](deep-dives/cpython.md) — the portable middle point: the
-same feedback-and-guards idea (3.11's adaptive interpreter)
-specializing bytecode in place, with deopt back to the generic
-opcode, and no JIT at all. [Lua](deep-dives/lua.md) is the control
-experiment: zero speculation, one honest interpreter.
-
-**Why it recurs:** dynamic languages hide their types until runtime;
-when the workload is long-lived, learning-by-running beats both
-static typing (unshippable) and naive interpretation (unbearably
-slow). The engineering is not the specialization — it is making
-retraction complete and cheap, because a guess you cannot safely
-take back is a crash.
-
-**Reach for it when:** the hot paths are stable enough to have
-repeating shapes/types and the process lives long enough to amortize
-learning. Costs: warmup latency (cold code runs the baseline),
-memory for feedback and multiple code versions, and deopt storms
-when shapes churn. Short-lived processes should stay at CPython's
-specialization tier or Lua's none at all.
 
 ---
 

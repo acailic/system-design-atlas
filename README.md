@@ -23,7 +23,7 @@ event loops for I/O-bound work", "content-address your data". Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.
 
-The atlas points at 35 (and growing) canonical codebases and walks through
+The atlas points at 34 (and growing) canonical codebases and walks through
 the *decisions frozen into their code*: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -98,17 +98,14 @@ Deep-dives (the exemplars — more added over time):
 - [PyTorch](deep-dives/pytorch.md) — define-by-run autograd: the eager pass records its own tape over a C++ dispatcher
 - [Servo](deep-dives/servo.md) — supervised message-passing pipelines: the constellation, a DOM pointer vocabulary for Rust + GC, layout as an in-thread visitor, runtime-switchable process topology
 - [HAProxy](deep-dives/haproxy.md) — budgeted tasklet scheduler, ebtree run queues, socket-handoff seamless reload
-- [Linux kernel](deep-dives/linux.md) — frozen syscall ABI over vtable seams: fair-share EEVDF scheduler, lock-free page cache, RCU reads
-- [Go runtime](deep-dives/go.md) — M:N goroutines: GMP work-stealing scheduler, integrated netpoller, growable stacks + escape analysis, concurrent GC with a hybrid write barrier
-- [RocksDB](deep-dives/rocksdb.md) — LevelDB paged into production: column families over one WAL, stall ladders and I/O budgets, pluggable compaction
-- [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
+- [Chromium](deep-dives/chromium.md) — a security model that forced the architecture: sandboxed renderer processes, site isolation, Mojo capability IPC, the browser's mirrored frame tree
 
-The catalog tracks 3 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Caddy, Chromium, Neovim,
+The catalog tracks 5 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — the Linux kernel, RocksDB, V8,
 and more —
 across databases, queues, runtimes, containers, ML, browser engines,
-load balancers, and editors. Chromium is cataloged for
-targeted reading rather than a deep-dive by design (see its entry).
+load balancers, and editors. Linux is cataloged for
+targeted reading rather than deep-dives by design (see its entry).
 
 ## Status
 
