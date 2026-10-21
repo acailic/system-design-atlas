@@ -93,12 +93,12 @@ and CPUs vectorize.</p>
     subgraph storage[&quot;storage — the IStorage seam (IStorage.h:481)&quot;]
         MTSE[&quot;MergeTreeDataSelectExecutor.cpp:229 read()&lt;br/&gt;prune parts → mark ranges → read pools&quot;]
         MTSINK[&quot;MergeTreeSink.cpp:135 consume()&lt;br/&gt;→ writeTempPart (MergeTreeDataWriter.cpp:786)&quot;]
-        PARTS[&quot;immutable parts: [Column].bin + .mrk3 marks&lt;br/&gt;+ primary.idx + minmax + checksums.txt&lt;br/&gt;(MergeTreeData.h:156 design comment)&quot;]
+        PARTS[&quot;immutable parts: [Column].bin + .mrk3 marks&lt;br/&gt;+ primary.idx + minmax + checksums.txt&lt;br/&gt;(MergeTreeData.h:159 design comment)&quot;]
         MERGES[&quot;background merges &amp; mutations&lt;br/&gt;(MergeTreeDataMergerMutator.cpp:273/435)&quot;]
     end
 
     subgraph cluster[&quot;cluster layer&quot;]
-        REPL[&quot;ReplicatedMergeTreeQueue on Keeper&lt;br/&gt;(ReplicatedMergeTreeQueue.h:39)&lt;br/&gt;executeLogEntry (StorageReplicatedMergeTree.cpp:2581)&quot;]
+        REPL[&quot;ReplicatedMergeTreeQueue on Keeper&lt;br/&gt;(ReplicatedMergeTreeQueue.h:38)&lt;br/&gt;executeLogEntry (src/Storages/StorageReplicatedMergeTree.cpp:2581)&quot;]
         DIST[&quot;StorageDistributed.cpp:1101 —&lt;br/&gt;scatter INSERTs / gather SELECTs&quot;]
     end
 
@@ -149,7 +149,7 @@ stretches that matter and open heavy drawers last.</p>
     W-&gt;&gt;P: per column: compressed .bin + marks; primary.idx = PK of every granule start
     Note over P: part is immutable; background merges&lt;br/&gt;combine parts later (LSM lineage)
     C-&gt;&gt;R: SELECT sum(x) WHERE pk BETWEEN a AND b
-    R-&gt;&gt;R: filterPartsByPartition (714) + markRangesFromPKRange (2132)&lt;br/&gt;KeyCondition over primary.idx → granule ranges
+    R-&gt;&gt;R: filterPartsByPartition (714) + markRangesFromPKRange (2107)&lt;br/&gt;KeyCondition over primary.idx → granule ranges
     R-&gt;&gt;X: tasks = (part, mark ranges) from read pool
     X-&gt;&gt;P: PREWHERE: read filter columns of surviving granules only;&lt;br/&gt;late columns fetched for surviving rows (RangeReader chain)
     X-&gt;&gt;X: vectorized expressions over Blocks; Aggregator two-level tables
@@ -190,7 +190,7 @@ That is the whole &quot;index&quot; — one key row per 8,192 data rows.</p></di
 (<code>src/Storages/MergeTree/MergeTreeDataSelectExecutor.cpp:229</code>):
 <code>filterPartsByPartition</code> (<code>:714</code>) drops whole parts using per-part
 <code>minmax_[Column].idx</code> files (partition pruning), and
-<code>markRangesFromPKRange</code> (<code>:2132</code>) walks <code>primary.idx</code> in memory,
+<code>markRangesFromPKRange</code> (<code>:2107</code>) walks <code>primary.idx</code> in memory,
 asking the <code>KeyCondition</code> (<code>src/Storages/MergeTree/KeyCondition.h:66</code>)
 whether each granule&#39;s key range can still match — survivors become
 mark ranges. In a well-partitioned table this one step skips the
@@ -233,7 +233,7 @@ merges them (<code>MergingSortedAlgorithm</code>,
 <code>src/Processors/Merges/Algorithms/MergingSortedAlgorithm.h:14</code>) into a
 new part at a higher <code>level</code> — the part name carries that level, the
 LSM signature. UPDATE/DELETE never edit parts: mutations enqueue
-rewrites (<code>MutationsInterpreter.h:66</code>), executed by the same machinery.</p></div></div>
+rewrites (<code>src/Interpreters/MutationsInterpreter.h:66</code>), executed by the same machinery.</p></div></div>
 <div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="scans-touch-only-what-they-need">Scans touch only what they need</h3>
 <p>The INSERT became a
 sealed, sorted, granulated part with no read-modify-write anywhere;
@@ -245,7 +245,7 @@ batch-at-a-time arithmetic.</p></div></div>
 <h3 id="block-the-unit-of-processing-src-core-block-h-32">Block — the unit of processing (<code>src/Core/Block.h:32</code>)</h3>
 <p>A <code>Block</code> is a list of named, typed columns — &quot;container for set of
 columns for bunch of rows… this is unit of data processing&quot; (class
-comment at <code>src/Core/Block.h:22</code>). Pipelines, formats, functions, the
+comment at <code>src/Core/Block.h:26</code>). Pipelines, formats, functions, the
 client protocol: everything exchanges Blocks. <strong>Why:</strong> making the
 batch the universal currency amortizes per-call overhead (virtual
 dispatch, name/type checks) across 65k+ rows, and lets one engine
@@ -267,7 +267,7 @@ specializations) but pays for itself in scan speed.</p>
 <p>Each part directory holds, per column, a compressed <code>.bin</code> plus
 <code>.mrk3</code> marks, and <code>primary.idx</code>, <code>partition.dat</code>, <code>minmax_*.idx</code>,
 <code>checksums.txt</code> — the layout documented in the design comment at
-<code>src/Storages/MergeTree/MergeTreeData.h:156</code>. Parts are chosen wide
+<code>src/Storages/MergeTree/MergeTreeData.h:159</code>. Parts are chosen wide
 (one file per column) or compact (single <code>all.bin</code>) by expected size
 (<code>choosePartFormat</code> in <code>writeTempPartImpl</code>). <strong>Why:</strong> identical shape
 in memory and on disk means reading a column <em>is</em> one contiguous
@@ -309,7 +309,7 @@ owns a connection or a table: work is granule-shaped and portable.</li>
 <li><strong>Crash-safety by immutability:</strong> a half-written part lives in a
 <code>tmp_insert_</code> directory and is simply dropped on restart; a part
 becomes visible only after its files and <code>checksums.txt</code> are
-complete (see the layout comment, <code>MergeTreeData.h:156</code>). Merges
+complete (see the layout comment, <code>MergeTreeData.h:159</code>). Merges
 write to temporary directories too — a crashed merge costs the
 wasted work, never the data. There is no undo log and none is
 needed; recovery is &quot;delete tmp, trust checksums.&quot;</li>
@@ -317,10 +317,10 @@ needed; recovery is &quot;delete tmp, trust checksums.&quot;</li>
 intended operations (INSERT, MERGE, MUTATION, DROP…) in
 ClickHouse Keeper (ZooKeeper lineage); each replica tails its own
 <code>ReplicatedMergeTreeQueue</code>
-(<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:39</code>), and
+(<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:38</code>), and
 entries may execute out of order when safe
 (<code>shouldExecuteLogEntry</code>, <code>ReplicatedMergeTreeQueue.cpp:1656</code>;
-<code>executeLogEntry</code>, <code>StorageReplicatedMergeTree.cpp:2581</code>). Parts
+<code>executeLogEntry</code>, <code>src/Storages/StorageReplicatedMergeTree.cpp:2581</code>). Parts
 themselves are exchanged peer-to-peer, not through Keeper.
 INSERT deduplication is also a Keeper fact: block hashes under
 <code>/blocks/&lt;hash&gt;</code> make a retried insert idempotent.</li>
@@ -385,7 +385,7 @@ background rewrites.</li>
 <li><strong>Evidence:</strong> <code>writeTempPartImpl</code> sorts every insert
 (<code>MergeTreeDataWriter.cpp:786</code>); column files written per-column
 with marks (<code>MergeTreeDataPartWriterWide.cpp:360</code>); the design
-comment <code>MergeTreeData.h:156</code> states the invariant &quot;the table
+comment <code>MergeTreeData.h:159</code> states the invariant &quot;the table
 consists of several sorted parts… merged in the background.&quot;</li>
 <li><strong>Given up:</strong> in-place UPDATE/DELETE (mutations are asynchronous
 part rewrites), fast point lookups (a hit still reads a whole
@@ -404,7 +404,7 @@ compensate with PREWHERE to filter before wide columns are read.</li>
 <li><strong>Evidence:</strong> <code>calculateAndSerializePrimaryIndex</code>
 (<code>MergeTreeDataPartWriterOnDisk.cpp:255</code>, &quot;index contains Primary
 Key value for each <code>index_granularity</code> row&quot;); pruning in
-<code>markRangesFromPKRange</code> (<code>MergeTreeDataSelectExecutor.cpp:2132</code>);
+<code>markRangesFromPKRange</code> (<code>MergeTreeDataSelectExecutor.cpp:2107</code>);
 PREWHERE late materialization
 (<code>MergeTreeRangeReader.cpp:1727</code>).</li>
 <li><strong>Given up:</strong> row-precise seeks; queries without useful predicates
@@ -440,7 +440,7 @@ design keeps you at that ceiling with plain, debuggable C++.</li>
 </ul>
 <h2 id="6-reading-path">6. Reading path</h2>
 <ol>
-<li><code>src/Storages/MergeTree/MergeTreeData.h:156</code> — the file header&#39;s
+<li><code>src/Storages/MergeTree/MergeTreeData.h:159</code> — the file header&#39;s
 design comment: incremental sorting, part file structure, merge
 modes. The whole engine in 50 lines of comments; read it first.</li>
 <li><code>src/Storages/MergeTree/MergeTreeSettings.cpp:72</code> —
@@ -461,7 +461,7 @@ marks as (compressed, decompressed) offsets; then
 <code>calculateAndSerializePrimaryIndex</code>: <code>primary.idx</code> = first key per
 granule. Pair with <code>src/Formats/MarkInCompressedFile.h:17</code>.</li>
 <li><code>src/Storages/MergeTree/MergeTreeDataSelectExecutor.cpp:714</code> and
-<code>:2132</code> — <code>filterPartsByPartition</code> then <code>markRangesFromPKRange</code>:
+<code>:2107</code> — <code>filterPartsByPartition</code> then <code>markRangesFromPKRange</code>:
 minmax files and the in-memory sparse index deciding which
 granules exist for this query at all.</li>
 <li><code>src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:395</code> —
@@ -473,7 +473,7 @@ chain; then <code>src/Storages/MergeTree/MergeTreeReaderStream.h:45</code> —
 <code>executePrewhereActionsAndFilterColumns</code>: filter columns read
 first, wide columns only for survivors; the atlas&#39;s clearest
 example of cost-ordered lazy materialization.</li>
-<li><code>src/Core/Block.h:22</code>, <code>src/Columns/IColumn.h:114</code>,
+<li><code>src/Core/Block.h:26</code>, <code>src/Columns/IColumn.h:114</code>,
 <code>src/Columns/ColumnVector.h:25</code>, <code>src/Common/PODArray.h:328</code> —
 the in-memory column model every previous step produced or
 consumed; note <code>insertRangeFrom</code> as the bulk-mutation verb.</li>
@@ -487,8 +487,8 @@ external spill — batch-ness extends to grouping.</li>
 ports; queries are just graphs, sources and sinks included.</li>
 <li><code>src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp:273</code> —
 <code>selectPartsToMerge</code> and <code>:435 mergePartsToTemporaryPart</code>; then
-<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:39</code> and
-<code>StorageReplicatedMergeTree.cpp:2581 executeLogEntry</code> —
+<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:38</code> and
+<code>src/Storages/StorageReplicatedMergeTree.cpp:2581 executeLogEntry</code> —
 background merges and the Keeper-published log that orders them
 on every replica.</li>
 </ol>
@@ -502,7 +502,7 @@ analytical data in ClickHouse.</p>
 <li><strong>Make the batch the unit everywhere — memory, disk, and calls.</strong>
 One consistent granularity (<code>Block</code> in RAM, granule on disk) is why
 the whole engine feels like a library instead of a pile of
-special cases; you saw it in <code>Block.h:22</code> and
+special cases; you saw it in <code>Block.h:26</code> and
 <code>MergeTreeSettings.cpp:72</code>.</li>
 <li><strong>Index blocks, not rows, when answers aggregate over ranges.</strong> The
 sparse primary index (<code>MergeTreeDataPartWriterOnDisk.cpp:255</code>)
@@ -519,7 +519,7 @@ as the place to also apply semantics (dedup, collapsing, TTL) —
 compaction as a programmable stage, not just garbage collection.</li>
 <li><strong>Declarative shape, reconciling engine.</strong> ORDER BY/PARTITION
 BY/CODEC/TTL in DDL describe intent; merges, moves, and expiry are
-derived consequences (<code>MergeTreeData.h:156</code>) — Kubernetes&#39; stance,
+derived consequences (<code>MergeTreeData.h:159</code>) — Kubernetes&#39; stance,
 inside a storage engine.</li>
 <li><strong>Factories with self-describing registrations.</strong> Every extension
 axis (engines, functions, codecs, formats) registers name + creator<ul>
