@@ -57,6 +57,12 @@ When updating this file, preserve this bar for all agents and keep entries conci
   voice picker filters `+` variants for this reason; cancel() surfaces as an
   `interrupted` error event (handled by the stale-utterance guard), and no
   boundary events fire, so verify progress by polling `speaking`.
+- TiDB dives need a THIRD pinned repo: the 2PC/txn client
+  (twoPhaseCommitter, RegionCache, lock resolver, ART MemDB) lives in
+  tikv/client-go — pin the exact `go.mod` version of the TiDB tag, plus
+  TiKV itself. TiKV's own release tags lag TiDB LTS lines (v8.5.x vs
+  TiDB v26.3.x): pin each repo's newest tag separately and say so in the
+  header, like etcd did with its extracted raft lib.
 
 ## Deep-dive process addenda (learned during the 13-dive expansion)
 
