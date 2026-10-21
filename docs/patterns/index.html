@@ -132,7 +132,10 @@ site-instance script thread implements the WHATWG event-loop
 processing model, so one page&#39;s hang cannot stall another site;
 <a href="../dive/haproxy/">HAProxy</a> — one poll loop per thread, but with
 the loop&#39;s own scheduler made explicit: budgeted tasklet run queues
-in ebtrees, weighted by class, policed by a CPU-time watchdog.</p>
+in ebtrees, weighted by class, policed by a CPU-time watchdog;
+<a href="../dive/go/">Go runtime</a> — the readiness demultiplexer hidden
+<em>under</em> a thread scheduler: epoll parks and readies whole goroutines,
+so the loop exists but user code never sees a callback.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -155,7 +158,11 @@ allocation-debt-paced steps (<code>luaC_step</code>) so a guest language never
 pauses its host&#39;s frame budget; <a href="../dive/linux/">linux</a> —
 kswapd reclaims memory in budgeted background passes so allocation
 never stalls on a full scan, and readahead turns one small read into
-a window of prefetched I/O so the next reads hit the page cache.</p>
+a window of prefetched I/O so the next reads hit the page cache;
+<a href="../dive/go/">Go runtime</a> — the whole GC is this rule at war with
+an allocation rate: concurrent mark on a 25% CPU budget, allocation
+billed as scanning debt (<code>gcAssistAlloc</code>), and Green Tea batching
+spans to keep each unit of mark work cache-local.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
