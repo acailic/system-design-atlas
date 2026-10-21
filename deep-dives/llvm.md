@@ -168,13 +168,13 @@ sequenceDiagram
     participant MC as MCObjectStreamer.cpp:401
 
     F->>R: parse text (or bitcode)
-    R->>R: build pointer graph; Value/User/Use wired
+    R->>R: build pointer graph — Value/User/Use wired
     R->>PB: Module + "default<O2>"
     PB->>PB: PassRegistry.def:275 alias → buildPerModuleDefaultPipeline
     PB->>PM: MPM (module→CGSCC→function→loop adaptors)
     PM->>AM: getAnalysis<DominatorTreeAnalysis>
     AM-->>PM: cached tree (or compute now)
-    PM->>PM: pass runs; returns PreservedAnalyses; AM.invalidate
+    PM->>PM: pass runs → returns PreservedAnalyses → AM.invalidate
     PM->>CG: module handed to codegen pipeline
     CG->>IS: per function: Legalize → Select (SelectCodeCommon:3354)
     IS->>MF: MachineInstrs (virtual regs)
