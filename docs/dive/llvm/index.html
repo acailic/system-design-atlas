@@ -191,13 +191,13 @@ exactly this, minus frontend.</li>
     participant MC as MCObjectStreamer.cpp:401
 
     F-&gt;&gt;R: parse text (or bitcode)
-    R-&gt;&gt;R: build pointer graph; Value/User/Use wired
+    R-&gt;&gt;R: build pointer graph — Value/User/Use wired
     R-&gt;&gt;PB: Module + &quot;default&lt;O2&gt;&quot;
     PB-&gt;&gt;PB: PassRegistry.def:275 alias → buildPerModuleDefaultPipeline
     PB-&gt;&gt;PM: MPM (module→CGSCC→function→loop adaptors)
     PM-&gt;&gt;AM: getAnalysis&lt;DominatorTreeAnalysis&gt;
     AM--&gt;&gt;PM: cached tree (or compute now)
-    PM-&gt;&gt;PM: pass runs; returns PreservedAnalyses; AM.invalidate
+    PM-&gt;&gt;PM: pass runs → returns PreservedAnalyses → AM.invalidate
     PM-&gt;&gt;CG: module handed to codegen pipeline
     CG-&gt;&gt;IS: per function: Legalize → Select (SelectCodeCommon:3354)
     IS-&gt;&gt;MF: MachineInstrs (virtual regs)
