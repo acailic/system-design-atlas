@@ -194,7 +194,7 @@ used so even same-process traffic follows the queue discipline).
 <code>--listen</code>, terminal emulator sessions — all one lifetime, refcounting,
 and error-propagation story. Adding a transport touches this struct and
 nothing above it (the same &quot;one interface, many drivers&quot; economy as
-<a href="../libuv/">libuv</a>&#39;s handles or the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/neovim/catalog.yaml">Linux kernel</a>&#39;s VFS).</p>
+<a href="../libuv/">libuv</a>&#39;s handles or the <a href="https://github.com/acailic/system-design-atlas/blob/main/catalog.yaml">Linux kernel</a>&#39;s VFS).</p>
 <h3 id="remoteui-its-packer-budget-ui-defs-h-38-api-ui-c-600"><code>RemoteUI</code> + its packer budget (<code>ui_defs.h:38</code>, <code>api/ui.c:600</code>)</h3>
 <p><strong>What:</strong> per-client state: negotiated <code>ui_ext[]</code> capabilities, the
 terminal facts it reported, cursor/pum bookkeeping, and the msgpack

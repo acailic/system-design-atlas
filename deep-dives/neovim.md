@@ -180,7 +180,7 @@ used so even same-process traffic follows the queue discipline).
 `--listen`, terminal emulator sessions — all one lifetime, refcounting,
 and error-propagation story. Adding a transport touches this struct and
 nothing above it (the same "one interface, many drivers" economy as
-[libuv](libuv.md)'s handles or the [Linux kernel](catalog.yaml)'s VFS).
+[libuv](libuv.md)'s handles or the [Linux kernel](../../catalog.yaml)'s VFS).
 
 ### `RemoteUI` + its packer budget (`ui_defs.h:38`, `api/ui.c:600`)
 **What:** per-client state: negotiated `ui_ext[]` capabilities, the
