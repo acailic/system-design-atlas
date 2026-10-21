@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neovim: the editor as an RPC server — one seam for every face — System Design Atlas</title>
+<meta name="description" content="Neovim is a 40-year-old editor architecture (Vim's modal core, itself a refinement of Vi) rebuilt around one idea: the editor core is a msgpack-RPC server, and everything else — including th">
+<meta property="og:title" content="Neovim: the editor as an RPC server — one seam for every face — System Design Atlas">
+<meta property="og:description" content="Neovim is a 40-year-old editor architecture (Vim's modal core, itself a refinement of Vi) rebuilt around one idea: the editor core is a msgpack-RPC server, and everything else — including th">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/neovim/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/neovim/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-dd-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one dd, typed in a terminal, seen by two screens</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Neovim: the editor as an RPC server — one seam for every face</h1>
+    <div class="meta-chips"><span class="chip domain">editor</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/neovim/neovim" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>1cfebe93d5f9463acda4aa6f69e4faa244734193</code> · 2026-10-21 · <a href="https://github.com/neovim/neovim" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Neovim is a 40-year-old editor architecture (Vim&#39;s modal core, itself a
+refinement of Vi) rebuilt around one idea: <strong>the editor core is a msgpack-RPC
+server, and everything else — including the terminal UI you think you
+launched — is a client</strong>. Run <code>nvim</code> in a terminal and two processes appear:
+the one attached to your terminal is a <em>UI client</em>; the editor core runs in a
+child it spawned with <code>--embed</code>, and keystrokes go <em>out</em> as <code>nvim_input</code>
+notifications while screen updates come <em>back</em> as <code>redraw</code> event batches.
+GUIs, embedders, plugin hosts in any language, and headless test harnesses
+attach through the exact same seam. The second idea completes the design:
+the one language allowed <em>inside</em> the core — Lua on an embedded LuaJIT — is
+bound to the core&#39;s own libuv event loop, so plugin code and editor code meet
+at the same named safe points instead of at locks. This dive teaches how to
+re-architect a working, widely-deployed system by drawing one boundary and
+moving everything else outside it.</p>
+<p>Read it against <a href="../vscode/">VS Code</a> — the same era&#39;s answer to &quot;how do
+plugins extend an editor safely?&quot;, choosing process isolation for a
+marketplace ecosystem where Neovim chooses in-process latency for
+configuration-as-code — and against <a href="../lua/">Lua</a>, whose embedding API is
+the very tray this editor reaches through.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A stage director in a control room, with every screen just another camera
+crew.</strong> The director (the editor core, <code>nvim --embed</code>) never touches a
+screen; she dictates the scene as numbered lists (msgpack-RPC <code>redraw</code>
+events) over a wire. When you &quot;open nvim&quot;, you actually hire a crew (the TUI
+process): it sets up a second desk in a back room, connects a wire, and its
+whole job is translating between your terminal&#39;s blinking lights and the
+director&#39;s lists. You type a letter; the crew sends it up the wire as a
+message (<code>nvim_input</code>); the director decides what it means (the modal state
+machine), erases a line from her sketch of the stage (a screen grid), and
+tells <em>every</em> crew the same scene change. A fancy TV studio (a GUI) plugged
+into the same wire sees the identical broadcast. The director also keeps an
+assistant at her desk (Lua plugins, running inside the control room on
+LuaJIT) who shares her stopwatch (the libuv event loop): whenever she pauses
+between scenes (a safe point in the input loop), assistants may take their
+turn — never mid-scene. And the translators for foreign experts (language
+servers) are assistants too: they send and receive postcards in a standard
+international format (LSP), which any editor can read.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> if the core speaks one protocol to
+everyone, then faces (terminals, GUIs, tests, other programs) can multiply
+and be replaced without ever re-architecting the core — and the core can be
+modernized underneath without breaking a single face.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph clients[&quot;clients of the core — every one speaks the same protocol&quot;]
+        TUI[&quot;nvim (the process you launch)&lt;br/&gt;built-in TUI client — src/nvim/tui&quot;]
+        GUI[&quot;GUI / embedder / test harness&lt;br/&gt;--embed, --headless (any language)&quot;]
+        HOST[&quot;plugin host (pynvim, …)&lt;br/&gt;any language, own process&quot;]
+    end
+    CORE[&quot;EDITOR CORE — nvim --embed child process&lt;br/&gt;libuv loop (src/nvim/event) · modal state machine (state.c)&lt;br/&gt;buffers/memline · ScreenGrids + compositor (grid.c, ui_comp)&lt;br/&gt;msgpack-RPC layer (src/nvim/msgpack_rpc, ~2k lines)&lt;br/&gt;LuaJIT state (src/nvim/lua) sharing the same loop&quot;]
+    LS[&quot;LSP / DAP servers — any language&lt;br/&gt;JSON-RPC at the edge&quot;]
+
+    TUI --&gt;|&quot;msgpack-RPC over stdio pipe&quot;| CORE
+    GUI --&gt;|&quot;msgpack-RPC, stdio or socket&quot;| CORE
+    HOST --&gt;|&quot;msgpack-RPC (jobstart rpc: true)&quot;| CORE
+    CORE -.-&gt;|&quot;vim.lsp client: pure Lua on vim.uv&quot;| LS
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The core is deliberately process-shaped.</strong> <code>main.c:main</code> (255) is a
+fork in the road: with a terminal and no <code>--embed</code>, it <em>becomes</em> the TUI
+client — <code>ui_client_start_server</code> (350) spawns the real editor as a
+child with <code>--embed</code> and <code>ui_client_run</code> (361, no-return) takes over.
+With <code>--embed</code>/<code>--headless</code> the process <em>is</em> the core and <code>server_init</code>
+(366) accepts external clients instead. One binary, two roles, one wire
+between them — the &quot;built-in UI&quot; differs from a GUI only by being
+auto-spawned.</li>
+<li><strong>The extension seam is msgpack-RPC, ~2,000 lines</strong> in
+<code>src/nvim/msgpack_rpc/</code> plus the API layer that sits on it. The same
+transport serves UIs (<code>nvim_ui_attach</code>), embedders (<code>nvim_exec_lua</code>),
+remote plugins (<code>rpcrequest</code>/<code>rpcnotify</code> over a spawned channel), and
+even Nvim-as-client-of-another-Nvim. Compare <a href="../redis/">Redis</a> or
+<a href="../sqlite/">SQLite</a>: a tiny protocol layer carrying the whole product&#39;s
+extensibility.</li>
+<li><strong>The spine</strong> — &quot;type <code>dd</code> in a terminal, watch the line vanish on two
+screens&quot; — is: TUI reads tty bytes (<code>tui/input.c:tinput_read_cb</code>) →
+<code>nvim_input</code> notification → core&#39;s RPC layer parses and dispatches
+(<code>msgpack_rpc/channel.c:parse_msgpack</code> → <code>handle_request</code>) → typeahead →
+modal loop executes the operator (<code>state.c:state_enter</code>) → affected
+grid rows marked dirty → <code>ui_flush</code> (<code>ui.c:540</code>) emits <code>grid_line</code>
+events → <code>RemoteUI</code> packs them into one batched <code>redraw</code> notification
+(<code>api/ui.c:prepare_call</code>) → every client (TUI, GUIs) updates its own
+grids.</li>
+</ul>
+<h2 id="walkthrough-one-dd-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one <code>dd</code>, typed in a terminal, seen by two screens</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant T as User terminal
+    participant TU as TUI process (client)
+    participant C as Core (nvim --embed, RPC server)
+    participant G as GUI client (also attached)
+    T-&gt;&gt;TU: bytes for &#39;d&#39;, &#39;d&#39; arrive on tty
+    TU-&gt;&gt;TU: tinput_read_cb: terminfo/keycode translation
+    TU-&gt;&gt;C: notify nvim_input(&quot;dd&quot;) — msgpack-RPC
+    C-&gt;&gt;C: handle_request: FAST handler runs on loop now
+    C-&gt;&gt;C: input_enqueue → typeahead → state_enter executes dd
+    C-&gt;&gt;C: line deleted (memline), grid rows marked dirty
+    C-&gt;&gt;C: ui_flush → UI_CALL fans out grid_line events
+    C-&gt;&gt;TU: one &quot;redraw&quot; notification, calls batched (prepare_call)
+    C-&gt;&gt;G: the identical batch
+    TU-&gt;&gt;T: ugrid updated → terminfo escape codes
+    G-&gt;&gt;G: renders the same scene its own way
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<p><strong>Step 1 — The keystroke crosses the first process boundary.</strong> The TUI
+process reads terminal bytes on a libuv stream
+(<code>tui/input.c:tinput_read_cb:897</code>), translates escape sequences to keys via
+its bundled terminfo/keycode tables, and forwards them as data:
+<code>rpc_send_event(ui_client_channel_id, &quot;nvim_input&quot;, keys)</code>
+(<code>tui/input.c:207</code>). The process you typed in does not edit text; it
+<em>reports typing</em>.</p>
+<p><strong>Step 2 — The core parses, dispatches, and queues input.</strong> The stdio
+channel&#39;s read event runs <code>parse_msgpack</code> (<code>msgpack_rpc/channel.c:249</code>),
+which feeds the unpacker and hands complete messages to <code>handle_request</code>
+(312). <code>nvim_input</code> is declared <code>FUNC_API_FAST</code> (<code>api/vim.c:376</code>), so its
+wrapper runs immediately on the loop and only enqueues bytes into the
+typeahead ring (<code>os/input.c:input_enqueue:285</code>) — editor state is touched
+later, at a safe point, never from the socket read.</p>
+<p><strong>Step 3 — The modal loop reaches a safe point.</strong> <code>state_enter</code>
+(<code>state.c:34</code>) is the editor&#39;s heart: each mode (normal, insert, cmdline)
+is a <code>VimState</code> with <code>check</code>/<code>execute</code> callbacks (<code>state_defs.h:8</code>). When
+keys are pending it consumes them via <code>safe_vgetc</code>; when the event queues
+are non-empty it injects the synthetic <code>K_EVENT</code> key so mode handlers can
+drain callbacks at a moment of <em>their</em> choosing. <code>dd</code> executes as
+operator+motion: one line leaves the memline, its grid rows are marked
+dirty, not repainted yet.</p>
+<p><strong>Step 4 — Redraw becomes protocol.</strong> <code>ui_flush</code> (<code>ui.c:540</code>) walks dirty
+rows and emits <code>grid_line</code> events per row segment
+(<code>ui.c:482</code>). The <code>UI_CALL</code> macro (<code>ui.c:104</code>) fans each event out to every
+attached <code>RemoteUI</code> — the TUI channel, the GUI channel, all of them — through
+<code>remote_ui_*</code> packer functions <em>generated</em> from the declarative protocol
+(<code>api/ui_events.in.h</code> → <code>src/gen/gen_api_ui_events.lua</code>). Rendering is
+not a subroutine call; it is a broadcast of facts.</p>
+<p><strong>Step 5 — Events are batched under a cell budget.</strong> <code>push_call</code> →
+<code>prepare_call</code> (<code>api/ui.c:600</code>) bundles adjacent calls to the same method
+into one msgpack array inside a single <code>redraw</code> notification, flushing when
+the pack buffer nears <code>UI_BUF_SIZE</code> or 500 cells (<code>ncells_pending</code>) are
+pending; array sizes unknown at pack time are back-patched afterwards
+(<code>flush_event</code>, 583). A full-screen redraw crosses the wire as bundled
+batches (4 KiB pack buffer per flush), not one notification per event.</p>
+<p><strong>Step 6 — Two clients render the same facts.</strong> The TUI process receives
+<code>redraw</code>, dispatches each event by hash to a <code>ui_client_event_*</code> handler
+(<code>ui_client.c:ui_client_get_redraw_handler</code>) that updates its own
+<code>ScreenGrid</code>, then writes terminfo escape sequences to the terminal. The
+GUI, attached on another channel through the <em>same</em> <code>nvim_ui_attach</code>
+handshake (<code>api/ui.c:208</code>, with its <code>ext_*</code> capability negotiation), got
+the identical batch and drew it with entirely different code.</p>
+<p><strong>Outcome — The core never knew who was watching.</strong> One edit executed once;
+input arrived as data, the scene change left as data. Swap the TUI for a
+test harness, a GUI, or a browser — the core cannot tell the difference,
+and that indifference <em>is</em> the architecture.</p>
+<h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="channel-one-struct-for-every-transport-channel-h-18"><code>Channel</code> — one struct for every transport (<code>channel.h:18</code>)</h3>
+<p><strong>What:</strong> id, refcount, a private child event queue, <code>is_rpc</code>, an optional
+attached <code>Terminal</code>, and a tagged union over the stream: spawned process,
+libuv process, pty, socket, stdio, or <em>internal</em> (an in-process loopback
+used so even same-process traffic follows the queue discipline).
+<strong>Why:</strong> UIs over stdio, plugin hosts over spawned pipes, sockets from
+<code>--listen</code>, terminal emulator sessions — all one lifetime, refcounting,
+and error-propagation story. Adding a transport touches this struct and
+nothing above it (the same &quot;one interface, many drivers&quot; economy as
+<a href="../libuv/">libuv</a>&#39;s handles or the <a href="https://github.com/acailic/system-design-atlas/blob/main/dive/neovim/catalog.yaml">Linux kernel</a>&#39;s VFS).</p>
+<h3 id="remoteui-its-packer-budget-ui-defs-h-38-api-ui-c-600"><code>RemoteUI</code> + its packer budget (<code>ui_defs.h:38</code>, <code>api/ui.c:600</code>)</h3>
+<p><strong>What:</strong> per-client state: negotiated <code>ui_ext[]</code> capabilities, the
+terminal facts it reported, cursor/pum bookkeeping, and the msgpack
+<code>PackerBuffer</code> with <code>nevents_pos</code>/<code>ncalls_pos</code> patch-back pointers and a
+<code>ncells_pending</code> counter (flush at 500 cells or near buffer end).
+<strong>Why:</strong> batching is per-client state, not a global pass — a slow GUI
+can&#39;t delay the TUI&#39;s frames, and the wire format (bundled calls inside
+one <code>redraw</code>) exists precisely because per-event notifications would
+drown interactive latency.</p>
+<h3 id="multiqueue-parent-child-event-queues-event-multiqueue-c"><code>MultiQueue</code> — parent/child event queues (<code>event/multiqueue.c</code>)</h3>
+<p><strong>What:</strong> a linked hierarchy where each emitter (channel, job, timer
+subsystem) owns a child queue propagated to the main loop&#39;s parent queue;
+one-shot events fan out to several queues once. The file&#39;s top comment
+draws the whole diagram.
+<strong>Why:</strong> the editor can <em>focus</em> on one emitter while blocking (a
+<code>jobwait()</code> on job 1 keeps polling only job 1&#39;s queue) without other
+emitters&#39; events being lost — the mechanism that lets single-threaded
+Vim semantics coexist with fully async I/O.</p>
+<h3 id="screengrid-cells-as-the-shared-vocabulary-grid-defs-h-45"><code>ScreenGrid</code> — cells as the shared vocabulary (<code>grid_defs.h:45</code>)</h3>
+<p><strong>What:</strong> rectangular cell arrays with dirty-line tracking and line-wrap
+bookkeeping; windows, the message area, and floats each own one, and the
+compositor (<code>ui_comp*.c</code>) merges them into the <code>grid_line</code> stream clients
+receive. <strong>Why:</strong> grids are the <em>protocol&#39;s</em> unit, not just the core&#39;s:
+multigrid clients learn about per-window grids directly, so the data
+structure and the wire format agree — the same &quot;make the internal model
+the public model&quot; move as <a href="../kafka/">Kafka</a>&#39;s log.</p>
+<h3 id="vim-state-modes-as-objects-state-defs-h-8"><code>vim_state</code> — modes as objects (<code>state_defs.h:8</code>)</h3>
+<p><strong>What:</strong> two function pointers, <code>check</code> and <code>execute</code>; normal, insert,
+cmdline modes are structs embedding it, driven by the generic loop in
+<code>state.c:state_enter</code>. <strong>Why:</strong> an ancient modal editor refactored into a
+tiny state machine without changing a single user-visible behavior —
+incremental re-architecture in miniature.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph oneloop[&quot;one thread — the libuv main_loop (event/loop.h)&quot;]
+        UV[&quot;uv_run: tty, sockets, timers, signals, child reaping&quot;]
+        MQ[&quot;main_loop.events + per-channel child queues&lt;br/&gt;(fast_events, thread_events alongside)&quot;]
+        ST[&quot;state_enter: modal safe points&lt;br/&gt;K_EVENT drains callbacks&quot;]
+        LU[&quot;LuaJIT state: plugins share this loop&lt;br/&gt;vim.uv == main_loop.uv&quot;]
+    end
+    TH[&quot;other threads (rare: workers, luv threadpool)&quot;] --&gt;|&quot;async → thread_events&quot;| MQ
+    UV --&gt; MQ --&gt; ST
+    LU --- MQ
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>One thread, many queues.</strong> All I/O — RPC traffic, jobs, terminals,
+timers, signals — multiplexes on a single libuv loop wrapped by
+<code>event/loop.c</code>. Editor state is only ever mutated from <code>state_enter</code>&#39;s
+safe points or from within a request handler drained through the
+queues, which is why the core has almost no locks. The classic hazard
+is handled by name: <code>nvim_get_mode</code> is deliberately deferred to the
+<code>ch_before_blocking_events</code> queue (<code>msgpack_rpc/channel.c:312</code>) so a
+client polling it while the editor blocks on input still gets an answer
+— the queue hierarchy <em>is</em> the concurrency design.</li>
+<li><strong>FAST vs deferred dispatch.</strong> <code>handle_request</code> splits the API in two:
+handlers flagged <code>FUNC_API_FAST</code> run inline on the loop&#39;s read event
+(they only enqueue or read atomics); everything else becomes a
+<code>RequestEvent</code> on the channel&#39;s child queue, executed in the main loop.
+This is the line between &quot;cheap enough to run mid-read&quot; and &quot;touches
+editor state&quot; — drawn per-function, in the API declaration itself.</li>
+<li><strong>Crash model: the faces are expendable, the core is not.</strong> A crashed
+or hung GUI takes down only its channel; the core drops the <code>RemoteUI</code>
+and keeps serving others. The TUI dying leaves the core running until
+the channel-close path shuts it down. A crashed <em>remote plugin</em> is an
+exited job — its callbacks report the exit, the editor continues. The
+one thing the model cannot survive is a misbehaving <em>in-process Lua</em>
+plugin: an infinite loop in Lua blocks the single loop. That is a
+chosen trade (section 5), not an oversight.</li>
+<li><strong>Backpressure.</strong> Slow clients can&#39;t stall the editor: redraw writes go
+through the stream&#39;s write buffers, and a failed/overflowed channel is
+closed with an error (<code>channel_write</code>&#39;s error path), detaching the UI
+rather than freezing the core.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>One versioned surface for everyone.</strong> ~180 public <code>nvim_*</code> functions
+across the <code>api/*.c</code> files, each annotated with <code>FUNC_API_SINCE</code> /
+<code>FUNC_API_FAST</code> / <code>FUNC_API_REMOTE_ONLY</code> attributes. The contract
+(<code>runtime/doc/api.txt</code> §api-contract) is additive-only — signatures
+freeze at release, parameters may only grow, deprecations wait for a
+hypothetical 2.0 — explicitly inspired by &quot;versionless evolution&quot;.
+Clients get the full machine-readable surface at runtime via
+<code>nvim_get_api_info</code> (<code>api/vim.c:1660</code>), served from a pre-packed
+metadata blob (<code>api/private/helpers.c:api_metadata:605</code>).</li>
+<li><strong>The surface is generated from one annotated source.</strong>
+<code>gen_api_dispatch.lua</code> (in <code>src/gen/</code>) parses the C annotations and
+emits: a <em>perfect-hash</em> dispatch table (lookup in
+<code>api/private/dispatch.c:msgpack_rpc_get_handler_for</code>), the C→Lua
+wrappers, and the exported-functions metadata; sibling generators turn
+the same annotations into Lua type definitions and the user
+documentation. Add one annotated function; dispatch, bindings, types,
+and docs all appear.
+The UI protocol gets the same treatment from <code>api/ui_events.in.h</code> —
+the server&#39;s packers and the client&#39;s handlers are twin generations of
+one declaration. (Atlas pattern: <a href="../../patterns/#12-generate-the-surface-from-data">generate the surface from
+data</a>.)</li>
+<li><strong>Lua in-process is first-class, not bolted on.</strong> <code>nlua_init</code>
+(<code>lua/executor.c:1005</code>) creates the interpreter on pinned LuaJIT
+(<code>cmake.deps/deps.txt</code>); <code>nlua_common_vim_init</code> (721) binds <code>vim.uv</code> to
+<em>the editor&#39;s own loop</em> — a timer, socket, or subprocess started by a
+plugin is scheduled by the same <code>uv_loop_t</code> that reads your keystrokes,
+and its callbacks cross into editor context through <code>vim.schedule</code>
+(<code>executor.c:nlua_schedule_event:546</code>), which queues onto the main
+events queue — the same safe-point door the state machine opens for
+everything else. Values cross via a converter that honestly encodes
+msgpack&#39;s ambiguities (<code>vim.NIL</code>, the empty-dict marker tables).</li>
+<li><strong>Out-of-process extension is the same seam.</strong> <code>jobstart(…, {&#39;rpc&#39;: true})</code> spawns any program as a channel; plugin hosts like pynvim wrap
+that into decorated commands/autocommands (<code>runtime/doc/ remote_plugin.txt</code>), loaded lazily. And the boundary is symmetric:
+Neovim can itself attach <em>as a UI client</em> to another Neovim
+(<code>--server</code>/<code>--remote-ui</code>), including surviving a server restart via
+the <code>restart</code> UI event — the protocol is rich enough for one editor to
+be another editor&#39;s face.</li>
+<li><strong>Honest wart:</strong> nothing isolates a Lua plugin from the core (by
+design, see trade-off 2), and the dual heritage shows: <code>vim.fn</code> (the
+legacy Vimscript surface) and <code>vim.api</code> (the frozen seam) coexist,
+with three subtly different ways to do common tasks and a compatibility
+layer (ongoing Vim patch merges via <code>scripts/vim-patch.sh</code>) that
+constrains refactors the architecture would otherwise invite.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-the-ui-as-protocol-client-over-in-process-terminal-drawing">Trade-off 1: the UI as protocol client over in-process terminal drawing</h3>
+<ul>
+<li><strong>Tension:</strong> Vim draws its own terminal synchronously in-process —
+minimal latency, minimal moving parts. But a modernized core wants many
+faces: GUIs, tests, remote sessions, embedding.</li>
+<li><strong>Choice:</strong> rendering <em>is</em> the protocol; even the built-in terminal UI
+runs in a separate process speaking msgpack-RPC like any GUI.</li>
+<li><strong>Evidence:</strong> <code>main.c:350-361</code> — <code>ui_client_start_server</code> spawns the
+core as an <code>--embed</code> child, then <code>ui_client_run</code> (no-return) owns this
+process; <code>api/ui_events.in.h</code> (the event vocabulary);
+<code>api/ui.c:prepare_call:600</code> (the batching that makes it affordable).</li>
+<li><strong>Given up:</strong> every keystroke and every frame now crosses a process
+boundary and a serializer; startup has one more moving part; the grid
+protocol (multigrid, compositor semantics) is a real specification to
+maintain.</li>
+<li><strong>Verdict:</strong> right because the editor&#39;s product is its ecosystem —
+GUIs, embedders, and the headless test harness that keeps the core
+honest all ride the same seam for free. Wrong for a tool whose only
+face will ever be one local terminal and whose budget is per-frame
+cost; classic Vim&#39;s synchronous drawing remains leaner there.</li>
+</ul>
+<h3 id="trade-off-2-plugins-in-process-on-the-shared-loop-over-isolated-plugin-processes">Trade-off 2: plugins in-process on the shared loop over isolated plugin processes</h3>
+<ul>
+<li><strong>Tension:</strong> the VS Code question — plugin power and latency versus
+host stability. A marketplace of unknown authors needs walls; a
+user&#39;s own configuration needs speed.</li>
+<li><strong>Choice:</strong> first-party extension runs inside the core, on LuaJIT
+bound to the editor&#39;s own libuv loop, entering editor context only at
+named safe points; <em>other</em> languages use remote plugins out-of-process
+over the same RPC.</li>
+<li><strong>Evidence:</strong> <code>executor.c:nlua_common_vim_init:721</code>
+(<code>luv_set_loop(lstate, &amp;main_loop.uv)</code> — one loop for editor and
+plugins alike); <code>executor.c:nlua_schedule_event:546</code> + <code>state.c</code>&#39;s
+<code>K_EVENT</code>; <code>runtime/lua/vim/lsp/rpc.lua</code> wrapping every dispatcher in
+<code>vim.schedule_wrap</code> — the LSP client itself is the pattern&#39;s biggest
+user.</li>
+<li><strong>Given up:</strong> fault isolation (one infinite Lua loop freezes the
+editor), per-plugin CPU/memory accounting, crash containment.</li>
+<li><strong>Verdict:</strong> right for a trust model of &quot;my config, my machine&quot; where
+every keystroke pays the latency; wrong for ecosystems distributing
+thousands of third-party plugins of unknown quality — precisely the
+case <a href="../vscode/">VS Code</a> spends a process and an RPC object graph on.</li>
+</ul>
+<h3 id="trade-off-3-a-frozen-additive-generated-api-over-fast-moving-in-tree-apis">Trade-off 3: a frozen, additive, generated API over fast-moving in-tree APIs</h3>
+<ul>
+<li><strong>Tension:</strong> the seam must carry a decade of independent clients
+(embedders, GUIs, hosts in a dozen languages); in-tree code wants to
+refactor signatures freely.</li>
+<li><strong>Choice:</strong> declare each function once with attributes; generate
+dispatch (perfect hash), bindings, types, and docs from it; freeze the
+contract additively at release time.</li>
+<li><strong>Evidence:</strong> <code>runtime/doc/api.txt:235</code> (the contract, down to
+&quot;Deprecated functions will not be removed until Nvim 2.0&quot;);
+<code>src/gen/gen_api_dispatch.lua</code> + <code>gen/hashy.lua</code> (dispatch
+generation); <code>api/private/dispatch.c:msgpack_rpc_get_handler_for</code>
+(the generated hash in use); <code>api/deprecated.c</code> (the debt carried
+rather than broken).</li>
+<li><strong>Given up:</strong> signature changes ever; duplicate deprecated twins;
+one indirection layer of generated code when debugging.</li>
+<li><strong>Verdict:</strong> right whenever third parties must ride your evolution —
+the same discipline <a href="../vscode/">VS Code</a> applies to <code>vscode.d.ts</code>,
+arrived at from the opposite direction. The alternative, breaking
+embedders every release, kills the smallest clients first.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>runtime/doc/api.txt</code> §api-contract (line 235) — read the contract
+first; everything about attribute annotations exists to serve it.</li>
+<li><code>src/nvim/main.c:main</code> (255) — the fork in the road: find
+<code>use_builtin_ui</code>, <code>ui_client_start_server</code> (350), <code>ui_client_run</code>
+(361), <code>server_init</code> (366). One binary, two roles; everything after
+this stop explains the wire between them.</li>
+<li><code>src/nvim/ui_client.c:ui_client_run</code> (155) and <code>ui_client_attach</code>
+(87) — the built-in UI as an ordinary client: capability options
+(<code>ext_linegrid</code>), <code>nvim_set_client_info</code>. Notice there is no editor
+code in this process.</li>
+<li><code>src/nvim/tui/input.c:tinput_read_cb</code> (897) and <code>tui.c</code> — bytes to
+keys to <code>nvim_input</code> notifications; then the mirror image,
+<code>ui_client.c:ui_client_get_redraw_handler</code>, turning <code>redraw</code> batches
+into grid updates and terminal escape codes.</li>
+<li><code>src/nvim/msgpack_rpc/channel.c</code> — the RPC state machine:
+<code>parse_msgpack</code> (249), <code>handle_request</code> (312) and the FAST/deferred
+split, <code>request_event</code>, and <code>serialize_response</code>. Under 800 lines
+including comments — the whole seam.</li>
+<li><code>src/nvim/api/private/dispatch.c</code> then <code>src/gen/gen_api_dispatch.lua</code>
+— a 23-line runtime lookup meeting a generator: the perfect
+hash, the metadata, the wrappers. Open <code>api/vim.c:376</code> to see the
+annotations the generator eats.</li>
+<li><code>src/nvim/os/input.c:input_enqueue</code> (285) and <code>src/nvim/state.c: state_enter</code> (34) — typeahead and safe points; find <code>K_EVENT</code> and
+the <code>nvim_get_mode</code> deferral from stop 5 to see both ends of the
+queue discipline.</li>
+<li><code>src/nvim/event/multiqueue.c</code> — the parent/child queue hierarchy and
+one-shot events; the ASCII diagram in the file&#39;s header is the
+concurrency model in one picture.</li>
+<li><code>src/nvim/ui.c</code> — <code>UI_CALL</code> (104) and <code>ui_flush</code> (540): how editor
+code emits protocol events without knowing a client exists; then
+<code>api/ui.c:prepare_call</code> (600) and <code>ui_defs.h</code>&#39;s <code>RemoteUI</code> for the
+batching budget that makes the wire affordable.</li>
+<li><code>src/nvim/channel.h:struct Channel</code> (18) and <code>channel.c: channel_job_start</code> (371) — one lifetime story for stdio, socket,
+spawned process, and pty; this is also where remote plugins and
+terminal-emulator sessions plug in.</li>
+<li><code>src/nvim/lua/executor.c</code> — <code>nlua_init</code> (1005),
+<code>nlua_common_vim_init</code> (721), <code>nlua_schedule_event</code> (546): the
+embedded interpreter sharing the loop; skim <code>lua/converter.c</code> for
+the msgpack↔Lua value mapping.</li>
+<li><code>runtime/lua/vim/lsp/rpc.lua</code> and <code>lsp/client.lua</code> — the second
+protocol at the edge: a full LSP client in Lua on <code>vim.uv</code>, with
+<code>vim.schedule_wrap</code> at every dispatcher. Compare with the JSON
+plumbing VS Code ships per-language; here it is a library inside
+the editor, not an extension.</li>
+</ol>
+<p>You have now traced one keystroke through two processes and two
+protocols (msgpack-RPC in, LSP out), and seen every seam the architecture
+offers: client, embedder, plugin host, and in-process assistant all
+meeting the same core the same way.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make your first UI just another client</strong> — your terminal UI becomes
+your own headless test harness and every GUI becomes a plugin; seen at
+<code>main.c</code> spawning <code>--embed</code> and <code>ui_client.c</code> running the TUI as pure
+client.</li>
+<li><strong>One seam for every integrator</strong> (UIs, embedders, hosts, tests)
+instead of N ad-hoc interfaces: the ~2k-line <code>msgpack_rpc/</code> +
+<code>Channel</code> union carries the entire extensibility story.</li>
+<li><strong>Bind your embedded scripting language to <em>your own</em> event loop, and
+cross into the host only at named safe points</strong> (<code>vim.uv</code> on
+<code>main_loop</code>, <code>vim.schedule</code>, <code>K_EVENT</code>) — plugin async I/O and editor
+scheduling become one problem.</li>
+<li><strong>Freeze the protocol additively and generate everything from one
+annotated declaration</strong> — dispatch hash, bindings, docs, types;
+<code>api.txt</code>&#39;s contract plus <code>gen_api_dispatch.lua</code> is the whole
+apparatus.</li>
+<li><strong>Batch chatty outbound events under an explicit budget</strong> (500-cell
+flush in <code>prepare_call</code>) so a protocol UI can match a direct-draw UI
+on interactive latency.</li>
+<li><strong>Re-architect by adding boundaries, not by rewriting</strong>: modes became
+a state machine, rendering became protocol, scripting became embedded
+— while Vim patches still merge (<code>scripts/vim-patch.sh</code>) and the
+user&#39;s muscle memory was never the thing that changed.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> (matches the catalog) — not because any file
+is impenetrable, but because the design lives across a process
+boundary and two protocols; you must hold the client and server in
+your head at once. C reading fluency plus basic Lua.</li>
+<li>Budget: ~7 hours for the reading path; stops 2, 5, 7, and 9 are the
+core (do not skip the multiqueue diagram).</li>
+<li>Prerequisites: what an RPC is (request/notification distinction);
+msgpack at a glance (<a href="https://msgpack.org">https://msgpack.org</a>); terminal escape sequences
+at a user level; the <a href="../lua/">Lua</a> dive&#39;s embedding-API section
+makes stop 11 twice as rewarding.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>runtime/doc/api.txt</code> (§api-contract) and
+<code>runtime/doc/api-ui-events.txt</code> — the protocol contract and the UI
+event vocabulary, from the source tree.</li>
+<li><code>runtime/doc/remote_plugin.txt</code> — plugin hosts from the producer
+side; <code>runtime/doc/dev_arch.txt</code> — upstream&#39;s own module map.</li>
+<li>msgpack-RPC specification — <a href="https://github.com/msgpack-rpc/msgpack-rpc">https://github.com/msgpack-rpc/msgpack-rpc</a></li>
+<li>LSP specification — <a href="https://microsoft.github.io/language-server-protocol/">https://microsoft.github.io/language-server-protocol/</a></li>
+<li>The <a href="../vscode/">VS Code</a> dive in this atlas for the contrasting
+&quot;isolate the plugin&quot; answer to the same question, and the
+<a href="../lua/">Lua</a> dive for the embedding API the core reaches through.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../caddy/"><span class="dir">← Previous dive</span>Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 35 of 35 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

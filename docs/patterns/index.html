@@ -267,7 +267,11 @@ so shells and C hosts (servoshell, ffi/capi) extend without forking;
 <a href="../dive/linux/">linux</a> — vtables at every layer joint
 (<code>file_operations</code>, <code>sched_class</code>) let thousands of filesystems and
 drivers — and, via sched_ext, even whole CPU scheduling policies as
-BPF programs — extend a monolith without forking it.</p>
+BPF programs — extend a monolith without forking it;
+<a href="../dive/neovim/">Neovim</a> — msgpack-RPC as the one seam for
+UIs, embedders, plugin hosts, and even the built-in terminal UI
+(a child process speaking the same protocol), with additive-only
+versioning making it safe for a decade of clients.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -311,7 +315,12 @@ table are all generated;
 <a href="../dive/chromium/">Chromium</a> — ~1,900
 .mojom IDL files compile into typed, versioned IPC bindings for
 every process boundary, so validation and version skew are build
-artifacts, not review diligence.</p>
+artifacts, not review diligence;
+<a href="../dive/neovim/">Neovim</a> — every <code>nvim_*</code> API function is
+declared once with FUNC_API attributes in <code>api/*.c</code>; generators
+emit the perfect-hash dispatch table, Lua bindings, runtime
+metadata, docs, and the twin server/client halves of the UI event
+protocol (<code>ui_events.in.h</code> → packers and handlers).</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>

@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">34 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">35 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 35 (and growing) canonical codebases and walks through
+<p>The atlas points at 36 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -285,6 +285,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A hotel where every guest gets their own helper — and the rulebook can be swapped without waking anyone. In nginx's ice-cream shop the workers take tiny turns so nobody waits; in Caddy's hotel the…</span>
   <span class="dc-meta"><span class="chip domain">web-server</span><span class="chip domain">proxy-lb</span><span class="chip diff-gentle">gentle</span></span>
 </a>
+<a class="dive-card" href="dive/neovim/" data-domains="editor" data-search="neovim: the editor as an rpc server — one seam for every face">
+  <span class="dc-name">Neovim</span>
+  <span class="dc-headline">the editor as an RPC server — one seam for every face</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A stage director in a control room, with every screen just another camera crew. The director (the editor core, nvim --embed ) never touches a screen; she dictates the scene as numbered lists…</span>
+  <span class="dc-meta"><span class="chip domain">editor</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -316,7 +322,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 35 projects; 34 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 35 projects; 35 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -431,7 +437,7 @@ transferable design moves you can apply to your own systems.</li>
 <summary>editor <span class="count">(2)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/vscode/">VS Code</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The most-used code editor of the era, built on an unfashionable bet that won: Electron (Chromium + Node) for the UI, with all editor intelligence pushed out of the renderer into a separate extension-host process that…</div></li>
-<li><span class="cat-name"><a href="https://github.com/neovim/neovim" rel="noopener">Neovim ↗</a></span><span class="cat-status cataloged">cataloged</span>
+<li><span class="cat-name"><a href="dive/neovim/">Neovim</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A 40-year-old editor architecture modernized without forking its soul: core/editor split, msgpack-RPC as the extension seam (clients, LSP, plugins all speak it), and Lua as embedded language replacing ad-hoc…</div></li></ul>
 </details>
 <details class="catalog-group">
