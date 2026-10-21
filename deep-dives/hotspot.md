@@ -1,7 +1,7 @@
 # OpenJDK HotSpot: watch first, compile later, retract anytime
 
 > **Atlas id:** `hotspot` · **Domains:** `runtime, language` ·
-> **Upstream:** https://github.com/openjdk/jdk · **License:** GPL-2.0 WITH Classpath-exception-2.0 ·
+> **Upstream:** https://github.com/openjdk/jdk · **License:** GPL-2.0-only WITH Classpath-exception-2.0 ·
 > **Pinned commit:** `815ff4dc327fe17f2433c7d115a5a503af10f3c4` (jdk-27-ga, 2026-08-19)
 
 HotSpot is the virtual machine inside every OpenJDK build — the code
@@ -20,8 +20,6 @@ shapes memory: garbage collection is not one algorithm but five
 `CollectedHeap`/`BarrierSet` contract, an evolutionary lineage from
 "stop everything and sweep" to "clean up while the program keeps
 running, one region at a time."
-
-Wait — placeholder
 
 Read it as the heavyweight rival of the atlas's V8 entry: two engines
 that independently converged on tiered, profile-driven, deoptimizable
