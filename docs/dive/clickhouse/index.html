@@ -146,13 +146,13 @@ stretches that matter and open heavy drawers last.</p>
     S-&gt;&gt;S: splitBlockIntoParts — by partition key
     S-&gt;&gt;W: per partition block
     W-&gt;&gt;W: sort rows by primary key (stableGetPermutation)
-    W-&gt;&gt;P: per column: compressed .bin + marks; primary.idx = PK of every granule start
-    Note over P: part is immutable; background merges&lt;br/&gt;combine parts later (LSM lineage)
+    W-&gt;&gt;P: per column: compressed .bin + marks, primary.idx = PK of every granule start
+    Note over P: part is immutable, background merges&lt;br/&gt;combine parts later (LSM lineage)
     C-&gt;&gt;R: SELECT sum(x) WHERE pk BETWEEN a AND b
     R-&gt;&gt;R: filterPartsByPartition (714) + markRangesFromPKRange (2107)&lt;br/&gt;KeyCondition over primary.idx → granule ranges
     R-&gt;&gt;X: tasks = (part, mark ranges) from read pool
-    X-&gt;&gt;P: PREWHERE: read filter columns of surviving granules only;&lt;br/&gt;late columns fetched for surviving rows (RangeReader chain)
-    X-&gt;&gt;X: vectorized expressions over Blocks; Aggregator two-level tables
+    X-&gt;&gt;P: PREWHERE: read filter columns of surviving granules only,&lt;br/&gt;late columns fetched for surviving rows (RangeReader chain)
+    X-&gt;&gt;X: vectorized expressions over Blocks, Aggregator two-level tables
     X--&gt;&gt;C: aggregated result stream
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
 <div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-block-arrives-already-columnar">The block arrives already columnar</h3>
