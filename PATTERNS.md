@@ -186,7 +186,13 @@ mutator's tax that buys never stopping for one big collection
 [ClickHouse](deep-dives/clickhouse.md)
 — background k-way merges keep the part tree shallow while inserts
 seal new parts, and the Aggregator flips to two-level tables at a
-size threshold so the final merge parallelizes.
+size threshold so the final merge parallelizes; [HotSpot](deep-dives/hotspot.md) — the
+whole tiering idea is amortized optimization (compile only what the
+counters say is hot), and G1 shrinks each pause by evacuating only a
+region collection set sized against a declared pause goal
+(`G1YoungCollector::collect`, the `MaxGCPauseMillis` MMU tracker in
+`G1Policy`), while ZGC moves marking and relocation off the mutator
+entirely — the pauses left are two sub-millisecond stack scans.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -312,7 +318,12 @@ versioning making it safe for a decade of clients;
 (`llvmGetPassPluginInfo`) registers pipeline-parsing callbacks into
 the PassBuilder, so out-of-tree optimizers (Enzyme's autodiff) hook
 the compiler without forking it — and the pass registry itself is the
-seam the `-passes` pipeline language plugs into.
+seam the `-passes` pipeline language plugs into; [HotSpot](deep-dives/hotspot.md) — garbage collection as the
+pluggable room: five collectors (Serial, Parallel, G1, ZGC,
+Shenandoah) behind one `CollectedHeap` + `BarrierSet` contract, each
+also emitting its barriers per compiler and per architecture
+(`gc/g1/c1`, `gc/g1/c2`, `cpu/x86/gc/z/z_x86_64.ad`), selected by a
+startup factory (`GCConfig::select_gc`).
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -385,7 +396,11 @@ surface are all data;
 [ClickHouse](deep-dives/clickhouse.md) — settings and factory
 registrations (engines, functions, codecs, formats) carry their own
 doc strings, so thousands of knobs and extensions stay
-user-visible without a second handbook).
+user-visible without a second handbook); [HotSpot](deep-dives/hotspot.md) —
+the interpreter itself is generated at JVM startup from one `def()`
+per bytecode (`TemplateTable::initialize`), emitting a dispatch
+table of machine code per platform — the same move as CPython's
+`bytecodes.c`, one step further down to native code.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
