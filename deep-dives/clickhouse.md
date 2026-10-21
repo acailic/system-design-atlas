@@ -122,13 +122,13 @@ sequenceDiagram
     S->>S: splitBlockIntoParts — by partition key
     S->>W: per partition block
     W->>W: sort rows by primary key (stableGetPermutation)
-    W->>P: per column: compressed .bin + marks; primary.idx = PK of every granule start
-    Note over P: part is immutable; background merges<br/>combine parts later (LSM lineage)
+    W->>P: per column: compressed .bin + marks, primary.idx = PK of every granule start
+    Note over P: part is immutable, background merges<br/>combine parts later (LSM lineage)
     C->>R: SELECT sum(x) WHERE pk BETWEEN a AND b
     R->>R: filterPartsByPartition (714) + markRangesFromPKRange (2107)<br/>KeyCondition over primary.idx → granule ranges
     R->>X: tasks = (part, mark ranges) from read pool
-    X->>P: PREWHERE: read filter columns of surviving granules only;<br/>late columns fetched for surviving rows (RangeReader chain)
-    X->>X: vectorized expressions over Blocks; Aggregator two-level tables
+    X->>P: PREWHERE: read filter columns of surviving granules only,<br/>late columns fetched for surviving rows (RangeReader chain)
+    X->>X: vectorized expressions over Blocks, Aggregator two-level tables
     X-->>C: aggregated result stream
 ```
 
