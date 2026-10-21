@@ -79,8 +79,8 @@ PR).
 
 Domains tracked today: `os-kernel`, `database`, `storage-engine`, `cache`,
 `web-server`, `proxy-lb`, `vcs`, `queue-log`, `runtime`, `language`,
-`container`, `orchestration`, `ml-framework`, `browser-engine`, `editor`,
-`distributed`, `search-engine`, `networking`, `media`.
+`compiler`, `container`, `orchestration`, `ml-framework`, `browser-engine`,
+`editor`, `distributed`, `search-engine`, `networking`, `media`.
 
 ## Scoring rubric
 

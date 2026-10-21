@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">35 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">36 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 35 (and growing) canonical codebases and walks through
+<p>The atlas points at 36 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -59,6 +59,7 @@ alongside it. That is the whole method.</p>
       <button type="button" class="filter-chip" aria-pressed="true">All</button>
       <button type="button" class="filter-chip" data-domain="browser-engine" aria-pressed="false">browser-engine</button>
       <button type="button" class="filter-chip" data-domain="cache" aria-pressed="false">cache</button>
+      <button type="button" class="filter-chip" data-domain="compiler" aria-pressed="false">compiler</button>
       <button type="button" class="filter-chip" data-domain="container" aria-pressed="false">container</button>
       <button type="button" class="filter-chip" data-domain="database" aria-pressed="false">database</button>
       <button type="button" class="filter-chip" data-domain="distributed" aria-pressed="false">distributed</button>
@@ -291,6 +292,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A stage director in a control room, with every screen just another camera crew. The director (the editor core, nvim --embed ) never touches a screen; she dictates the scene as numbered lists…</span>
   <span class="dc-meta"><span class="chip domain">editor</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/llvm/" data-domains="compiler" data-search="llvm: one shared ir, and the pass pipeline as its plugin architecture">
+  <span class="dc-name">LLVM</span>
+  <span class="dc-headline">one shared IR, and the pass pipeline as its plugin architecture</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A giant airport hub where every airline agrees to repack luggage into standard pallets. Each airline (a frontend: clang, rustc, swiftc) dumps its weirdly shaped bags into identical pallets (LLVM…</span>
+  <span class="dc-meta"><span class="chip domain">compiler</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -322,7 +329,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 35 projects; 35 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 36 projects; 36 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -394,6 +401,11 @@ transferable design moves you can apply to your own systems.</li>
 <summary>language <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/lua/">Lua</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">A whole language — lexer, parser, register-based VM, incremental GC, and the friendliest C embedding API ever designed — in ~30k lines with almost no dependencies. Teaches that a runtime's power comes from a few…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>compiler <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/llvm/">LLVM</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The compiler infrastructure the industry breathes through — clang, Rust, Swift, Julia, Zig, and the Triton kernels behind PyTorch's torch.compile all lower onto it — and it won that ubiquity through one architectural…</div></li></ul>
 </details>
 <details class="catalog-group">
 <summary>search-engine <span class="count">(1)</span></summary>
