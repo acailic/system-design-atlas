@@ -426,6 +426,30 @@ projects:
       architecture (feedback vectors, deopt points) when raw speed is the
       product.
 
+  - id: hotspot
+    name: OpenJDK HotSpot
+    repo: https://github.com/openjdk/jdk
+    language: C++
+    license: GPL-2.0-only WITH Classpath-exception-2.0
+    domains: [runtime, language]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 4 }
+    why: >
+      The most-deployed managed runtime in existence — it runs on
+      millions of servers and desktops, and its patterns (tiered JIT,
+      concurrent copying collectors) are mirrored in Android's ART —
+      and it won that position with two architectural bets the whole industry
+      copied: speed earned at runtime by tiered, profile-guided
+      compilation with designed retraction (interpreter → C1 → C2,
+      uncommon traps and deoptimization), and garbage collection as a
+      swappable subsystem behind one CollectedHeap/BarrierSet contract
+      (Serial → Parallel → G1 → ZGC as an evolutionary lineage, one
+      binary). Included as the heavyweight rival of V8 — two engines
+      that independently converged on tiered, deoptimizable
+      speculation — and read targeted via the atlas map (tiering spine,
+      deopt, GC lineage), never cover to cover.
+
   - id: go
     name: Go runtime
     repo: https://github.com/golang/go
