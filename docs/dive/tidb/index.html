@@ -105,7 +105,7 @@ growing from three machines to hundreds.</p>
     PLACE -.-&gt; RAFTS
     SVC --&gt; STOR --&gt; MVCC
     SVC --&gt; COPR
-    STOR -- &quot;applied writes&quot; --&gt; RAFTS --&gt; ROCK
+    STOR -- &quot;proposed writes&quot; --&gt; RAFTS --&gt; ROCK
     RAFTS --&gt; LOG
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
 <ul>
@@ -165,7 +165,7 @@ one table with a primary key <code>id</code>, the row present.</p>
     K--&gt;&gt;S: row value
     S-&gt;&gt;S: encode new row (tablecodec) into MemDB (ART)
     C-&gt;&gt;S: COMMIT
-    S-&gt;&gt;O: 2PC prewrite: locks in CF_LOCK (via Raft)
+    S-&gt;&gt;K: 2PC prewrite: locks in CF_LOCK (via Raft)
     S-&gt;&gt;O: get commit_ts
     S-&gt;&gt;K: commit primary key: CF_WRITE record (via Raft)
     K-&gt;&gt;R: propose → quorum → apply → RocksDB

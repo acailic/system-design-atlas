@@ -84,7 +84,7 @@ flowchart TD
     PLACE -.-> RAFTS
     SVC --> STOR --> MVCC
     SVC --> COPR
-    STOR -- "applied writes" --> RAFTS --> ROCK
+    STOR -- "proposed writes" --> RAFTS --> ROCK
     RAFTS --> LOG
 ```
 
@@ -147,7 +147,7 @@ sequenceDiagram
     K-->>S: row value
     S->>S: encode new row (tablecodec) into MemDB (ART)
     C->>S: COMMIT
-    S->>O: 2PC prewrite: locks in CF_LOCK (via Raft)
+    S->>K: 2PC prewrite: locks in CF_LOCK (via Raft)
     S->>O: get commit_ts
     S->>K: commit primary key: CF_WRITE record (via Raft)
     K->>R: propose → quorum → apply → RocksDB
