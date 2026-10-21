@@ -106,7 +106,7 @@ The **spine** — one scrape of one target — is: `scrapeLoop.run`
 (scrape/scrape.go:1405) ticks → `targetScraper.scrape` (824) does the
 HTTP GET → `scrapeAndReport` (1488) reads and parses →
 `scrapeLoopAppender.append` (1779) resolves labels and series refs →
-`headAppender.Append` (tsdb/head_append.go:446) buffers into an
+`headAppender.Append` (tsdb/head_append.go:443) buffers into an
 appender batch → `Commit` (1769) writes the batch to the WAL first,
 then into head chunks. Later, `DB.Compact` (tsdb/db.go:1519) freezes
 head ranges into immutable blocks.
@@ -123,7 +123,7 @@ sequenceDiagram
     participant L as scrapeLoop.run (1405)
     participant TS as targetScraper.scrape (824)
     participant P as textparse + scrapeCache
-    participant A as headAppender (Append 446)
+    participant A as headAppender (Append 443)
     participant W as WAL (log 1116)
     participant H as Head chunks (memSeries.append 1904)
     L->>L: ticker fires at aligned, jittered time
@@ -171,7 +171,7 @@ remembered in the cache (`addDropped`) and skipped until the target's
 output changes.
 
 **Step 5 — Buffer in the head.** `headAppender.Append`
-(tsdb/head_append.go:446) resolves the series by reference or creates
+(tsdb/head_append.go:443) resolves the series by reference or creates
 it under the `stripeSeries` sharded locks (tsdb/head.go:2294), checks the
 sample against the series' last timestamp (`memSeries.appendable`, 694
 — out-of-order and too-old rules, with an optional OOO window), and
@@ -283,7 +283,7 @@ and LevelDB SSTables, applied to time windows.
   loop; `sample_limit`/`body_size_limit` cap hostile targets; the
   m-mapping and truncation keep heap bounded; if head compaction takes
   longer than the block range, `Compact` logs that compaction is
-  falling behind (db.go:1593) — the operator's cue that ingestion
+  falling behind (db.go:1597) — the operator's cue that ingestion
   outran disk. Remote write, when enabled, is an outbound queue with
   its own retry/shard machinery — push, at the system's edge only.
 
@@ -349,8 +349,9 @@ flowchart LR
   it; the monitor can't tell a dead sender from a quiet one, and
   senders define the load profile.
 - **Choice:** the server scrapes every target on its own ticker
-  (`scrapeLoop.run` 1405, `targetScraper.scrape` 824); nothing is ever
-  accepted inbound.
+  (`scrapeLoop.run` 1405, `targetScraper.scrape` 824); on a default
+  install pull is the only inbound path — inbound push exists solely
+  behind opt-in escape-hatch flags.
 - **Evidence:** `scrape/manager.go:setOffsetSeed` (320) — the server
   hashes itself into every target's scrape offset precisely *because*
   two servers pulling the same fleet should not collide; a failed
@@ -358,8 +359,10 @@ flowchart LR
   `endOfRunStaleness` 1663), i.e. the code pays for the model by
   making absence a write.
 - **Given up:** targets behind NAT, short-lived batch jobs, and
-  lambdas can't be dialed — the Pushgateway exists as the sanctioned
-  escape hatch; and the server's address book (discovery) must be
+  lambdas can't be dialed — the Pushgateway and, since v3.x, an
+  opt-in OTLP receiver (`--web.enable-otlp-receiver`,
+  cmd/prometheus/main.go:485) exist as the sanctioned push escape
+  hatches; and the server's address book (discovery) must be
   maintained.
 - **Verdict:** for long-lived services the trade is dominant: liveness
   is proven by the request, timestamps are grid-aligned by
@@ -394,7 +397,7 @@ flowchart LR
 - **Choice:** a Head (in-memory chunks + m-mapped tails, WAL-backed)
   freezes ranges into immutable blocks
   (`head.compactable` 2034 — past ~1.5× the block range —
-  `DB.Compact` 1519, `LeveledCompactor.Compact` compact.go:588),
+  `DB.Compact` 1519, `LeveledCompactor.Compact` compact.go:584),
   then the WAL for that range is checkpointed and truncated
   (`truncateWAL` 1535); blocks themselves merge upward through
   exponential ranges (2h, 6h, …).
@@ -435,7 +438,7 @@ flowchart LR
    append → commit, with the failed-scrape-equals-empty-scrape rule
    that drives staleness; then `updateStaleMarkers` (1754) and
    `endOfRunStaleness` (1663).
-7. `tsdb/head_append.go:headAppender.Append` (446) — ref-based
+7. `tsdb/head_append.go:headAppender.Append` (443) — ref-based
    buffering; read `memSeries.appendable` (694) closely for the
    OOO/too-old/out-of-bounds decision table, and `getOrCreate` (563)
    → `tsdb/head.go:2082` for the optimistic-create-under-stripe-lock
