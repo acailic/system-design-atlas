@@ -697,6 +697,32 @@ projects:
       on: sessions, watches, and the read/write split that makes a
       coordination service scalable at all.
 
+  # ── observability ────────────────────────────────────────────────────
+
+  - id: prometheus
+    name: Prometheus
+    repo: https://github.com/prometheus/prometheus
+    language: Go
+    license: Apache-2.0
+    domains: [observability, storage-engine]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      The monitoring system that owns the metrics slot in the cloud-native
+      stack, and it won by inverting the ingestion model: pull, don't push.
+      The server scrapes every target on a known interval over plain HTTP,
+      so liveness, latency, and sample age are facts the monitor itself
+      observes — and absence is written into the database as staleness
+      markers, making "target gone" data rather than silence. Everything
+      else follows: a two-tier TSDB (WAL-protected mutable head, immutable
+      time-windowed blocks) with the same shape as an LSM engine, PromQL,
+      and an alert engine whose rule groups are scheduled reconcile loops
+      that write results — even their own restart state (ALERTS_FOR_STATE)
+      — back as ordinary series. Teaches observability as an architecture
+      problem: the exposition format, the scrape clock, and the storage
+      engine are one design.
+
   # ── editors ───────────────────────────────────────────────────────────
 
   - id: vscode

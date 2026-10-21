@@ -69,7 +69,11 @@ is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&qu
 proposal and fsyncs before the follower acks, so election is just
 &quot;highest log wins&quot;; <a href="../dive/rocksdb/">RocksDB</a> — one WAL
 multiplexed over column families whose CF-tagged record types double
-as a prepare/commit/rollback transaction protocol.</p>
+as a prepare/commit/rollback transaction protocol;
+<a href="../dive/prometheus/">Prometheus</a> — the TSDB
+head&#39;s WAL protects only recent samples and fsyncs at segment
+rotation, a deliberately lighter durability point because metrics are
+re-scrapeable.</p>
 <p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
 mechanical replay.</p>
@@ -83,7 +87,10 @@ concentrated in one small, carefully synchronized component.</p>
 the only mutable pointers; <a href="../dive/leveldb/">LevelDB</a> — SSTables
 are immutable; the manifest (itself a log) is the mutable layout;
 <a href="../dive/kafka/">Kafka</a> — KRaft moved broker metadata into an
-append-only raft log.</p>
+append-only raft log; <a href="../dive/prometheus/">Prometheus</a> — the
+mutable surface is the head block (WAL-backed memory + m-mapped
+chunks); history lives in immutable time-windowed blocks that
+compaction merges upward and retention deletes whole.</p>
 <p><strong>Why it recurs:</strong> small mutable surfaces are auditable, lockable, and
 crash-safe; everything else becomes shareable and cacheable.</p>
 <p><strong>Reach for it when:</strong> reads dominate writes and history matters. The
@@ -192,7 +199,11 @@ counters say is hot), and G1 shrinks each pause by evacuating only a
 region collection set sized against a declared pause goal
 (<code>G1YoungCollector::collect</code>, the <code>MaxGCPauseMillis</code> MMU tracker in
 <code>G1Policy</code>), while ZGC moves marking and relocation off the mutator
-entirely — the pauses left are two sub-millisecond stack scans.</p>
+entirely — the pauses left are two sub-millisecond stack scans;
+<a href="../dive/prometheus/">Prometheus</a>
+— full head chunks m-mapped off the heap by a background loop, head
+ranges frozen into blocks by a budget-watching compactor that warns
+when it falls behind, and the WAL truncated by checkpointing.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -206,7 +217,12 @@ control plane; <a href="../dive/moby/">Moby</a> — Config/HostConfig/State
 is the same spec/status split at container granularity (and restart
 policies are a reconcile loop over exit states);
 <a href="../dive/nats/">NATS</a> — JetStream converges stream placement
-toward <code>desiredRaftGroup</code> state when servers fail or are added.</p>
+toward <code>desiredRaftGroup</code> state when servers fail or are added;
+<a href="../dive/prometheus/">Prometheus</a> — rule groups re-derive
+complete state every evaluation: alert rules reconcile the active-alert
+map against the current query result, stale-mark series the previous
+eval produced, and even restore their <code>for</code> timers after a restart by
+querying the ALERTS_FOR_STATE series they wrote to their own TSDB.</p>
 <p><strong>Why it recurs:</strong> distributed systems miss events; idempotent
 convergence from any state survives what edge-triggered designs
 cannot.</p>
