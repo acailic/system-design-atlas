@@ -723,6 +723,28 @@ projects:
       problem: the exposition format, the scrape clock, and the storage
       engine are one design.
 
+  - id: tidb
+    name: TiDB
+    repo: https://github.com/pingcap/tidb
+    language: Go (SQL layer), Rust (TiKV storage)
+    license: Apache-2.0
+    domains: [database, distributed]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The open-source distributed SQL database that actually shipped at
+      scale, and it won its slot by refusing to invent: it took PostgreSQL's
+      SQL semantics (in MySQL dialect), etcd-lineage Raft (raft-rs),
+      Percolator's coordinator-free 2PC, and RocksDB underneath — then made
+      them compose behind one narrow contract of ordered bytes, one global
+      timestamp (PD's TSO), and a KV protocol. That disaggregation is the
+      lesson: stateless SQL nodes, a clock-and-placement service, and
+      Raft-replicated MVCC key ranges each scale and evolve independently,
+      and a columnar engine (TiFlash) later joined as just another Raft
+      replica. Read it beside the etcd, PostgreSQL, and LevelDB dives to
+      watch three famous single-node ideas survive being fused.
+
   # ── editors ───────────────────────────────────────────────────────────
 
   - id: vscode

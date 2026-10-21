@@ -23,7 +23,7 @@ event loops for I/O-bound work", "content-address your data". Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.
 
-The atlas points at 39 (and growing) canonical codebases and walks through
+The atlas points at 40 (and growing) canonical codebases and walks through
 the *decisions frozen into their code*: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -109,6 +109,7 @@ Deep-dives (the exemplars — more added over time):
 - [ClickHouse](deep-dives/clickhouse.md) — columns all the way down: sparse-indexed immutable parts, granule skipping, PREWHERE, vectorized execution
 - [OpenJDK HotSpot](deep-dives/hotspot.md) — earned speed: tiered C1/C2 compilation with designed deoptimization, and the Serial→Parallel→G1→ZGC collector lineage behind one heap contract
 - [Prometheus](deep-dives/prometheus.md) — pull model made correct by absence-as-data: scrape clocks + staleness markers, WAL-protected head, immutable block compaction, rules as reconcile loops
+- [TiDB](deep-dives/tidb.md) — SQL as a thin skin over three services: stateless SQL nodes, one global clock (TSO), Raft-replicated MVCC storage (Percolator 2PC in TiKV)
 
 The catalog currently tracks no further heavyweight and
 high-teaching-value candidates awaiting deep-dives — every

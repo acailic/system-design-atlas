@@ -73,7 +73,10 @@ as a prepare/commit/rollback transaction protocol;
 <a href="../dive/prometheus/">Prometheus</a> — the TSDB
 head&#39;s WAL protects only recent samples and fsyncs at segment
 rotation, a deliberately lighter durability point because metrics are
-re-scrapeable.</p>
+re-scrapeable; <a href="../dive/tidb/">TiDB</a> — TiKV&#39;s raft-engine
+<em>is</em> the log: consensus entries persist there while applied state goes
+to RocksDB, whose own WAL the apply path can skip because the Raft log
+replays anything un-applied (raftstore fsm/apply.rs).</p>
 <p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
 mechanical replay.</p>
@@ -259,7 +262,11 @@ compaction truncates it; <a href="../dive/linux/">linux</a> — RCU is the
 same bet at memory granularity: readers walk page-cache and dentry
 structures under <code>rcu_read_lock</code> with no locks at all, writers
 publish replacements atomically, and reclamation waits a grace
-period (<code>synchronize_rcu</code>).</p>
+period (<code>synchronize_rcu</code>); <a href="../dive/tidb/">TiDB</a> — MVCC pushed out
+of the database engine entirely: one global clock (PD&#39;s TSO) stamps
+versions, TiKV stores them as key+timestamp records in two column
+families with in-flight intents in a third (Percolator&#39;s layout), and
+readers resolve &quot;latest version ≤ my snapshot&quot; with a seek.</p>
 <p><strong>Why it recurs:</strong> locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.</p>
 <p><strong>Reach for it when:</strong> read concurrency matters more than write
@@ -321,7 +328,10 @@ pluggable room: five collectors (Serial, Parallel, G1, ZGC,
 Shenandoah) behind one <code>CollectedHeap</code> + <code>BarrierSet</code> contract, each
 also emitting its barriers per compiler and per architecture
 (<code>gc/g1/c1</code>, <code>gc/g1/c2</code>, <code>cpu/x86/gc/z/z_x86_64.ad</code>), selected by a
-startup factory (<code>GCConfig::select_gc</code>).</p>
+startup factory (<code>GCConfig::select_gc</code>); <a href="../dive/tidb/">TiDB</a> — the kvproto service contract plus PD
+placement rules are the seam: a columnar engine (TiFlash) joined the
+system as just another Raft replica of the same regions, with the SQL
+layer unchanged.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they

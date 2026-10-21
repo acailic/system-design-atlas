@@ -53,7 +53,10 @@ as a prepare/commit/rollback transaction protocol;
 [Prometheus](deep-dives/prometheus.md) — the TSDB
 head's WAL protects only recent samples and fsyncs at segment
 rotation, a deliberately lighter durability point because metrics are
-re-scrapeable.
+re-scrapeable; [TiDB](deep-dives/tidb.md) — TiKV's raft-engine
+*is* the log: consensus entries persist there while applied state goes
+to RocksDB, whose own WAL the apply path can skip because the Raft log
+replays anything un-applied (raftstore fsm/apply.rs).
 
 **Why it recurs:** sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
@@ -272,7 +275,11 @@ compaction truncates it; [linux](deep-dives/linux.md) — RCU is the
 same bet at memory granularity: readers walk page-cache and dentry
 structures under `rcu_read_lock` with no locks at all, writers
 publish replacements atomically, and reclamation waits a grace
-period (`synchronize_rcu`).
+period (`synchronize_rcu`); [TiDB](deep-dives/tidb.md) — MVCC pushed out
+of the database engine entirely: one global clock (PD's TSO) stamps
+versions, TiKV stores them as key+timestamp records in two column
+families with in-flight intents in a third (Percolator's layout), and
+readers resolve "latest version ≤ my snapshot" with a seek.
 
 **Why it recurs:** locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.
@@ -339,7 +346,10 @@ pluggable room: five collectors (Serial, Parallel, G1, ZGC,
 Shenandoah) behind one `CollectedHeap` + `BarrierSet` contract, each
 also emitting its barriers per compiler and per architecture
 (`gc/g1/c1`, `gc/g1/c2`, `cpu/x86/gc/z/z_x86_64.ad`), selected by a
-startup factory (`GCConfig::select_gc`).
+startup factory (`GCConfig::select_gc`); [TiDB](deep-dives/tidb.md) — the kvproto service contract plus PD
+placement rules are the seam: a columnar engine (TiFlash) joined the
+system as just another Raft replica of the same regions, with the SQL
+layer unchanged.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
