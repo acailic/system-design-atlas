@@ -33,7 +33,11 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `## Explain like I'm 10` section (with a `**Why the grown-ups did it this
   way:**` paragraph), unnumbered `## Walkthrough: …` section whose steps are
   exactly `**Step N — Title.**` / `**Outcome — Title.**` bold-lead paragraphs
-  (no code ticks in titles), and ```mermaid fenced diagrams. Numbered
+  (no code ticks in titles), and ```mermaid fenced diagrams. The
+  `## Walkthrough:` heading itself must also be plain text — inline code
+  ticks there silently break the stepper (build.mjs matches
+  `Walkthrough:[^<]*` and the test suite stays green; only the
+  step-through UI is lost). Numbered
   sections 1–9 keep their order; the two new sections are unnumbered so
   citations like "the reading path in section 6" stay stable.
 - Read-aloud + steppers are progressive enhancement in `site/assets/site.js`;
