@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenJDK HotSpot: watch first, compile later, retract anytime — System Design Atlas</title>
+<meta name="description" content="HotSpot is the virtual machine inside every OpenJDK build — the code that turns Java bytecode into machine code and keeps billions of objects alive on millions of servers and desktops. The d">
+<meta property="og:title" content="OpenJDK HotSpot: watch first, compile later, retract anytime — System Design Atlas">
+<meta property="og:description" content="HotSpot is the virtual machine inside every OpenJDK build — the code that turns Java bytecode into machine code and keeps billions of objects alive on millions of servers and desktops. The d">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/hotspot/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/hotspot/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-method-s-life-from-bytecode-to-tier-4-code-and-back">Walkthrough: one method's life, from bytecode to tier-4 code and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>OpenJDK HotSpot: watch first, compile later, retract anytime</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/openjdk/jdk" rel="noopener">GPL-2.0-only WITH Classpath-exception-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>815ff4dc327fe17f2433c7d115a5a503af10f3c4</code> · jdk-27-ga, 2026-08-19 · <a href="https://github.com/openjdk/jdk" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">HotSpot is the virtual machine inside every OpenJDK build — the code
+that turns Java bytecode into machine code and keeps billions of
+objects alive on millions of servers and desktops. The design lesson this
+dive teaches is <strong>earned speed</strong>: HotSpot refuses to guess expensive
+things up front. Every method starts life being <em>walked</em> by a template
+interpreter; the runtime watches which methods actually get hot
+(invocation and backedge counters), escalates them through cheaper and
+dearer compilers (C1, then C2) on background threads — and, because
+those compilers were allowed to <em>speculate</em> on what the profile said,
+it keeps the ability to <strong>throw the optimized code away instantly</strong>
+(deoptimization) the moment reality disagrees. The same philosophy
+shapes memory: garbage collection is not one algorithm but five
+(Serial, Parallel, G1, ZGC, Shenandoah) behind a single
+<code>CollectedHeap</code>/<code>BarrierSet</code> contract, an evolutionary lineage from
+&quot;stop everything and sweep&quot; to &quot;clean up while the program keeps
+running, one region at a time.&quot;</p>
+<p>Read it as the heavyweight rival of the atlas&#39;s V8 entry: two engines
+that independently converged on tiered, profile-driven, deoptimizable
+compilation (V8&#39;s Ignition→Sparkplug→Maglev→TurboFan against
+interpreter→C1-profiled→C1→C2). <a href="../cpython/">CPython</a> is the same
+idea&#39;s middle point (adaptive interpreter, no JIT) and <a href="../lua/">Lua</a>
+the control experiment (no speculation at all). Focus is two spines,
+not the whole tree: the tiering story (bytecode → interpreter →
+compilers → deopt) and the memory story (TLAB → region → concurrent
+collector) — a codebase this size is read with a map, never cover to
+cover.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A kitchen that learns your favorite dishes and keeps a safety copy
+of every recipe.</strong> When you first order a dish (call a method), the
+cook follows the recipe card line by line (the interpreter, walking
+bytecodes) — slow but always right, and it never mistakes the recipe.
+The manager keeps tally marks (the invocation counters): this dish got
+ordered 200 times. So the sous-chef (C1, the quick compiler) writes a
+streamlined version of the recipe on a whiteboard — with a twist:
+while cooking, they also jot down what they actually see (&quot;onions
+always&quot;, &quot;pan is always medium&quot; — the profile, a MethodData notebook).
+If the dish keeps selling, the head chef (C2, the slow compiler)
+writes the definitive version: every step assumes &quot;onions, medium
+heat&quot; and skips the checks. But there&#39;s a house rule that makes this
+safe: pinned next to each assumed step is a tripwire (the uncommon
+trap). The first time someone orders it without onions, the tripwire
+fires, the whiteboard is marked &quot;do not use&quot; (the compiled code is
+made not-entrant), and the cook instantly falls back to following the
+recipe card from the exact same step (deoptimization rebuilds the
+interpreter frame) — because being right beats being fast. Meanwhile
+the cleaning crew works under a standing contract: whoever runs the
+kitchen may swap crews at the start of the day (pick the collector at
+startup, behind one door). The old crew cleaned everything at night,
+all at once (Serial — stop the world); the new crews clean a few
+shelves every hour (G1&#39;s regions, sized so the interruption meets a
+time goal) or even while cooking is going on, tagging shelf labels
+with colored stickers so anyone grabbing a jar knows instantly whether
+it has been checked (ZGC&#39;s colored pointers and load barriers).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a general-purpose runtime
+cannot know which methods deserve effort or which object lifetimes
+dominate — so instead of guessing statically, it pays a tiny
+observation tax everywhere and buys the right to speculate and to
+retract, which is what lets one binary serve both a 50ms CLI run and a
+10-year server.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph load[&quot;class loading — src/hotspot/share/classfile/&quot;]
+        CL[&quot;classfile bytes&lt;br/&gt;(frozen ABI: JVM spec)&quot;]
+        IK[&quot;InstanceKlass · Method · bytecode&lt;br/&gt;→ Metaspace (metadata, not heap)&quot;]
+    end
+
+    subgraph exec[&quot;execution engine — src/hotspot/share/{interpreter,compiler,c1,opto}&quot;]
+        T0[&quot;tier 0 · template interpreter&lt;br/&gt;TemplateTable::initialize templateTable.cpp:218&lt;br/&gt;entries: templateInterpreterGenerator_x86.cpp:1206&quot;]
+        T3[&quot;tiers 1–3 · C1&lt;br/&gt;GraphBuilder c1_GraphBuilder.cpp:3265&lt;br/&gt;linear-scan regalloc c1_LinearScan.cpp:73&quot;]
+        T4[&quot;tier 4 · C2&lt;br/&gt;sea-of-nodes IR: Parse parse1.cpp:419&lt;br/&gt;escape analysis escape.cpp:104&quot;]
+        POL[&quot;tiering policy&lt;br/&gt;compilationPolicy.hpp:106 (5 levels)&lt;br/&gt;CompileBroker queues compileBroker.cpp:886&quot;]
+        CC[&quot;code cache: nmethods&lt;br/&gt;make_not_entrant nmethod.cpp:2181&quot;]
+        DEOPT[&quot;deoptimization&lt;br/&gt;uncommon_trap_inner deoptimization.cpp:1713&quot;]
+    end
+
+    subgraph mem[&quot;memory subsystem — src/hotspot/share/gc/&quot;]
+        TLAB[&quot;TLABs: bump-pointer allocation&lt;br/&gt;threadLocalAllocBuffer.hpp:45&quot;]
+        SEAM[&quot;CollectedHeap : collectedHeap.hpp:91&lt;br/&gt;BarrierSet : barrierSet.hpp:46&lt;br/&gt;selected at startup: gcConfig.cpp:143&quot;]
+        COLL[&quot;Serial · Parallel · G1 · ZGC · Shenandoah&quot;]
+    end
+
+    subgraph coord[&quot;coordination — src/hotspot/share/runtime/&quot;]
+        SP[&quot;safepoints: poll pages&lt;br/&gt;SafepointSynchronize::begin safepoint.cpp:333&quot;]
+        VM[&quot;VM thread runs STW operations&lt;br/&gt;vmThread.cpp:154&quot;]
+        HS[&quot;handshakes: per-thread ops&quot;]
+    end
+
+    CL --&gt; IK --&gt; T0
+    T0 --&gt;|&quot;counters trip: interpreterRuntime.cpp:1008&quot;| POL
+    POL --&gt;|&quot;queue&quot;| T3 --&gt; POL
+    T3 --&gt;|&quot;profile complete&quot;| T4
+    T3 &amp; T4 --&gt; CC
+    CC --&gt;|&quot;guard fails&quot;| DEOPT
+    DEOPT --&gt;|&quot;rebuild frames: interpreter&quot;| T0
+    T0 &amp; T3 &amp; T4 --&gt;|&quot;allocate: TLAB fast path&quot;| TLAB --&gt; SEAM
+    SEAM --&gt; COLL
+    COLL --&gt;|&quot;needs all threads stopped&quot;| SP --&gt; VM
+    T4 -.-&gt;|&quot;write/read barriers compiled in:&lt;br/&gt;gc/g1/c2, cpu/x86/gc/z/z_x86_64.ad&quot;| SEAM
+    HS -.-&gt; SP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The frozen ABI is the classfile format, not a syscall table.</strong>
+<code>javac</code> compiles Java source to verified bytecode; HotSpot&#39;s
+loaders (<code>src/hotspot/share/classfile/</code>) turn it into runtime
+metadata — <code>InstanceKlass</code>, <code>Method</code>, bytecodes, constant pool — in
+<em>Metaspace</em>, off the Java heap. This layer does not optimize
+anything; it materializes what the compiler already decided. The
+seam facing the world is a 30-year-stable binary format plus JNI and
+JVMTI, which is the contract every JVM language (Kotlin, Scala,
+Groovy…) and every tool (debuggers, profilers) programs against.</li>
+<li><strong>The execution engine is a pipeline of code <em>qualities</em>, not one
+compiler.</strong> Tier 0 is the template interpreter: at startup, one
+generator walks a table of bytecode→machine-code templates
+(<code>TemplateTable::initialize</code>, <code>templateTable.cpp:218</code>) and emits a
+dispatch table where every bytecode jumps directly to generated
+machine code — there is no fetch-decode loop in C. C1
+(<code>src/hotspot/share/c1/</code>) compiles fast, optimizes moderately, and
+at tier 3 <em>also emits profile updates into the code it generates</em>.
+C2 (<code>src/hotspot/share/opto/</code>) compiles slowly from that profile
+into aggressively speculative code. A single policy module
+(<code>compilationPolicy.hpp:106</code>, whose header comment is the design
+document for the five levels) decides transitions; background
+compiler threads consume two priority queues
+(<code>CompileBroker</code>, <code>compileBroker.cpp:886</code>).</li>
+<li><strong>The memory subsystem is a plug-in behind two interfaces.</strong>
+<code>CollectedHeap</code> (<code>collectedHeap.hpp:91</code>) is the heap&#39;s abstract
+contract (<code>allocate_new_tlab</code>, <code>is_in</code>, <code>collect</code> are pure virtual);
+<code>BarrierSet</code> (<code>barrierSet.hpp:46</code>) is the reference-access contract.
+At startup <code>GCConfig::select_gc</code> (<code>gcConfig.cpp:143</code>) reads the
+<code>-XX:+Use…GC</code> flags and one per-collector factory builds the heap
+(<code>Universe::initialize_heap</code>, <code>universe.cpp:957</code> →
+<code>G1Arguments::create_heap</code> <code>g1Arguments.cpp:269</code>, and siblings).
+The depth of the seam is visible in the directory tree: every
+collector implements barrier <em>emission</em> per compiler and per CPU —
+<code>share/gc/g1/c1/</code>, <code>share/gc/g1/c2/</code>, and ZGC even feeds its load
+barrier into C2&#39;s matcher through the architecture-description file
+<code>cpu/x86/gc/z/z_x86_64.ad</code>.</li>
+<li><strong>Coordination is explicit: safepoints, a VM thread, and
+handshakes.</strong> Compiled code contains polls; arming a global state
+makes threads trap at their next poll
+(<code>SafepointMechanism</code>, <code>safepointMechanism.cpp:39</code>). A single VM
+thread serially executes stop-the-world operations
+(<code>VMThread::run</code>, <code>vmThread.cpp:154</code>); handshakes
+(<code>runtime/handshake.cpp</code>) do per-thread surgery (like deoptimizing
+one frame) without stopping the world.</li>
+<li><strong>Where the spine is:</strong> one method&#39;s life — <code>Threads::create_vm</code>
+(<code>threads.cpp:447</code>) loads the main class → first call enters the
+interpreter (<code>JavaCalls::call_virtual</code>, <code>javaCalls.cpp:162</code> →
+<code>generate_normal_entry</code> <code>templateInterpreterGenerator_x86.cpp:1206</code>)
+→ counters trip → <code>InterpreterRuntime::frequency_counter_overflow</code>
+(<code>interpreterRuntime.cpp:1008</code>) → policy queues C1 → C2 → an
+uncommon trap deoptimizes it. In parallel, the objects it allocates
+flow TLAB → region → collector. The Walkthrough walks exactly this.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-method-s-life-from-bytecode-to-tier-4-code-and-back">Walkthrough: one method&#39;s life, from bytecode to tier-4 code and back</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant J as Java thread (mutator)
+    participant I as interpreter (tier 0)
+    participant P as tiering policy + CompileBroker
+    participant C1 as C1 compiler thread
+    participant C2 as C2 compiler thread
+    participant H as heap / collector
+
+    J-&gt;&gt;I: main() calls fib(n) — first call
+    I-&gt;&gt;I: generate_normal_entry code: bump invocation counter
+    I-&gt;&gt;P: counter trips: frequency_counter_overflow
+    P-&gt;&gt;P: method_invocation_event: level 3 chosen
+    P-&gt;&gt;C1: queue compile task (C1 queue)
+    C1--&gt;&gt;J: install tier-3 nmethod + MDO writes in code
+    J-&gt;&gt;J: runs fast, profile cells fill (types, branches)
+    P-&gt;&gt;C2: Tier4 threshold met — queue C2 task
+    C2--&gt;&gt;J: install tier-4 nmethod with guards (uncommon traps)
+    J-&gt;&gt;H: allocates: TLAB bump-pointer
+    C2-&gt;&gt;C2: guard fails (profile was wrong!)
+    C2-&gt;&gt;C2: uncommon_trap_inner → vframeArray → interpreter frames
+    Note over J,I: execution continues in interpreter, reprofiled, recompiled
+    H--&gt;&gt;J: TLAB refill stalls once → young GC evacuates eden regions
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-method-is-loaded-not-compiled">The method is loaded, not compiled</h3>
+<p>When <code>main</code>&#39;s class
+resolves, the classfile&#39;s per-method bytecode becomes a <code>Method</code> in
+Metaspace; nothing has been compiled and nothing will be until the
+runtime has <em>evidence</em>. The first call goes through
+<code>JavaCalls::call_virtual</code> (<code>javaCalls.cpp:162</code>) into the method&#39;s
+<em>interpreter entry</em> — machine code generated at JVM startup by
+<code>TemplateInterpreterGenerator::generate_normal_entry</code>
+(<code>templateInterpreterGenerator_x86.cpp:1206</code>): it builds the frame,
+copies arguments into locals, and ends with a jump through the
+dispatch table to the first bytecode&#39;s template
+(<code>__ dispatch_next(vtos)</code>, <code>:1345</code> of the same file; the jump itself
+is <code>InterpreterMacroAssembler::dispatch_next</code>,
+<code>interp_masm_x86.cpp:790</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="counters-not-opinions-trigger-compilation">Counters, not opinions, trigger compilation</h3>
+<p>The
+generated entry also increments an invocation counter; loops bump a
+backedge counter. These live packed in <code>InvocationCounter</code>
+(<code>invocationCounter.hpp:36</code> — the bit format <code>[count|carry|…]</code> is at
+<code>:40</code>), hanging off the method&#39;s <code>MethodCounters</code>. When the packed
+count reaches its limit, the entry&#39;s own slow-path label fires
+(<code>invocation_counter_overflow</code> handler at
+<code>templateInterpreterGenerator_x86.cpp:1346</code>) into
+<code>InterpreterRuntime::frequency_counter_overflow</code>
+(<code>interpreterRuntime.cpp:1008</code>), which asks the policy.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-policy-is-a-published-decision-table">The policy is a published decision table</h3>
+<p><code>CompilationPolicy::event</code> (<code>compilationPolicy.cpp:788</code>) →
+<code>method_invocation_event</code> (<code>:1413</code>) decides the next tier using
+flag-encoded thresholds — interpreter→C1-profiled when invocations
+pass <code>Tier3InvocationThreshold</code> (default 200,
+<code>compiler_globals.hpp:175</code>), profiled-C1→C2 at
+<code>Tier4InvocationThreshold</code> (default 5000, <code>:193</code>). Crucially the
+thresholds are <em>scaled by compiler queue length</em> (the formula is
+documented in <code>compilationPolicy.hpp:192</code>, s = queue_size_X / (TierXLoadFeedback × compiler_count_X) + 1): when C2 is backed up,
+the bar to enter its queue rises — backpressure wired into the
+promotion rule itself. <code>CompilationPolicy::compile</code> (<code>:834</code>) hands
+the task to <code>CompileBroker::compile_method</code>
+(<code>compileBroker.cpp:1225</code>), which parks it on the C1 or C2 queue
+(<code>:886–891</code>) and returns; the Java thread keeps interpreting.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="c1-compiles-fast-and-self-instruments">C1 compiles fast and self-instruments</h3>
+<p>A background
+compiler thread (<code>CompileBroker::compiler_thread_loop</code>,
+<code>compileBroker.cpp:1670</code>) picks the task and runs C1
+(<code>c1_Compiler.cpp:254</code>): <code>GraphBuilder</code>
+(<code>c1_GraphBuilder.cpp:3265</code>) walks bytecode into an HIR, inlines
+small callees (<code>try_inline</code>, <code>:3493</code>), lowers to LIR, and linear-scan
+allocates registers (<code>c1_LinearScan.cpp:73</code>). Tier-3 code is
+two-purpose: it runs <em>and</em> records — the generated code updates
+<code>MethodData</code> cells (branch counts, observed receiver types) as it
+executes, so the profile improves at machine speed. The install is
+invisible to running callers: entry points are patched behind the
+method&#39;s adapters (i2c/c2i trampolines, <code>sharedRuntime.cpp:1483</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="c2-compiles-from-the-profile-guarded">C2 compiles from the profile, guarded</h3>
+<p>When the tier-3
+counters (kept in the MDO for exactly this transition,
+<code>compilationPolicy.hpp:181</code>) clear the tier-4 bar, C2 starts from bytecode <em>plus</em> the MDO (read
+through the compiler interface, <code>ciMethod::ensure_method_data</code>,
+<code>ciMethod.cpp:1007</code>). <code>Compile::Compile</code> (<code>compile.cpp:636</code>) drives
+<code>Parse::Parse</code> (<code>parse1.cpp:419</code>) — bytecodes become nodes in a
+sea-of-nodes graph (<code>Parse::do_one_bytecode</code>, <code>parse2.cpp:1985</code>; the
+IR&#39;s dominator machinery calls itself &quot;the sea of nodes&quot;,
+<code>loopnode.hpp:1220</code>). Profile-supported guesses become machine code
+with a tripwire attached: a receiver that was always one class makes
+the call site a direct inlined call whose slow path is
+<code>GraphKit::uncommon_trap</code> (<code>graphKit.cpp:2161</code>). Escape analysis
+(<code>ConnectionGraph::do_analysis</code>, <code>escape.cpp:104</code>) can delete
+allocations entirely — the barrier emission even <em>knows</em> how to drop
+the GC barrier for scalar-replaced objects
+(<code>PhaseMacroExpand::can_eliminate_allocation</code>, <code>macro.cpp:615</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="reality-disagrees-deoptimize-don-t-crash">Reality disagrees: deoptimize, don&#39;t crash</h3>
+<p>A new
+subclass arrives at the monomorphic call site: the tripwire executes
+<code>Deoptimization::uncommon_trap_inner</code> (<code>deoptimization.cpp:1713</code>),
+which uses the nmethod&#39;s recorded debug info to rebuild interpreter
+frames from the compiled frame (<code>Deoptimization::create_vframeArray</code>,
+<code>:1392</code>), marks the code <code>not_entrant</code>
+(<code>nmethod::make_not_entrant</code>, <code>nmethod.cpp:2181</code> — itself performed
+through an nmethod <em>entry barrier</em>, so threads already inside finish
+safely), and execution resumes in the interpreter at the exact
+bytecode. Deopt is also <em>wholesale</em>: when class loading invalidates
+an assumption a compiler registered as a dependency,
+<code>CodeCache::mark_for_deoptimization</code> (<code>codeCache.cpp:1347</code>) marks
+every dependent nmethod, and a handshake deoptimizes live frames
+(<code>Deoptimization::deoptimize_all_marked</code>, <code>deoptimization.cpp:1030</code>).
+Retraction is not an error path; it is the mechanism that makes
+speculation honest.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="the-method-allocates-memory-work-is-budgeted-and-concurrent">The method allocates; memory work is budgeted and
+concurrent</h3>
+<p><code>new</code> in tier-4 code is an inline bump-pointer against
+the thread&#39;s TLAB (<code>ThreadLocalAllocBuffer</code>,
+<code>threadLocalAllocBuffer.hpp:45</code>; compiled allocation is built by
+<code>GraphKit::new_instance</code>, <code>graphKit.cpp:3792</code>; the interpreter&#39;s
+first allocation takes the runtime call
+<code>InterpreterRuntime::_new</code>, <code>interpreterRuntime.cpp:215</code>). When the
+TLAB refill finds eden exhausted, the collector runs <em>as a VM
+operation</em>: threads park at poll pages, and G1 evacuates only the
+young collection set chosen to meet its pause-time goal
+(<code>G1YoungCollector::collect</code>, <code>g1YoungCollector.cpp:1111</code>; the goal
+is installed in <code>G1Policy</code>&#39;s MMU tracker,
+<code>g1Policy.cpp:57</code>). ZGC instead shrinks each stop to well under a
+millisecond by doing mark and relocation <em>concurrently</em>, coordinated by its own
+driver threads (<code>ZDriverMinor</code>/<code>ZDriverMajor::run_thread</code>,
+<code>zDriver.cpp:436+</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="speed-that-was-earned-kept-honest-and-paid-for-on-a-budget">Speed that was earned, kept honest, and paid for on a
+budget</h3>
+<p>The hot method ends up as tier-4 machine code with real
+guards; its wrong guesses fell back instantly; its garbage was
+collected in pauses sized by policy, not by heap size — and every
+piece of that machinery (interpreter, compilers, collectors) is
+swappable machinery behind published contracts inside one process.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>MethodData</code> (the MDO) + <code>InvocationCounter</code> — the runtime&#39;s
+notebook.</strong>
+<strong>What:</strong> per-method profile cells — invocation/backedge counts,
+per-branch taken/not-taken, observed receiver types at call sites —
+plus the older, cheaper per-method packed counters.
+<strong>Where:</strong> <code>methodData.hpp:1938</code> (<code>class MethodData</code>), layout
+philosophy in the file&#39;s own header comment (<code>:41</code> — &quot;All data in
+the profile is approximate&quot;), <code>ProfileData</code> subclasses at <code>:304</code>;
+counters at <code>invocationCounter.hpp:36</code>.
+<strong>Why:</strong> the whole tiering bet rests on <em>cheap, approximate,
+self-collected evidence</em>. The MDO is deliberately lossy (bounded
+cells, cooperative updates) because its consumer is a heuristic,
+not an audit — the file comment says bad or missing data merely
+<em>degrades</em> compilation decisions. Compare V8, which after
+interpreters moved feedback into the bytecode operands themselves:
+same need, different placement of the notebook.</p>
+</li>
+<li><p><strong><code>nmethod</code> — compiled code that describes itself.</strong>
+<strong>What:</strong> the unit of installed machine code: instructions plus
+scopes (bytecode↔machine-state mappings for deopt), an oops list
+(embedded references for GC scanning), dependencies (assumptions to
+be invalidated), and a lifecycle state (<code>in_use</code> → <code>not_entrant</code> →
+unloaded).
+<strong>Where:</strong> <code>nmethod.cpp:2181</code> (<code>make_not_entrant</code>); dependency
+invalidation from <code>codeCache.cpp:1347</code>.
+<strong>Why:</strong> in a runtime that mutates code <em>and</em> moves objects,
+generated code must be data: GC walks nmethod oops, deopt walks
+nmethod scopes, class-loading walks nmethod dependencies. Making
+code cache–resident objects the common currency is what lets three
+engines (five tiers) and five collectors interoperate without knowing
+about each other.</p>
+</li>
+<li><p><strong><code>markWord</code> / the object header — four jobs in one machine
+word.</strong>
+<strong>What:</strong> every object&#39;s first word holds: lock state, identity
+hash, GC age (for survival tenuring), and — with compact object
+headers, default-on in this JDK (<code>globals.hpp:131</code>) — the class
+pointer itself, packed into bits 43–64 of the mark
+(<code>markWord.hpp:146</code>).
+<strong>Where:</strong> <code>markWord.hpp:81</code> (<code>class markWord</code>), age at <code>:248</code>;
+object base at <code>oop.hpp:47</code> (<code>class oopDesc</code>).
+<strong>Why:</strong> one word carries identity, synchronization, and memory
+management because <em>everything else</em> would be a per-object tax on
+every allocation; the packing decisions (which bits mean what) are
+simultaneously a JIT concern (header size), a locking concern, and
+a GC concern (age bits) — negotiated in one place.</p>
+</li>
+<li><p><strong><code>ThreadLocalAllocBuffer</code> — allocation as a private strip.</strong>
+<strong>What:</strong> each thread gets a slab of eden and allocates by
+bump-pointer with zero synchronization; refill is the only shared
+moment.
+<strong>Where:</strong> <code>threadLocalAllocBuffer.hpp:45</code>; the heap-side contract
+<code>CollectedHeap::allocate_new_tlab</code> (pure virtual,
+<code>collectedHeap.hpp:152</code>); <code>obj_allocate</code> at
+<code>collectedHeap.inline.hpp:36</code>.
+<strong>Why:</strong> object allocation in Java is <em>the</em> hot path, so the design
+moves it out of the collector entirely — the heap hands out slabs,
+the collector reclaims them wholesale. Every collector can afford
+this because each defines &quot;eden&quot; itself: a <code>DefNewGeneration</code>, a
+set of G1 young regions, or a sequence of ZGC young pages
+(<code>zObjectAllocator.cpp:63</code>).</p>
+</li>
+<li><p><strong>The region and its indexes — geography as a GC interface.</strong>
+<strong>What:</strong> G1 cuts the heap into same-size regions
+(<code>G1HeapRegion</code>, <code>g1HeapRegion.hpp:71</code>; sizing with power-of-two
+clamping at <code>g1HeapRegion.cpp:69</code>); each tracks a remembered set of
+incoming references, today a compact hierarchical card structure
+(<code>G1CardSet</code>, <code>g1CardSet.hpp:187</code>) fed by card-table dirtying —
+one byte per 512 bytes of heap (<code>cardTable.hpp:49</code>). ZGC&#39;s unit is
+the page (<code>ZPage</code>, <code>zPage.hpp:39</code>) with remembered <em>state in the
+pointer itself</em> — colored metadata bits
+(<code>zAddress.hpp:48</code> documents the bit layout).
+<strong>Why:</strong> regions/pages turn unbounded whole-heap work into bounded
+per-region work you can <em>choose</em> to do (G1&#39;s pause goal) or <em>move
+off the mutator</em> (ZGC&#39;s concurrent relocation,
+<code>zForwarding.hpp:44</code> + <code>zRelocate.cpp:354</code>). The remembered set is
+the price of locality: G1 pays in per-region bookkeeping, ZGC pays
+on every single reference load — the two currencies of the same
+trade (see trade-off 2).</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph world[&quot;threads at a Java safepoint view&quot;]
+        JT1[&quot;JavaThread A&lt;br/&gt;interpreted + compiled frames&quot;]
+        JT2[&quot;JavaThread B&quot;]
+        COMP[&quot;C1 × N + C2 × M threads&lt;br/&gt;(compileBroker.cpp:1670 loop)&quot;]
+    end
+    subgraph stop[&quot;stop-the-world (STW) machinery&quot;]
+        VMT[&quot;VM thread — one&lt;br/&gt;VMThread::run vmThread.cpp:154&lt;br/&gt;executes VM_Operations serially&quot;]
+        SP[&quot;SafepointSynchronize::begin safepoint.cpp:333&lt;br/&gt;arm poll pages safepointMechanism.cpp:39&quot;]
+    end
+    subgraph conc[&quot;per-collector concurrency&quot;]
+        G1M[&quot;G1 concurrent mark workers&lt;br/&gt;g1ConcurrentMark.cpp:1208&quot;]
+        ZD[&quot;ZGC driver + director actors&lt;br/&gt;zDriver.cpp / zDirector.cpp:916&lt;br/&gt;mark · relocate concurrent with mutators&quot;]
+    end
+    JT1 &amp; JT2 --&gt;|&quot;poll trips: stop between bytecodes&quot;| SP
+    SP --&gt;|&quot;threads parked; execute op&quot;| VMT
+    VMT --&gt;|&quot;release: disarm polls&quot;| SP
+    COMP -.-&gt;|&quot;compiles concurrently,&lt;br/&gt;no safepoint needed&quot;| JT1
+    VMT --&gt;|young GC op| G1M
+    ZD -.-&gt;|&quot;sub-ms STW: mark-start/relocate-start&quot;| SP
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>What runs concurrently:</strong> everything that can be — compilation
+(background threads, queues), concurrent marking (G1&#39;s marker
+threads, ZGC&#39;s marker threads), ZGC relocation, serviceability. The
+<em>compiler</em> never needs the world stopped; the <em>code cache install</em>
+is lock-ordered with safepoints.</li>
+<li><strong>What is serialized:</strong> stop-the-world operations, and they are
+serialized <em>through a queue and one thread</em> — a mutator submits a
+<code>VM_Operation</code>, the VM thread executes it after every Java thread
+has parked at a poll (<code>SafepointSynchronize::begin</code>,
+<code>safepoint.cpp:333</code>; polling machinery arming per-thread poll words
+and pages, <code>safepointMechanism.cpp:39–58</code>; the executor is
+<code>VMThread::run</code> → <code>evaluate_operation</code>,
+<code>vmThread.cpp:154</code>/<code>:273</code>). Handshakes generalize the mechanism to
+a subset of threads (<code>runtime/handshake.cpp</code>).</li>
+<li><strong>Crash and restart:</strong> HotSpot makes no attempt at in-process
+recovery — an unrecoverable error kills the process (fail-fast is
+the policy; <code>hs_err</code> files are the post-mortem). Durability, if
+needed, lives one level up in the application. What the runtime
+<em>does</em> guarantee is consistency <em>at every safepoint</em>: a safepoint is
+exactly the state where every object reference is precisely
+describable, which is what GC and deopt both consume.</li>
+<li><strong>Backpressure exists at both hot paths:</strong> compilation self-throttles
+by scaling thresholds with queue depth
+(<code>compilationPolicy.hpp:192</code>), and allocation pressure becomes GC:
+a stalled allocation triggers the collector it waits for
+(<code>handle_alloc_stalling_for_young</code> in <code>zDriver.cpp:436+</code>; G1&#39;s
+humongous/full-GC equivalents). Overload shows up as <em>slower</em>, not
+as corruption.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is layered and mostly frozen:</strong> the JVM spec
+(bytecode + classfile), JNI for native code, JVMTI for agents, and
+<code>-XX</code> flags as the operator API. The stability lesson mirrors
+<a href="https://github.com/torvalds/linux">Linux</a>: the classfile format is
+the syscall table — 30 years stable — which is why the JVM language
+ecosystem (Kotlin, Scala, Clojure…) exists without forking the VM.</li>
+<li><strong>The internal seams are where the design flexes:</strong>
+the <strong>GC seam</strong> is a startup-time factory plus two contracts —
+<code>CollectedHeap</code> pure virtuals (<code>collectedHeap.hpp:286</code> <code>is_in</code>,
+<code>:358</code> <code>collect</code>), <code>BarrierSet</code> for every reference access
+(<code>barrierSet.hpp:46</code>), each collector implementing barrier emission
+per compiler and per architecture (<code>gc/g1/c1/g1BarrierSetC1.cpp:48</code>
+pre-barrier, <code>gc/g1/c2/g1BarrierSetC2.cpp:199</code> load emission,
+<code>cpu/x86/gc/z/z_x86_64.ad:61</code> — ZGC&#39;s load barrier expressed in
+C2&#39;s matcher DSL). The <strong>compiler seam</strong> is <code>AbstractCompiler</code> +
+<code>CompileBroker</code> level dispatch; tiers are just implementations of
+it. The <strong>loading seam</strong> is the class-loader delegation model; the
+<strong>serviceability seam</strong> is JVMTI/JFR.</li>
+<li><strong>Honest wart:</strong> the <code>-XX</code> flag surface — hundreds of
+product/develop/experimental flags across <code>globals*.hpp</code> — is the
+real-world API for tuners, and it is contract-free: names persist
+by convention, not specification, and the useful ones
+(<code>Tier4InvocationThreshold</code>, <code>MaxGCPauseMillis</code>,
+<code>gc_globals.hpp:321</code>) sit beside obsolete ones forever. This is the
+accumulated interest on 25 years of &quot;expose the knob&quot; decisions,
+and every flag is a seam somebody now owns.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-observed-tiered-retractable-speculation-over-static-compilation">Trade-off 1: observed, tiered, retractable speculation over static compilation</h3>
+<ul>
+<li><strong>Tension:</strong> a general-purpose runtime cannot know which code
+matters, yet peak speed requires whole-program, type-stable
+assumptions; guessing wrong statically ships wrong forever.</li>
+<li><strong>Choice:</strong> interpret first; <em>measure</em> (counters → MDO); compile in
+two cost/quality tiers on background threads; compile <em>from</em> the
+profile but attach a designed retraction path (uncommon traps,
+dependency invalidation) instead of conservative pessimism.</li>
+<li><strong>Evidence:</strong> threshold flags with queue-scaled backpressure
+(<code>compiler_globals.hpp:193</code>, <code>compilationPolicy.hpp:192</code>);
+trap emission <code>graphKit.cpp:2161</code>; teardown
+<code>nmethod.cpp:2181</code> + <code>codeCache.cpp:1347</code>; frame reconstruction
+<code>deoptimization.cpp:1713</code>/<code>:1392</code>.</li>
+<li><strong>Given up:</strong> startup predictability (warmup is real: tier 3 is
+~30% slower than tier 2 by the policy&#39;s own comment,
+<code>compilationPolicy.hpp:130</code>) and simplicity — three execution
+engines and an adapter layer to move between them. The static
+alternative (AOT) is not ignored: class-data-sharing and the AOT
+cache (<code>share/cds/aotCacheAccess.cpp</code> and neighbors) pre-digest
+<em>metadata</em> so startup avoids the cold interpreter, while still
+deferring code speculation to the runtime.</li>
+<li><strong>Verdict:</strong> right when processes are long-lived and heterogeneous
+(the JVM&#39;s server heritage; the same bet V8 made for browsers).
+Wrong for run-once tools where 5000 invocations never arrive —
+which is precisely where <code>-Xint</code>, AOT caches, and native-image
+compilers live.</li>
+</ul>
+<h3 id="trade-off-2-bounded-concurrent-pauses-over-raw-collection-throughput">Trade-off 2: bounded/concurrent pauses over raw collection throughput</h3>
+<ul>
+<li><strong>Tension:</strong> compacting a live heap while mutating it is either
+<em>fast</em> (stop every thread, do it in one go) or <em>invisible</em> (do it
+concurrently, paying coordination on every access) — not both.</li>
+<li><strong>Choice:</strong> ship the whole evolutionary lineage as swappable
+implementations. Serial/Parallel: maximum throughput, stop the
+world (<code>PSScavenge::invoke</code> <code>psScavenge.cpp:305</code>,
+<code>PSParallelCompact::invoke</code> <code>psParallelCompact.cpp:930</code>,
+<code>SerialFullGC::invoke_at_safepoint</code> <code>serialFullGC.cpp:688</code>).
+G1: regioned heap, per-pause collection sets sized against a
+declared pause goal (<code>MaxGCPauseMillis</code>, <code>gc_globals.hpp:321</code>,
+wired at <code>g1Policy.cpp:57</code>), remembered sets to scan only what
+points into the chosen regions (<code>g1CardSet.hpp:187</code>), concurrent
+marking (<code>g1ConcurrentMark.cpp:1208</code>) with a snapshot-at-start
+pre-barrier (<code>g1BarrierSetRuntime.cpp:53</code>). ZGC: the end of the
+line — pointers carry collection metadata (colors,
+<code>zAddress.hpp:48</code>) and <em>every reference load</em> runs a barrier
+(<code>zBarrier.inline.hpp:461</code>), buying mark/relocate that proceeds
+while Java runs, with stop-the-world reduced to two thread-stack
+scans measured in microseconds.</li>
+<li><strong>Evidence:</strong> the latency/throughput dial is <em>code you can choose
+at startup</em> — <code>gcConfig.cpp:143</code> selects, <code>universe.cpp:957</code>
+instantiates, and the choices differ in exactly these structures.</li>
+<li><strong>Given up:</strong> peak throughput at the low-latency end (barrier on
+every load, remapping work, floating garbage from snapshots), and
+raw simplicity everywhere: G1&#39;s remembered sets and ZGC&#39;s colored
+pointers are years of engineering that a stop-the-world collector
+simply does not need.</li>
+<li><strong>Verdict:</strong> the lineage exists because the workload decides:
+batch analytics pays G1/ZGC&#39;s tax for nothing — Parallel wins;
+a user-facing service pays any pause at its SLA price — ZGC wins.
+This is the cleanest &quot;policy vs mechanism&quot; split in the atlas:
+mechanism shipped as swappable equals, policy left to deploy-time.</li>
+</ul>
+<h3 id="trade-off-3-one-collector-contract-over-bespoke-memory-systems">Trade-off 3: one collector contract over bespoke memory systems</h3>
+<ul>
+<li><strong>Tension:</strong> five collectors want five different heap layouts,
+pointer representations, and barriers — but every compiler,
+interpreter, and JNI path touches references.</li>
+<li><strong>Choice:</strong> every reference access in the runtime funnels through
+the <code>BarrierSet</code>/<code>Access</code> decorator API; every heap implements
+<code>CollectedHeap</code>; the compilers ask the <em>current</em> barrier set to
+emit code. One binary ships all five collectors.</li>
+<li><strong>Evidence:</strong> <code>barrierSet.hpp:46</code>; per-compiler emission
+directories (<code>share/gc/g1/c1</code>, <code>share/gc/g1/c2</code>,
+<code>cpu/x86/gc/z/</code>); ZGC&#39;s load barrier reaching into C2&#39;s matcher
+(<code>z_x86_64.ad</code>); the factory chain <code>universe.cpp:957</code> →
+<code>g1Arguments.cpp:269</code>.</li>
+<li><strong>Given up:</strong> freedom of the object model — colored pointers took
+years to land <em>because</em> the contract assumed plain addresses, and
+compaction itself must be expressible behind <code>is_in</code>/<code>collect</code>
+for <em>every</em> caller. Barrier calls are also a tax the JIT must
+then optimize away when it can.</li>
+<li><strong>Verdict:</strong> right because the <em>variety is the product</em> — the same
+engine must run a phone and an exchange. A bespoke memory system
+wins when there is exactly one workload, which for HotSpot there
+never was. The vtable-at-the-joint mechanism is <a href="https://github.com/torvalds/linux">Linux&#39;s
+driver-model</a> trick rediscovered
+inside a runtime: contract at the boundary, replaceability behind
+it.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>share/compiler/compilationPolicy.hpp:104–240</code> — the design
+document for tiering, written as a class comment: five levels, the
+predicates, the queue-scaling formula, the stale-method purge.
+Read this before any code; everything below implements it.</li>
+<li><code>share/interpreter/templateTable.cpp:218</code> — the interpreter as a
+DSL: one <code>def()</code> per bytecode, flags and type-state in a table;
+then <code>templateInterpreter.cpp:58</code> (<code>initialize_code</code>) to see the
+table <em>become</em> a dispatch table of generated code at startup.</li>
+<li><code>cpu/x86/templateInterpreterGenerator_x86.cpp:1206</code> —
+<code>generate_normal_entry</code>: the prologue every interpreted call runs;
+note the counter bump and the overflow slow path at <code>:1346</code>, then
+<code>interp_masm_x86.cpp:790 dispatch_next</code> — the jump that <em>is</em> the
+interpreter loop.</li>
+<li><code>share/interpreter/invocationCounter.hpp:36</code> +
+<code>share/oops/methodData.hpp:41</code> — the two evidence structures:
+packed per-method counters, and the approximate, cell-based MDO
+(its header comment states the &quot;data may be wrong, decisions
+merely degrade&quot; philosophy).</li>
+<li><code>share/interpreter/interpreterRuntime.cpp:1008</code> — the interpreter
+asking for help: <code>frequency_counter_overflow</code> into
+<code>share/compiler/compilationPolicy.cpp:788</code> (<code>event</code>) →
+<code>:1413</code> (<code>method_invocation_event</code>) → <code>:834</code> (<code>compile</code>). This is
+the tiering spine in four functions.</li>
+<li><code>share/compiler/compileBroker.cpp:1225</code> — <code>compile_method</code>:
+queues, priorities, duplicate suppression; then <code>:1670 compiler_thread_loop</code> for the consuming side, and <code>:886</code> for the
+two queues the policy watches.</li>
+<li><code>share/c1/c1_GraphBuilder.cpp:3265</code> and <code>:3493</code> — C1&#39;s bytecode
+walk and inliner; then <code>share/c1/c1_LinearScan.cpp:73</code> for the
+register allocator. C1 is small enough to read as one pipeline:
+bytecode → HIR → LIR → code, with profile <em>writes</em> emitted as
+ordinary instructions.</li>
+<li><code>share/opto/parse1.cpp:419</code> and <code>share/opto/parse2.cpp:1985</code> —
+C2 building the sea-of-nodes IR; then <code>share/opto/graphKit.cpp:2161 GraphKit::uncommon_trap</code> (speculation with a designed exit) and
+<code>share/opto/escape.cpp:104</code> (speculation that deletes work:
+allocations that never escape).</li>
+<li><code>share/runtime/deoptimization.cpp:1713</code> → <code>:1392</code> — one uncommon
+trap end-to-end: trap request → vframeArray → rebuilt interpreter
+frames; then <code>share/code/nmethod.cpp:2181 make_not_entrant</code> and
+<code>share/code/codeCache.cpp:1347</code> for the wholesale invalidation
+side. Deopt is the load-bearing wall of the whole design; read it
+twice.</li>
+<li><code>share/gc/shared/collectedHeap.hpp:91</code> + <code>share/memory/universe.cpp:957</code><ul>
+<li><code>share/gc/shared/gcConfig.cpp:143</code> — the GC seam: contract,
+instantiation, selection. Follow one factory (<code>g1Arguments.cpp:269</code>)
+and note how little the runtime above it knows.</li>
+</ul>
+</li>
+<li><code>share/gc/serial/</code> — the lineage&#39;s origin: <code>serialHeap.cpp:398</code>
+(young collection dispatch), <code>defNewGeneration.cpp:543</code>
+(copying young), <code>serialFullGC.cpp:688</code> (mark-sweep-compact old),
+<code>cardTableRS.cpp:34</code> (the remembered set as a card table). Every
+later collector is a modification of exactly these four ideas.</li>
+<li><code>share/gc/g1/</code> — incremental pauses: <code>g1YoungCollector.cpp:1111</code>
+(the pause), <code>g1Policy.cpp:57</code> (the pause-time goal), 
+<code>g1HeapRegion.hpp:71</code> + <code>g1HeapRegion.cpp:69</code> (geography and its
+sizing), <code>g1CardSet.hpp:187</code> (remembered sets as compact card
+structures), <code>g1ConcurrentMark.cpp:1208</code> (the concurrent cycle).</li>
+<li><code>share/gc/z/</code> — the frontier: <code>zAddress.hpp:48</code> (metadata <em>in the
+pointer</em>), <code>zBarrier.inline.hpp:461</code> (the load barrier every oop
+load runs), <code>zPageAllocator.cpp:1401</code> (pages), <code>zRelocate.cpp:354</code>
+(concurrent relocation with forwarding tables, <code>zForwarding.hpp:44</code>),
+and the actor-shaped control system <code>zDriver.cpp</code> +
+<code>zDirector.cpp:916</code> that decides <em>when</em> to collect.</li>
+<li><code>share/runtime/safepoint.cpp:333</code> + <code>share/runtime/vmThread.cpp:154</code>
+— the coordination layer all of the above stands on: arming polls,
+stopping threads, serializing STW operations. End by watching a
+young G1 GC pick its region set knowing it must fit this budget.</li>
+</ol>
+<p>You have now traced one method from bytecode through three execution
+engines (five tiers) and back — and one allocation from a TLAB through the whole
+collector lineage, behind one contract.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Tier every expensive computation: start dumb, instrument cheaply,
+escalate selectively</strong> — the 200/5000-threshold ladder
+(<code>compiler_globals.hpp:175/193</code>) is a pattern for caches, planners,
+and ML serving: pay observation cost always, optimization cost only
+where the evidence says.</li>
+<li><strong>Make retraction a designed, exercised control-flow path, not an
+error</strong> — every speculative fast path in HotSpot ships with its own
+uncommon trap; if you cannot cheaply fall back, you cannot afford
+to speculate. Register assumptions explicitly (the <code>Dependencies</code>
+registry) so invalidation is wholesale and complete.</li>
+<li><strong>Wire backpressure into the promotion rule, not just the queue</strong> —
+scaling compile thresholds by queue depth (<code>compilationPolicy.hpp:192</code>)
+keeps overload from compounding; any system that promotes work to
+slower, more expensive handlers should copy it.</li>
+<li><strong>Put the whole policy in one published decision module</strong> — five
+execution levels and every transition live in one readable file
+(<code>compilationPolicy.hpp</code>); teams that scatter tiering decisions
+across call sites cannot reason about them.</li>
+<li><strong>Swap whole subsystems behind factory + narrow interface</strong> — five
+collectors, one binary, zero recompiles of the runtime above
+(<code>collectedHeap.hpp</code> + <code>gcConfig.cpp</code>); the mechanism is the same
+vtable-at-the-joint move as Linux&#39;s driver model.</li>
+<li><strong>When coordination happens on every access, move the state into
+the pointer</strong> — ZGC&#39;s colored bits turn &quot;is this reference safe?&quot;
+into a mask test next to the load (<code>zAddress.hpp</code>,
+<code>zBarrier.inline.hpp:461</code>); it is the same instinct as generation
+counters on cached entries, applied to memory management.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 12–14 hours across four
+sittings — tiering spine (stops 1–6, ~4h), compilers (7–9, ~3h),
+deopt (9, reread, ~1h), GC lineage (10–13, ~4h), coordination
+(14, ~1h). The reading path is the map; do not wander into
+<code>classfile/</code> or <code>services/</code> on your first trip.</li>
+<li>Prerequisites: able to read Java bytecode (any JVM internals
+overview suffices); comfortable with x86-64 assembly fragments
+(the interpreter is <em>generated</em> asm — C++ reading alone will not
+show it); basic GC vocabulary (mark/sweep/copy/compact,
+generational hypothesis — the G1/ZGC JEPs below cover it); graph
+coloring intuition for register allocation. No Java programming
+knowledge required beyond syntax.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>The tiering design as upstream wrote it: the comment block at
+<code>src/hotspot/share/compiler/compilationPolicy.hpp:104</code> in any
+recent JDK clone — start here, always.</li>
+<li><em>The Java HotSpot Performance Engine</em> (Sun/Oracle white paper,
+2007/2011) — the tiering-era engine&#39;s own account; old but the
+concepts map cleanly onto today&#39;s code.</li>
+<li>Urs Hölzle, Chambers &amp; Ungar, <em>Optimizing Dynamically-Typed
+Object-Oriented Languages Via Polymorphic Inline Caches</em> (ECOOP<ol start="1991">
+<li>and <em>Debugging Optimized Code with Dynamic Deoptimization</em>
+(PLDI 1992) — the Self papers deoptimization and profile-guided
+speculation came from; HotSpot is their direct descendant.</li>
+</ol>
+</li>
+<li>Cliff Click, <em>Combining Analyses, Combining Optimizations</em> (PhD
+thesis, Rice, 1995) — the origin of C2&#39;s sea-of-nodes IR.</li>
+<li>JEP 333 (ZGC), JEP 377 (ZGC production), JEP 474/477 (generational
+ZGC), JEP 307 (G1 parallel full GC), JEP 291 (CMS removal) — the
+lineage of trade-off 2 as primary sources.</li>
+<li>Bacon, Cheng &amp; Rajan, <em>A Unified Theory of Garbage Collection</em>
+(OOPSLA 2004) — why every collector is a point on one
+throughput/latency dial; read before the G1/ZGC stops.</li>
+<li>The <a href="../cpython/">CPython</a>, <a href="../lua/">Lua</a>, and <a href="../nodejs/">Node.js</a>
+dives in this atlas — the same runtime questions (what to
+specialize, when to collect, how to embed) answered with opposite
+bets; and the atlas&#39;s V8 entry, HotSpot&#39;s great rival in tiered
+compilation.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../clickhouse/"><span class="dir">← Previous dive</span>ClickHouse: columns all the way down — rows are an afterthought</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 38 of 38 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
