@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 34 (and growing) canonical codebases and walks through
+<p>The atlas points at 35 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -249,23 +249,17 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A restaurant where every waiter works alone with a to-do list that is never allowed to get long. Each waiter (a thread) has a to-do list ordered by when you wrote the item down (the run queue, an…</span>
   <span class="dc-meta"><span class="chip domain">proxy-lb</span><span class="chip diff-demanding">demanding</span></span>
 </a>
-<a class="dive-card" href="dive/chromium/" data-domains="browser-engine" data-search="chromium: a security model that forced a multi-process operating system for web content">
-  <span class="dc-name">Chromium</span>
-  <span class="dc-headline">a security model that forced a multi-process operating system for web content</span>
-  <span class="dc-eli"><b>Like you're 10:</b> A giant restaurant where every website's food is cooked in its own locked kitchen, by cooks who are locked in too. The front-of-house manager (the browser process) takes every order, but never…</span>
-  <span class="dc-meta"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">demanding</span></span>
+<a class="dive-card" href="dive/linux/" data-domains="os-kernel" data-search="linux kernel: one frozen door, ten thousand pluggable rooms">
+  <span class="dc-name">Linux kernel</span>
+  <span class="dc-headline">one frozen door, ten thousand pluggable rooms</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A giant hotel whose front desk never changes, but whose rooms are rebuilt every night. Every guest (a program) rings the same numbered doorbells that were installed 30 years ago (the syscall table…</span>
+  <span class="dc-meta"><span class="chip domain">os-kernel</span><span class="chip diff-demanding">demanding</span></span>
 </a>
 <a class="dive-card" href="dive/go/" data-domains="runtime language" data-search="go runtime: two letters that hide a tiny operating system">
   <span class="dc-name">Go runtime</span>
   <span class="dc-headline">two letters that hide a tiny operating system</span>
   <span class="dc-eli"><b>Like you're 10:</b> A kitchen where the orders are sticky notes. In most kitchens, one chef per customer, and hiring a chef is slow and expensive (an OS thread with a big fixed stack). Here, every order is written on…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">demanding</span></span>
-</a>
-<a class="dive-card" href="dive/linux/" data-domains="os-kernel" data-search="linux kernel: one frozen door, ten thousand pluggable rooms">
-  <span class="dc-name">Linux kernel</span>
-  <span class="dc-headline">one frozen door, ten thousand pluggable rooms</span>
-  <span class="dc-eli"><b>Like you're 10:</b> A giant hotel whose front desk never changes, but whose rooms are rebuilt every night. Every guest (a program) rings the same numbered doorbells that were installed 30 years ago (the syscall table…</span>
-  <span class="dc-meta"><span class="chip domain">os-kernel</span><span class="chip diff-demanding">demanding</span></span>
 </a>
 <a class="dive-card" href="dive/rocksdb/" data-domains="storage-engine" data-search="rocksdb: leveldb paged into flash-scale production — column families, budgets, and a tuning surface">
   <span class="dc-name">RocksDB</span>
@@ -278,6 +272,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-headline">an engine that bets — tiers, feedback, and the machinery for taking bets back</span>
   <span class="dc-eli"><b>Like you're 10:</b> A theater troupe where the actors memorize only the lines that keep repeating — and can forget them instantly. A new play starts with the understudy reading straight from the script (the Ignition…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">demanding</span></span>
+</a>
+<a class="dive-card" href="dive/chromium/" data-domains="browser-engine" data-search="chromium: a security model that forced a multi-process operating system for web content">
+  <span class="dc-name">Chromium</span>
+  <span class="dc-headline">a security model that forced a multi-process operating system for web content</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A giant restaurant where every website's food is cooked in its own locked kitchen, by cooks who are locked in too. The front-of-house manager (the browser process) takes every order, but never…</span>
+  <span class="dc-meta"><span class="chip domain">browser-engine</span><span class="chip diff-demanding">demanding</span></span>
 </a>
   </div>
 </section>
