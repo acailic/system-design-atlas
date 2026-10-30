@@ -104,9 +104,11 @@ Deep-dives (the exemplars — more added over time):
 - [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
 - [Chromium](deep-dives/chromium.md) — a security model that forced the architecture: sandboxed renderer processes, site isolation, Mojo capability IPC, the browser's mirrored frame tree
 - [Caddy](deep-dives/caddy.md) — goroutines instead of state machines, config as a provisioned document, automatic HTTPS as a subsystem
+- [Neovim](deep-dives/neovim.md) — editor as RPC server: msgpack-RPC UI seam, in-process Lua on the shared libuv loop
 
-The catalog tracks 1 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Neovim, and more —
+The catalog currently tracks no further heavyweight and
+high-teaching-value candidates awaiting deep-dives — every
+cataloged heavyweight already has one —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors.
 
