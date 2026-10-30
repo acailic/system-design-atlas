@@ -59,5 +59,18 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - When adding a deep-dive, also update: `status:` in catalog.yaml, the coverage list in README.md, and (if the codebase instantiates a recurring lesson) the "Seen in" lists in PATTERNS.md — see CONTRIBUTING.md checklist.
 - Upstream refactors happen: redis/sqlite/git/kafka/etcd have all recently moved core code (git's odb/ layer, kafka's log engine to storage module Java, etcd's raft extracted to etcd-io/raft, VS Code ext-host paths, linux v7.2's do_syscall_64 now in arch/x86/entry/syscall_64.c and sched_ext under kernel/sched/ext/). Always grep for the function, never trust memory of layout. Same for Go: at go1.27 the size-class table moved to `internal/runtime/gc/sizeclasses.go`, `mallocgc` grew specialized paths (`mallocgcTiny`, `mallocgcSmallNoscan`), and Green Tea marking (`mgcmark_greenteagc.go`, baseline-on via `internal/buildcfg/exp.go`) replaced the classic `gcDrain`/`scanobject` story — pin releases (go1.27.3 tag fetches fine with `git fetch --depth 1 origin tag <tag>`), not master, and clone from github.com/golang/go or go.googlesource.com (SHAs match).
 - Cloning torvalds/linux: GitHub codeload and the gh api tarball endpoint both rate-limit (HTTP 429 by IP); the reliable route is resolving a release tag's SHA via the GitHub API (`repos/torvalds/linux/git/ref/tags/vX.Y`) and fetching the tarball from cdn.kernel.org (`pub/linux/kernel/vX.x/linux-X.Y.tar.xz`) — a tag snapshot is a valid pinned commit for torvalds/linux.
+- V8 (dive #31, pinned 2026-10-16) drifted from common lore in four
+  places worth remembering if revisited: binary-op/compare feedback now
+  lives *in the bytecode* as operand bytes ("embedded feedback",
+  `kFeedbackIsEmbedded`, globals.h) with in-place baseline patching
+  (Sparkplug+, already shipped per src/flags/feature-flags.h); the
+  MinorMS is not the shipped young-gen collector — the Scavenger
+  (Cheney semispace) is the default, with MinorMS behind the
+  off-by-default experimental `--minor-ms` flag
+  (flag-definitions.h:3857, read at scavenger.cc:990) and
+  MinorMarkSweepCollector still in-tree (minor-mark-sweep.h);
+  IsolateGroup lives in src/init/ (not src/execution/);
+  and `turbolev` (Maglev graph builder feeding TurboFan) is
+  flag-gated, so the sea-of-nodes path is still the default.
 - Parallel dive PRs collide in catalog.yaml/README.md/PATTERNS.md and the generated `docs/` (dive-count footers, index, sitemap): rebase onto main, union-resolve the source files (both dives' entries stay), recount README's "tracks N further" sentence by actually counting non-deep-dived catalog entries, then rebuild `docs/` instead of hand-merging generated HTML.
 - Cross-dive links use the `[Name](<id>.md)` form in deep-dives source; the builder rewrites them to `../<id>/` only when `deep-dives/<id>.md` exists on the branch — a link to a dive still sitting in an open PR renders as a (wrong-path) GitHub blob fallback until that PR merges and docs rebuild. Self-heals on the next rebuild after the sibling dive lands.

@@ -167,7 +167,12 @@ billed as scanning debt (`gcAssistAlloc`), and Green Tea batching
 spans to keep each unit of mark work cache-local;
 [RocksDB](deep-dives/rocksdb.md) — compaction budgets made explicit:
 a token-bucket rate limiter throttles background I/O while a stall
-ladder turns overload into published, steerable slowdown states.
+ladder turns overload into published, steerable slowdown states;
+[V8](deep-dives/v8.md) — marking runs
+as allocation-paced steps on the main thread plus concurrent jobs on
+the embedder's platform, with the store-path write barrier as the
+mutator's tax that buys never stopping for one big collection
+(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`).
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -330,7 +335,11 @@ into Rust DOM bindings and JS glue, so the web API surface cannot
 drift from its implementations; [linux](deep-dives/linux.md) —
 `syscall_64.tbl` is the frozen syscall ABI as one data file, from
 which the dispatch switch, the `__x64_sys_*` stubs, and the tracing
-table are all generated.
+table are all generated; [V8](deep-dives/v8.md) — the
+interpreter itself is generated: one `IGNITION_HANDLER` DSL per
+bytecode (with Torque-built builtins beside it) compiles to
+machine-code handlers for every architecture, the same move as
+CPython's `bytecodes.c` but stopping at nothing short of code.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
@@ -366,6 +375,39 @@ operations that need a global view (rebalancing without client
 updates, multi-key transactions) become impossible or bolted on
 later — which is exactly the cliff both Memcached and early Kafka
 hit, and what ZooKeeper/etcd exist to catch on the coordination side.
+
+## 14. Speculate, guard, deoptimize
+
+**Shape:** run a slow-but-correct baseline; record what actually
+happens (types, shapes, call targets); compile guarded fast paths
+that assume the observations hold; when a guard fails, fall back to
+the baseline and record the wider truth. Wrong guesses are a
+designed control-flow path, not an error.
+
+**Seen in:** [V8](deep-dives/v8.md) — the full ladder: feedback
+bytes and IC states observed by Ignition, four tiers of guarded
+code, `Deoptimizer` rebuilding interpreter frames, and
+`CompilationDependencies` registering invalidations so a Map
+transition can retire whole batches of optimized code;
+[CPython](deep-dives/cpython.md) — the portable middle point: the
+same feedback-and-guards idea (3.11's adaptive interpreter)
+specializing bytecode in place, with deopt back to the generic
+opcode, and no JIT at all. [Lua](deep-dives/lua.md) is the control
+experiment: zero speculation, one honest interpreter.
+
+**Why it recurs:** dynamic languages hide their types until runtime;
+when the workload is long-lived, learning-by-running beats both
+static typing (unshippable) and naive interpretation (unbearably
+slow). The engineering is not the specialization — it is making
+retraction complete and cheap, because a guess you cannot safely
+take back is a crash.
+
+**Reach for it when:** the hot paths are stable enough to have
+repeating shapes/types and the process lives long enough to amortize
+learning. Costs: warmup latency (cold code runs the baseline),
+memory for feedback and multiple code versions, and deopt storms
+when shapes churn. Short-lived processes should stay at CPython's
+specialization tier or Lua's none at all.
 
 ---
 
