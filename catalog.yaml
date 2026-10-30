@@ -28,7 +28,7 @@ projects:
     license: GPL-2.0
     domains: [os-kernel]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
     why: >
       The most-used piece of software in existence, and the clearest proof

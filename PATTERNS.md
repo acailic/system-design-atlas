@@ -152,7 +152,10 @@ resync periods as a safety net under the event stream;
 background thread moving buckets under the same stripe locks the
 request path uses; [Lua](deep-dives/lua.md) — the GC advances in
 allocation-debt-paced steps (`luaC_step`) so a guest language never
-pauses its host's frame budget.
+pauses its host's frame budget; [linux](deep-dives/linux.md) —
+kswapd reclaims memory in budgeted background passes so allocation
+never stalls on a full scan, and readahead turns one small read into
+a window of prefetched I/O so the next reads hit the page cache.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -210,7 +213,11 @@ snapshots from the procarray; [Kubernetes](deep-dives/kubernetes.md) —
 resourceVersion optimistic concurrency over every object; [LevelDB](deep-dives/leveldb.md) —
 compaction drops versions below the oldest live snapshot; [etcd](deep-dives/etcd.md)
 — the whole keyspace is revision-stamped history, watch replays it,
-compaction truncates it.
+compaction truncates it; [linux](deep-dives/linux.md) — RCU is the
+same bet at memory granularity: readers walk page-cache and dentry
+structures under `rcu_read_lock` with no locks at all, writers
+publish replacements atomically, and reclamation waits a grace
+period (`synchronize_rcu`).
 
 **Why it recurs:** locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.
@@ -255,7 +262,11 @@ ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
 [Servo](deep-dives/servo.md) — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
-so shells and C hosts (servoshell, ffi/capi) extend without forking.
+so shells and C hosts (servoshell, ffi/capi) extend without forking;
+[linux](deep-dives/linux.md) — vtables at every layer joint
+(`file_operations`, `sched_class`) let thousands of filesystems and
+drivers — and, via sched_ext, even whole CPU scheduling policies as
+BPF programs — extend a monolith without forking it.
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -302,7 +313,10 @@ autograd kernels, backward nodes, and dispatch registrations for
 2,000+ operators from one schema pair;
 [Servo](deep-dives/servo.md) — 576 WebIDL files are code-generated
 into Rust DOM bindings and JS glue, so the web API surface cannot
-drift from its implementations.
+drift from its implementations; [linux](deep-dives/linux.md) —
+`syscall_64.tbl` is the frozen syscall ABI as one data file, from
+which the dispatch switch, the `__x64_sys_*` stubs, and the tracing
+table are all generated.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
