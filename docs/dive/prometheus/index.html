@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prometheus: the pull model — polling made correct by absence-as-data — System Design Atlas</title>
+<meta name="description" content="Prometheus is the monitoring system that won the metrics slot under Kubernetes and then defined the whole CNCF observability vocabulary — PromQL, /metrics exposition, Alertmanager, OpenMetri">
+<meta property="og:title" content="Prometheus: the pull model — polling made correct by absence-as-data — System Design Atlas">
+<meta property="og:description" content="Prometheus is the monitoring system that won the metrics slot under Kubernetes and then defined the whole CNCF observability vocabulary — PromQL, /metrics exposition, Alertmanager, OpenMetri">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/prometheus/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/prometheus/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-scrape-http-get-to-durable-sample">Walkthrough: one scrape, HTTP GET to durable sample</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Prometheus: the pull model — polling made correct by absence-as-data</h1>
+    <div class="meta-chips"><span class="chip domain">observability</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/prometheus/prometheus" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>bae3eced0a5369e050e83ea73bc381d7c4b1a719</code> · v3.15.1, 2026-10-21 · <a href="https://github.com/prometheus/prometheus" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">Prometheus is the monitoring system that won the metrics slot under
+Kubernetes and then defined the whole CNCF observability vocabulary —
+PromQL, <code>/metrics</code> exposition, Alertmanager, OpenMetrics all descend
+from it. It won with one architectural bet: <strong>pull, not push</strong>. The server
+polls every target on a known interval over plain HTTP, so it always
+knows who is alive, who is slow, and when every sample was taken. The
+rest of the design is what it takes to make polling <em>correct</em>: absence
+becomes explicit data (staleness markers), the local time-series
+database is a two-tier engine — a mutable head block protected by a WAL,
+compacted into immutable blocks — and alerting is a scheduled reconcile
+loop whose results (and even its own restart state) are written back as
+ordinary series. This deep-dive traces one scrape from HTTP GET to
+immutable block, and one alert rule from ticker to notification.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A health inspector who visits every house on a schedule.</strong> Instead of
+waiting for houses to phone in complaints (push), the inspector
+(Prometheus) rings every doorbell on the street every 15 seconds (a
+scrape of <code>/metrics</code>), and each house reads out a list of numbers from
+its clipboard (the exposition format). If nobody answers, the inspector
+writes &quot;no answer&quot; in the notebook (a staleness marker) — the silence
+itself is a recorded fact, so nobody mistakes an empty house for a quiet
+one. All numbers go into one diary written in two stages: first onto a
+loose page (the head block) with a carbon copy underneath (the WAL), so
+a crash loses only the last few scribbles; every couple of hours the
+loose pages get bound into a finished book that is never edited again
+(an immutable block), and the carbon copies of what was bound can be
+thrown away (WAL truncation). Finally, an alarm clock (rule groups)
+rings on its own schedule and asks the diary questions (&quot;is any room
+still too hot?&quot;) — and it writes the answers back into the diary, so
+even the alarm&#39;s own memory survives a restart.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> when you fetch the data yourself
+on your own clock, a dead target is immediately visible as <em>your</em>
+failed request — no trusting a sender to tell you it is gone — and
+every sample&#39;s age is known by construction, which is what makes
+alerting on time series trustworthy.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    SD[&quot;discovery/ — SD providers push target-group&lt;br/&gt;updates (static, k8s, consul…), like watch streams&quot;]
+    subgraph server[&quot;the single binary (cmd/prometheus/main.go main 376)&quot;]
+        SM[&quot;scrape.Manager — Run 223 / reloader 249&lt;br/&gt;reconciles pools as targets change&quot;]
+        SP[&quot;scrapePool per job — Sync 436 / sync 485&lt;br/&gt;one scrapeLoop per target&quot;]
+        SL[&quot;scrapeLoop.run 1405 — ticker, jitter,&lt;br/&gt;alignment; GET → parse → append&quot;]
+        RULES[&quot;rules.Manager — one goroutine per Group:&lt;br/&gt;run 208 aligned ticker → Eval 504&lt;br/&gt;writes results back as series&quot;]
+        NOTIF[&quot;notifier — push alerts to Alertmanager&quot;]
+        W[&quot;web/ — HTTP API, PromQL engine,&lt;br/&gt;UI, its own /metrics&quot;]
+        subgraph tsdb[&quot;tsdb/ — local database&quot;]
+            HEAD[&quot;Head block (mutable) — head.go:71&lt;br/&gt;stripeSeries map + XOR chunks&quot;]
+            WAL[&quot;WAL — wlog/wlog.go&lt;br/&gt;128MB segments, page framing&quot;]
+            CDM[&quot;ChunkDiskMapper — old head chunks&lt;br/&gt;m-mapped off the Go heap&quot;]
+            BLOCKS[&quot;immutable blocks — block.go&lt;br/&gt;index + chunks + meta&quot;]
+            COMP[&quot;DB.run 1267 → Compact 1519&lt;br/&gt;head → block, block → block&quot;]
+        end
+    end
+    T[&quot;targets — expose /metrics text&quot;]
+    AM[&quot;Alertmanager&quot;]
+    RW[&quot;remote write / read (fanout storage)&quot;]
+
+    SD --&gt; SM --&gt; SP --&gt; SL --&gt; HEAD
+    HEAD --- WAL
+    HEAD --&gt; CDM
+    HEAD --&gt; COMP --&gt; BLOCKS
+    W --&gt; HEAD
+    RULES --&gt;|&quot;query&quot;| W
+    RULES --&gt;|&quot;append results&quot;| HEAD
+    RULES --&gt; NOTIF --&gt; AM
+    SL --&gt;|&quot;HTTP GET on interval&quot;| T
+    HEAD -.-&gt; RW
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong><code>discovery/</code></strong> turns the outside world (Kubernetes pods, Consul
+services, EC2 instances, static files) into streams of target groups.
+Each provider (a <code>Discoverer</code>) pushes full group snapshots up a
+channel; <code>discovery.Manager.updater</code> (383) collects them — the
+watch/notify shape, the same <em>level-triggered</em> idea as etcd&#39;s watch
+and Kubernetes informers: updates replace state, they don&#39;t append.</li>
+<li><strong><code>scrape/</code></strong> owns the pull model. <code>Manager.reloader</code> wakes on
+discovery changes, <code>scrapePool.Sync</code> diffs the target set and starts
+or stops one <code>scrapeLoop</code> per target. Each loop is an independent
+ticker-aligned HTTP client.</li>
+<li><strong><code>tsdb/</code></strong> is the database: a mutable <code>Head</code> in memory (plus
+m-mapped chunk files), a WAL for crash recovery, immutable <code>Block</code>s
+for history, and a background compactor converting one into the
+other — the same two-tier shape as LevelDB&#39;s memtable/SSTables (see
+that dive) executed at block granularity.</li>
+<li><strong><code>promql/</code> + <code>rules/</code></strong> are the consumers: rule groups run on
+aligned timestamps, evaluate PromQL against head+blocks, and append
+their results back into the same TSDB. Recording rules create new
+series; alerting rules maintain an alert state machine whose <code>for</code>
+timer is stored as the <code>ALERTS_FOR_STATE</code> series.</li>
+<li><strong><code>notifier/</code></strong> delivers firing alerts to Alertmanager (the only
+push out of the server, besides optional remote write).</li>
+</ul>
+<p>The <strong>spine</strong> — one scrape of one target — is: <code>scrapeLoop.run</code>
+(scrape/scrape.go:1405) ticks → <code>targetScraper.scrape</code> (824) does the
+HTTP GET → <code>scrapeAndReport</code> (1488) reads and parses →
+<code>scrapeLoopAppender.append</code> (1779) resolves labels and series refs →
+<code>headAppender.Append</code> (tsdb/head_append.go:443) buffers into an
+appender batch → <code>Commit</code> (1769) writes the batch to the WAL first,
+then into head chunks. Later, <code>DB.Compact</code> (tsdb/db.go:1519) freezes
+head ranges into immutable blocks.</p>
+<div class="walkthrough">
+<h2 id="walkthrough-one-scrape-http-get-to-durable-sample">Walkthrough: one scrape, HTTP GET to durable sample</h2>
+<p class="walkthrough-intro">Step through the pull model&#39;s core loop on the site, or read straight
+down. Count how many failure modes collapse into the same answer: write
+a stale marker.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant L as scrapeLoop.run (1405)
+    participant TS as targetScraper.scrape (824)
+    participant P as textparse + scrapeCache
+    participant A as headAppender (Append 443)
+    participant W as WAL (log 1116)
+    participant H as Head chunks (memSeries.append 1904)
+    L-&gt;&gt;L: ticker fires at aligned, jittered time
+    L-&gt;&gt;TS: GET /metrics (timeout-bounded)
+    alt target answers
+        TS--&gt;&gt;P: body + content type
+        P-&gt;&gt;A: per series: relabel, resolve cache ref, Append
+    else target dead or slow
+        L-&gt;&gt;A: empty scrape → updateStaleMarkers (1754)
+    end
+    A-&gt;&gt;A: batch buffered, series created under stripe locks
+    L-&gt;&gt;W: Commit (1769) → log() frames batch into pages/segments
+    W-&gt;&gt;H: on success, samples land in head XOR chunks
+    H--&gt;&gt;L: sample visible to queries behind isolation watermark
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-clock-decides">The clock decides</h3>
+<p><code>scrapeLoop.run</code> (scrape/scrape.go:1405)
+is one goroutine per target with a ticker. The first scrape is offset
+by the target&#39;s hash XOR the server&#39;s <code>offsetSeed</code>
+(scrape/target.go:170, manager.go:320) so thousands of targets spread
+across the interval, and two HA Prometheus servers scrape the same
+fleet at different moments. Ticks are re-aligned to wall-clock
+boundaries (<code>AlignScrapeTimestamps</code>) to keep timestamps on the grid
+that <code>rate()</code> expects.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="ask-don-t-wait">Ask, don&#39;t wait</h3>
+<p><code>targetScraper.scrape</code> (824) issues an
+HTTP GET with the negotiated content type (<code>Accept</code> for text,
+OpenMetrics, or protobuf), gzip/zstd, and a per-target timeout. This
+request <em>is</em> the pull model: no inbound connection is ever trusted
+with data; a target that cannot be reached is a fact about the target.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="read-the-clipboard">Read the clipboard</h3>
+<p><code>scrapeAndReport</code> (1488) streams the
+body into a pooled buffer (<code>readResponse</code>, 844), decompressing as
+needed, then hands the bytes to the parser inside
+<code>scrapeLoopAppender.append</code> (1779). Parsing is incremental
+(<code>textparse.New</code>) — labels are interned in a symbol table, series are
+looked up in the <code>scrapeCache</code> by metric bytes so steady-state scrapes
+touch no label allocations.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="name-every-series">Name every series</h3>
+<p>For a new series, the parser&#39;s label
+set goes through relabeling (<code>sampleMutator</code>, config-driven drop/keep),
+target labels (<code>job</code>, <code>instance</code>) are applied, and limits are checked;
+only then does the sample reach the appender. A series dropped here is
+remembered in the cache (<code>addDropped</code>) and skipped until the target&#39;s
+output changes.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="buffer-in-the-head">Buffer in the head</h3>
+<p><code>headAppender.Append</code>
+(tsdb/head_append.go:443) resolves the series by reference or creates
+it under the <code>stripeSeries</code> sharded locks (tsdb/head.go:2294), checks the
+sample against the series&#39; last timestamp (<code>memSeries.appendable</code>, 694
+— out-of-order and too-old rules, with an optional OOO window), and
+buffers <code>(ref, t, v)</code> into the appender&#39;s batch. Nothing is queryable
+yet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="pay-the-durability-toll">Pay the durability toll</h3>
+<p><code>Commit</code> (1769) calls <code>log</code>
+(1116) first: series-creation records, then sample records are framed
+into the WAL — 128MB segments, 32KB pages, no per-sample fsync
+(wlog/wlog.go:657 <code>Log</code>). Only after the WAL write do samples land in
+in-memory XOR chunks (<code>memSeries.append</code>, 1904), the head&#39;s
+<code>minTime/maxTime</code> advance, and the appender&#39;s isolation watermark
+retires so queries can see the batch as a unit.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="when-the-door-stays-shut">When the door stays shut</h3>
+<p>A failed scrape is treated as an
+<em>empty scrape</em>: <code>scrapeAndReport</code> still calls <code>append</code> with zero bytes,
+and <code>updateStaleMarkers</code> (1754) writes a <code>StaleNaN</code> for every series
+the cache saw last time but not this time. <code>endOfRunStaleness</code> (1663)
+does the same when a target disappears entirely — after waiting two
+intervals in case it flaps back. Staleness is why <code>rate()</code> and graph
+gaps behave when a deploy restarts every target at once.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="truth-with-a-timestamp">Truth with a timestamp</h3>
+<p>The sample is now: queryable
+from the head, protected by the WAL, attributed to a target whose
+liveness was proven by this very request — and if it ever stops
+arriving, the database itself will record that it stopped.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-striped-series-map-tsdb-head-go-2294">The striped series map (<code>tsdb/head.go:2294</code>)</h3>
+<p><code>stripeSeries</code> shards series by hash into <code>stripeSize</code> independent
+lock+map+hashmap stripes (<code>getByHash</code> 2693, <code>setUnlessAlreadySet</code>
+2713); each <code>memSeries</code> additionally owns its own mutex for appends
+(<code>lockForAppend</code>, head_append.go:594). Why: get-or-create for millions
+of series from thousands of concurrent scrapers must not serialize on
+one lock — the map is sharded by data, the mutation is serialized per
+series. This is Prometheus&#39; answer to the lock-contention problem Redis
+solves by having one thread at all.</p>
+<h3 id="the-appender-batch-tsdb-head-append-go-434-getcurrentbatch">The appender batch (<code>tsdb/head_append.go:434</code>, <code>getCurrentBatch</code>)</h3>
+<p>Samples accumulate as <code>record.RefSample{Ref, T, V}</code> slices — series
+references, not label sets — until <code>Commit</code>. Why: the append path pays
+per-sample only a map lookup and a struct append; all I/O (WAL framing,
+chunk encoding) happens once per batch in <code>Commit</code>. The batch is also
+the exact unit of the WAL record, so one scrape ≈ few WAL records.</p>
+<h3 id="the-wal-as-pages-and-segments-tsdb-wlog-wlog-go-41-log-675">The WAL as pages and segments (<code>tsdb/wlog/wlog.go:41</code>, <code>log</code> 675)</h3>
+<p>Records are framed (type byte + length + CRC + snappy-optional) into
+32KB pages inside 128MB segment files; <code>flushPage</code> (583) writes full
+pages with plain <code>write(2)</code>; fsync happens at segment rotation, not per
+record. A torn last page is zero-padded on open (124) and a CRC
+failure at replay means <code>Repair</code> (400) truncates everything after the
+corruption. Why: the WAL is a recovery log for re-scrapeable data, not
+an accounting ledger — seconds of loss on power failure is a rounding
+error next to losing the whole head. Kafka made the same call when its
+log became the product (see that dive); etcd&#39;s WAL is the strict
+counter-example, because it fronts consensus.</p>
+<h3 id="xor-chunks-and-the-chunkdiskmapper-tsdb-chunkenc-xor-go-tsdb-chunks-head-chunks-go-194">XOR chunks and the ChunkDiskMapper (<code>tsdb/chunkenc/xor.go</code>, <code>tsdb/chunks/head_chunks.go:194</code>)</h3>
+<p>Each series&#39; samples are delta-encoded (Gorilla-style XOR of float
+bits) into ~120-sample chunks; when a chunk fills, the head cuts a new
+one and <code>mmapHeadChunks</code> (tsdb/head.go:2145, run from the DB loop) m-maps
+full chunks out of the Go heap into a <code>chunks_head/</code> file the kernel
+pages in on demand. Why: the heap holds only the active tail per
+series; history rides the page cache — bounded GC pause, unbounded
+retention inside the head window.</p>
+<h3 id="the-immutable-block-tsdb-block-go-164-blockmeta">The immutable block (<code>tsdb/block.go:164</code> <code>BlockMeta</code>)</h3>
+<p>A block is a directory of <code>index</code> (inverted label index + postings),
+<code>chunks/</code> segments, <code>meta.json</code>, and tombstones; blocks are never
+edited — deletion is tombstoning, compaction writes new blocks and
+atomically swaps directory presence. Why: immutable files are cheap to
+query concurrently (no locks), trivially cacheable, and safely
+deletable for retention — the same immutability lesson as git objects
+and LevelDB SSTables, applied to time windows.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Goroutines as units of work, not of scale.</strong> One goroutine per
+scrape loop (ticker-driven), one per rule group, one for the DB
+background loop (<code>DB.run</code> 1267), one actor goroutine inside the WAL
+(<code>WL.run</code> 380). Concurrency lives in the <em>number of loops</em>, and each
+loop is sequential — the event-loop discipline of the atlas, minus
+the loop library, because goroutines are the loop.</li>
+<li><strong>Append-path synchronization</strong> is three-tiered: stripe locks for
+series creation (sharded), a per-series mutex for the chunk tail,
+and per-appender batches that make cross-appender interleaving the
+norm. Queries never take series locks.</li>
+<li><strong>Snapshot reads without MVCC storage:</strong> <code>isolation.go</code> gives every
+appender a monotonically increasing <code>appendID</code>
+(<code>newAppendID</code> 184); a querier records the current watermark
+(<code>lowWatermark</code> 96) and skips samples from appends still in flight —
+a lightweight snapshot <em>of appends</em>, not of data versions (etcd and
+PostgreSQL pay for real MVCC because they need history; Prometheus
+re-reads the source).</li>
+<li><strong>Crash recovery is WAL replay.</strong> On startup <code>open</code> (db.go:994)
+loads blocks, sets <code>minValidTime</code> to the newest block&#39;s maxt (older
+samples are rejected as out-of-bounds), and <code>Head.Init</code> (tsdb/head.go:738)
+replays WAL+WBL into the head, optionally from a memory snapshot,
+then GCs dead series. Corruption is answered with truncation
+(<code>Repair</code>), not refusal to boot: a monitoring server that won&#39;t
+start can&#39;t monitor anything.</li>
+<li><strong>Backpressure and overload:</strong> per-target scrape timeouts bound each
+loop; <code>sample_limit</code>/<code>body_size_limit</code> cap hostile targets; the
+m-mapping and truncation keep heap bounded; if head compaction takes
+longer than the block range, <code>Compact</code> logs that compaction is
+falling behind (db.go:1597) — the operator&#39;s cue that ingestion
+outran disk. Remote write, when enabled, is an outbound queue with
+its own retry/shard machinery — push, at the system&#39;s edge only.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph appenders[&quot;many concurrent appends&quot;]
+        S1[&quot;scrapeLoop A batch&quot;]
+        S2[&quot;scrapeLoop B batch&quot;]
+        S3[&quot;rule group results&quot;]
+    end
+    subgraph headside[&quot;the head — sharded, not locked-whole&quot;]
+        STRIPE[&quot;stripeSeries locks&lt;br/&gt;(creation only)&quot;]
+        SER[&quot;per-memSeries mutex&lt;br/&gt;(chunk tail only)&quot;]
+        ISO[&quot;isolation watermark&lt;br/&gt;newAppendID 184 / lowWatermark 96&quot;]
+    end
+    WALW[&quot;WAL Log 657 — one mutex,&lt;br/&gt;page/segment framing&quot;]
+    subgraph bgloop[&quot;DB.run 1267 — background&quot;]
+        MM[&quot;mmapHeadChunks 2145&quot;]
+        CMP[&quot;Compact 1519 → truncateWAL 1535&quot;]
+    end
+    APPEND[&quot;appenders: GetRef/Append buffered&quot;]
+    APPEND --&gt; STRIPE --&gt; SER
+    SER --&gt; WALW
+    SER --&gt; ISO
+    MM -.-&gt; SER
+    CMP -.-&gt; WALW
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The API is the wire format, and it made the ecosystem.</strong> The
+exposition format — text lines of <code>metric{labels} value [timestamp]</code>
+on <code>GET /metrics</code> — is so simple that every runtime, proxy, and
+database grew an exporter in a weekend. That format (and its data
+model: a metric name is just a label) is Prometheus&#39; single most
+copied design decision — OpenMetrics standardized it, and Datadog,
+InfluxDB, and Grafana all speak some dialect of it. The negotiated
+upgrade path (<code>scrape_protocols</code>, protobuf/OpenMetrics text) shows
+how to evolve a text API without breaking it.</li>
+<li><strong>PromQL</strong> is the read surface: one language for instant queries,
+range queries, recording rules, and alert expressions — read it as
+&quot;metrics become a database with a query planner,&quot; the move that made
+monitoring compositional (<code>sum by (job) (rate(...))</code> composes over
+anything that exposes counters).</li>
+<li><strong>Extension seams:</strong> discovery (implement <code>Discoverer</code>, push target
+groups), the remote read/write protocols (swap the storage backend),
+rule files on disk (hot-reloaded), and the Alertmanager API (swap the
+notifier&#39;s destination). Plugins for SD and remote storage live
+behind <code>discovery/</code> and prompb interfaces — third parties extend
+without forking.</li>
+<li><strong>Honest wart:</strong> every subsystem re-implements <code>ApplyConfig</code> and the
+reload chain in main.go orders them by hand (scrape before discovery,<ol start="1173">
+<li>— configuration is still imperative plumbing, not declarative
+state; and the single-binary scope means HA is &quot;run two servers,
+dedupe at Alertmanager,&quot; which surprises everyone expecting
+clustering. Both are deliberate scope trades, visible in the code as
+the absence of the thing.</li>
+</ol>
+</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-pull-over-push">Trade-off 1: pull over push</h3>
+<ul>
+<li><strong>Tension:</strong> pushed metrics arrive whenever the sender feels like
+it; the monitor can&#39;t tell a dead sender from a quiet one, and
+senders define the load profile.</li>
+<li><strong>Choice:</strong> the server scrapes every target on its own ticker
+(<code>scrapeLoop.run</code> 1405, <code>targetScraper.scrape</code> 824); on a default
+install pull is the only inbound path — inbound push exists solely
+behind opt-in escape-hatch flags.</li>
+<li><strong>Evidence:</strong> <code>scrape/manager.go:setOffsetSeed</code> (320) — the server
+hashes itself into every target&#39;s scrape offset precisely <em>because</em>
+two servers pulling the same fleet should not collide; a failed
+scrape produces staleness markers (<code>updateStaleMarkers</code> 1754,
+<code>endOfRunStaleness</code> 1663), i.e. the code pays for the model by
+making absence a write.</li>
+<li><strong>Given up:</strong> targets behind NAT, short-lived batch jobs, and
+lambdas can&#39;t be dialed — the Pushgateway and, since v3.x, an
+opt-in OTLP receiver (<code>--web.enable-otlp-receiver</code>,
+cmd/prometheus/main.go:485) exist as the sanctioned push escape
+hatches; and the server&#39;s address book (discovery) must be
+maintained.</li>
+<li><strong>Verdict:</strong> for long-lived services the trade is dominant: liveness
+is proven by the request, timestamps are grid-aligned by
+construction, and a misbehaving target hurts only itself. Wrong for
+you when your producers are ephemeral or mobile — then you need a
+push gateway or a broker in front.</li>
+</ul>
+<h3 id="trade-off-2-seconds-of-wal-loss-over-fsync-per-write">Trade-off 2: seconds of WAL loss over fsync-per-write</h3>
+<ul>
+<li><strong>Tension:</strong> the head must survive crashes, but a monitoring server
+ingests millions of samples per minute; an fsync per sample is
+orders of magnitude slower than the data.</li>
+<li><strong>Choice:</strong> WAL pages are written with <code>write(2)</code> only
+(<code>flushPage</code> 583); fsync happens at segment rotation and
+checkpoints; torn tails are zero-padded and corrupted tails are
+truncated (<code>Repair</code> 400).</li>
+<li><strong>Evidence:</strong> <code>tsdb/wlog/wlog.go:657</code> <code>Log</code> → <code>log</code> (675) →
+<code>flushPage</code> — no Sync call on the sample path; the durability point
+is the 128MB segment boundary.</li>
+<li><strong>Given up:</strong> on power loss, up to ~2h of segment + unflushed pages
+can lose their tail; strict accounting correctness.</li>
+<li><strong>Verdict:</strong> metrics are re-scrapeable — the source of truth is the
+live system, and the next scrape repairs the gap. This is the exact
+inverse of etcd&#39;s WAL (durable-before-quorum), and both are right:
+choose the durability point by whether the data can be re-derived.
+Wrong for you the moment the data is a transaction (billing without
+reconciliation, audit logs).</li>
+</ul>
+<h3 id="trade-off-3-mutable-head-immutable-blocks-over-one-store">Trade-off 3: mutable head + immutable blocks over one store</h3>
+<ul>
+<li><strong>Tension:</strong> recent data needs cheap appends and instant visibility;
+history needs cheap concurrent reads and deletion — one data
+structure can&#39;t be both.</li>
+<li><strong>Choice:</strong> a Head (in-memory chunks + m-mapped tails, WAL-backed)
+freezes ranges into immutable blocks
+(<code>head.compactable</code> 2034 — past ~1.5× the block range —
+<code>DB.Compact</code> 1519, <code>LeveledCompactor.Compact</code> compact.go:584),
+then the WAL for that range is checkpointed and truncated
+(<code>truncateWAL</code> 1535); blocks themselves merge upward through
+exponential ranges (2h, 6h, …).</li>
+<li><strong>Evidence:</strong> <code>tsdb/db.go:Compact</code> — the whole function is the
+trade: freeze head → truncate WAL → merge blocks, in that order;
+<code>DB.Querier</code> (2583) fans a query out over overlapping blocks plus a
+<code>RangeHead</code> view — the read side pays for the write side&#39;s split.</li>
+<li><strong>Given up:</strong> query fanout across N blocks per range; compaction as
+a background tax (with a &quot;falling behind&quot; warning when it loses, db.go:1597);
+the two-clock problem (head clock vs block clock) that
+<code>minValidTime</code> and OOO machinery exist to arbitrate.</li>
+<li><strong>Verdict:</strong> the LevelDB lesson transplanted to time series: the
+mutable surface stays small and hot, everything else is immutable
+and shareable. Right whenever reads dominate and data has a time
+axis; wrong when you need point updates or deletes to be fast —
+tombstoning whole blocks is the only delete this design offers.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>cmd/prometheus/main.go:main</code> (376) — the wiring: discovery
+managers, scrape manager, rule manager, notifier, fanout storage
+all constructed in order; then <code>reloadConfig</code> (1718) — every
+subsystem hides behind <code>ApplyConfig</code>/<code>Update</code>, one config file is
+the whole control plane.</li>
+<li><code>discovery/manager.go:updater</code> (383) — one goroutine per SD
+provider, pushing full target-group snapshots up a channel: the
+watch side of the system, level-triggered like etcd&#39;s watch.</li>
+<li><code>scrape/manager.go:Run</code> (223) → <code>reloader</code> (249) → <code>reload</code> (283)
+— discovery updates trigger pool reconciliation; notice pools are
+synced in parallel and pools create/stop per-target loops.</li>
+<li><code>scrape/scrape.go:scrapePool.sync</code> (485) — the target diff: new
+target → <code>newLoop</code> + <code>go l.run()</code>; removed → <code>stop()</code> and wait, so
+a flapping target&#39;s old and new loops never double-append.</li>
+<li><code>scrape/scrape.go:scrapeLoop.run</code> (1405) — the pull clock: offset
+from <code>Target.offset</code> (target.go:170) and <code>setOffsetSeed</code>
+(manager.go:320), alignment to the grid, missed-tick arithmetic.</li>
+<li><code>scrapeAndReport</code> (1488) — the whole transaction: scrape → parse →
+append → commit, with the failed-scrape-equals-empty-scrape rule
+that drives staleness; then <code>updateStaleMarkers</code> (1754) and
+<code>endOfRunStaleness</code> (1663).</li>
+<li><code>tsdb/head_append.go:headAppender.Append</code> (443) — ref-based
+buffering; read <code>memSeries.appendable</code> (694) closely for the
+OOO/too-old/out-of-bounds decision table, and <code>getOrCreate</code> (563)
+→ <code>tsdb/head.go:2082</code> for the optimistic-create-under-stripe-lock
+dance.</li>
+<li><code>tsdb/head_append.go:Commit</code> (1769) with <code>log</code> (1116) — WAL
+before memory, batches before records; then
+<code>tsdb/wlog/wlog.go:log</code> (675) for the page/segment framing and
+<code>Repair</code> (400) for the corruption answer.</li>
+<li><code>tsdb/head.go:truncateWAL</code> (1535) + <code>tsdb/wlog/checkpoint.go:Checkpoint</code>
+(112) — the log&#39;s GC: checkpoint lower segments, truncate, keep
+~3h of WAL; compare with Kafka&#39;s retention-by-time on the log.</li>
+<li><code>tsdb/db.go:Compact</code> (1519) — head → immutable block → WAL
+truncation → block merging, with <code>head.compactable</code> (2034) as the
+trigger and <code>mmapHeadChunks</code> (tsdb/head.go:2145) as the heap escape;
+then <code>DB.Querier</code> (2583) to see the read-side fanout you paid for.</li>
+<li><code>rules/group.go:run</code> (208) → <code>Eval</code> (504) — aligned evaluation
+(<code>EvalTimestamp</code> 422), results appended back, and stale markers
+for series the previous eval produced but this one didn&#39;t —
+a reconcile loop whose diff is written as data.</li>
+<li><code>rules/alerting.go:AlertingRule.Eval</code> (387) — pending → firing
+state machine over <code>r.active</code>; then <code>rules/group.go:RestoreForState</code>
+(761) — after restart, the <code>for</code> timers are read back from the
+<code>ALERTS_FOR_STATE</code> series the rule itself wrote: state restored by
+querying the database.</li>
+</ol>
+<p>You have now traced one sample from an HTTP GET into the WAL, the
+head, an immutable block, and back out through a rule into an alert —
+the full pull-model loop, and the whole reason the system looks the
+way it does.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make absence explicit data</strong> (StaleNaN on failed/empty scrapes):
+silence is ambiguous, &quot;no answer at t&quot; is information — anywhere
+polling can fail, write the failure into the dataset itself.</li>
+<li><strong>Durability is a dial, not a switch</strong>: pick the fsync point where
+the data&#39;s re-derivability runs out (segment rotation here; quorum
+in etcd) — the WAL structure is identical, the durability policy is
+the design.</li>
+<li><strong>Two-tier storage: small mutable surface + immutable snapshots</strong>:
+head/WAL/blocks is memtable/SSTables on a time axis; queries fan
+out, compaction merges, deletes tombstone — reuse the whole shape
+whenever writes append and reads scan.</li>
+<li><strong>Schedule on aligned grids with per-instance jitter</strong>
+(<code>EvalTimestamp</code>, <code>offsetSeed</code>): alignment makes rate windows
+well-defined, jitter spreads load — the two together are why a
+50k-target Prometheus doesn&#39;t thunder at second zero.</li>
+<li><strong>Store derived state back into the store</strong>
+(<code>ALERTS_FOR_STATE</code>): if a computed value must survive your restart,
+make it a series and restore it with a query — no extra state
+machinery to invent, crash, and reconcile.</li>
+<li><strong>Shard by hash, lock per item</strong> (<code>stripeSeries</code> + per-series
+mutex): get-or-create under contention without a global lock, the
+same trick as any hot registry.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — each subsystem is readable Go, but the
+dive crosses four of them (scrape, WAL/head, compaction, rules) and
+the interactions (isolation, OOO, truncation) are where the real
+subtlety lives.</li>
+<li>Budget: ~7 hours for the reading path; steps 5–10 are the core.</li>
+<li>Prerequisites: HTTP and Go basics; time-series vocabulary (samples,
+series, labels); the LSM idea (read the LevelDB deep-dive first);
+for the pairing, the Kafka dive (log retention/segments) and etcd
+dive (watch, WAL-for-consensus).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Upstream <code>docs/storage.md</code> (in the repo) — the operational contract
+of the TSDB: block layout, WAL retention, head behavior.</li>
+<li>Upstream <code>tsdb/docs/format/</code> — the on-disk specs: WAL records,
+block index, chunks, head chunks; the best short documents on the
+formats this dive cites from code.</li>
+<li>Upstream <code>docs/querying/</code> — PromQL semantics, including how
+staleness markers interact with range functions.</li>
+<li>The atlas pairings: <a href="../kafka/">Kafka</a> for segments/retention on a
+log, <a href="../leveldb/">LevelDB</a> for the leveled immutable-tier pattern,
+<a href="../etcd/">etcd</a> for the strict-WAL counterpoint and the
+watch/notify shape that discovery mirrors.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../hotspot/"><span class="dir">← Previous dive</span>OpenJDK HotSpot: watch first, compile later, retract anytime</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 39 of 39 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
