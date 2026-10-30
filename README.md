@@ -102,13 +102,12 @@ Deep-dives (the exemplars — more added over time):
 - [Go runtime](deep-dives/go.md) — M:N goroutines: GMP work-stealing scheduler, integrated netpoller, growable stacks + escape analysis, concurrent GC with a hybrid write barrier
 - [RocksDB](deep-dives/rocksdb.md) — LevelDB paged into production: column families over one WAL, stall ladders and I/O budgets, pluggable compaction
 - [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
+- [Chromium](deep-dives/chromium.md) — a security model that forced the architecture: sandboxed renderer processes, site isolation, Mojo capability IPC, the browser's mirrored frame tree
 
-The catalog tracks 3 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Caddy, Chromium, Neovim,
-and more —
+The catalog tracks 2 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — Caddy, Neovim, and more —
 across databases, queues, runtimes, containers, ML, browser engines,
-load balancers, and editors. Chromium is cataloged for
-targeted reading rather than a deep-dive by design (see its entry).
+load balancers, and editors.
 
 ## Status
 
