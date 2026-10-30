@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLVM: one shared IR, and the pass pipeline as its plugin architecture — System Design Atlas</title>
+<meta name="description" content="LLVM is the compiler infrastructure the industry breathes through: clang, Rust, Swift, Julia, Zig, several GPU stacks, and the Triton kernels behind PyTorch's torch.compile all lower their l">
+<meta property="og:title" content="LLVM: one shared IR, and the pass pipeline as its plugin architecture — System Design Atlas">
+<meta property="og:description" content="LLVM is the compiler infrastructure the industry breathes through: clang, Rust, Swift, Julia, Zig, several GPU stacks, and the Triton kernels behind PyTorch's torch.compile all lower their l">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/llvm/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/llvm/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-add-function-from-ll-text-to-an-elf-object-file">Walkthrough: one add function, from .ll text to an ELF object file</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>LLVM: one shared IR, and the pass pipeline as its plugin architecture</h1>
+    <div class="meta-chips"><span class="chip domain">compiler</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/llvm/llvm-project" rel="noopener">Apache-2.0 WITH LLVM-exception</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>7a941dfb2877a0b8cf30323fefa85ad019e0b0f5</code> · 2026-10-19, tag `llvmorg-23.1.4` · <a href="https://github.com/llvm/llvm-project" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">LLVM is the compiler infrastructure the industry breathes through: clang,
+Rust, Swift, Julia, Zig, several GPU stacks, and the Triton kernels behind
+PyTorch&#39;s <code>torch.compile</code> all lower their languages onto it. The design
+lesson this dive teaches is <strong>the IR as the architectural seam</strong>: freeze
+one intermediate representation good enough that N frontends and M
+backends can meet in the middle — turning an N×M problem into N+M — and
+then make <em>every</em> transformation a small, composable pass over that IR,
+scheduled by a pipeline that is itself data (a string you can parse,
+print, and extend from a plugin). The price is paid up front, in the IR&#39;s
+own data structure: an in-memory pointer graph whose def-use links every
+pass must keep consistent, checked by a Verifier — and in a stack of
+three more IRs below it (MachineFunction, SelectionDAG, MCInst) as the
+IR walks down toward bytes.</p>
+<p>Read it against <a href="../cpython/">CPython</a> (bytecode as a poor man&#39;s IR: no
+SSA, a stack machine, and an interpreter doing in-place specialization
+where LLVM rewrites the program), the V8 engine behind <a href="../nodejs/">Node.js</a>
+(tiering Ignition→Maglev→TurboFan is the same bet — speed comes from a
+pipeline of IRs, each tier one more lowering), and <a href="../pytorch/">PyTorch</a>
+(TorchInductor&#39;s generated Triton/C++ kernels bottom out in LLVM): three
+systems that stopped short of the full compiler-infra answer, and one
+that built only that.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A giant airport hub where every airline agrees to repack luggage into
+standard pallets.</strong> Each airline (a frontend: clang, rustc, swiftc) dumps
+its weirdly shaped bags into identical pallets (LLVM IR), and every
+destination factory (a backend: x86, ARM, RISC-V, GPUs) only knows how to
+unpack pallets — nobody ships bags directly. On the pallet floor, every
+note is tied to the notes that use it with red thread (the use lists);
+when a robot replaces one note, everyone holding its thread is handed the
+new note automatically (<code>replaceAllUsesWith</code>). Sorting robots (the
+passes) each do one small job — &quot;remove duplicate notes&quot;, &quot;flatten
+corridors&quot; — and a foreman (the <code>PassBuilder</code>) reads a checklist
+(<code>-passes=...</code>, literally a string) to decide which robots run in what
+order. There is a clipboard (the <code>AnalysisManager</code>) where facts about the
+pallets get written down (&quot;which corridor leads where&quot; — the dominator
+tree); every robot must cross off the clipboard facts its changes made
+stale (<code>PreservedAnalyses</code>), or the clipboard lies and the next robot
+trusts garbage. When the pallets reach the destination factory they are
+re-packed twice more into local crates (machine instructions) before
+being loaded onto trucks (object files).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> with 20+ languages and 25+ CPU
+targets, nobody can afford to write a compiler for every pair — so the
+design makes the meeting point (the IR) a stable, checkable contract, and
+everything else a replaceable robot over it.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph frontends[&quot;frontends (out-of-tree and in-tree)&quot;]
+        CLANG[&quot;clang&quot;]:::fe
+        RUST[&quot;rustc, swiftc, julia, zig,&lt;br/&gt;GPU stacks, Triton (PyTorch)&quot;]:::fe
+    end
+
+    subgraph ir[&quot;LLVM IR — the seam (in-memory pointer graph)&quot;]
+        MOD[&quot;Module&lt;br/&gt;llvm/include/llvm/IR/Module.h:74&quot;]
+        FN[&quot;Function&quot;]
+        BB[&quot;BasicBlock&lt;br/&gt;(SymbolTableList, BasicBlock.h:64)&quot;]
+        IN[&quot;Instruction : User : Value&lt;br/&gt;operands = co-allocated Use array&quot;]
+        USET[&quot;Use lists — def-use chains&lt;br/&gt;llvm/include/llvm/IR/Use.h:35&quot;]
+    end
+
+    subgraph mid[&quot;mid-level: the pass pipeline (data, not code paths)&quot;]
+        PB[&quot;PassBuilder&lt;br/&gt;buildPerModuleDefaultPipeline&lt;br/&gt;PassBuilderPipelines.cpp:1767&quot;]
+        PARSE[&quot;parsePassPipeline — &#39;-passes&#39; strings&lt;br/&gt;PassBuilder.cpp:2707&quot;]
+        PLUGIN[&quot;pass plugins&lt;br/&gt;llvmGetPassPluginInfo&quot;]
+        PM[&quot;PassManager::run loop&lt;br/&gt;PassManagerImpl.h:28&quot;]
+        AM[&quot;AnalysisManager — lazy, cached,&lt;br/&gt;invalidated via PreservedAnalyses&quot;]
+    end
+
+    subgraph cg[&quot;codegen — the lowerings&quot;]
+        CGPB[&quot;CodeGenPassBuilder::buildPipeline&lt;br/&gt;CodeGenPassBuilder.h:203 (same PM)&quot;]
+        GIS[&quot;GlobalISel: IRTranslator&lt;br/&gt;IRTranslator.cpp:4227&quot;]
+        SDAG[&quot;SelectionDAG: per-BB DAG&lt;br/&gt;SelectionDAGISel.cpp:605&quot;]
+        MF[&quot;MachineFunction / MachineInstr&lt;br/&gt;(MIR — serializable, verifiable)&quot;]
+        ASMP[&quot;AsmPrinter → MCInst&lt;br/&gt;AsmPrinter.cpp:2052&quot;]
+        OBJ[&quot;MCObjectStreamer → ELF/Mach-O/Wasm&lt;br/&gt;MCObjectStreamer.cpp:401&quot;]
+    end
+
+    SER[&quot;bitcode / .ll — serialization,&lt;br/&gt;NOT the IR itself (IRReader.cpp:68)&quot;]
+
+    CLANG --&gt; MOD
+    RUST --&gt; SER --&gt; MOD
+    MOD --&gt; FN --&gt; BB --&gt; IN --- USET
+    IN --&gt; PB
+    PARSE --&gt; PB
+    PLUGIN --&gt; PARSE
+    PB --&gt; PM --- AM
+    PM --&gt; CGPB --&gt; GIS --&gt; SDAG --&gt; MF --&gt; ASMP --&gt; OBJ
+    classDef fe fill:#e8e8f8;
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The IR is the product; everything else is replaceable.</strong> A <code>Module</code>
+owns <code>Function</code>s (a <code>SymbolTableList</code>, <code>llvm/include/llvm/IR/Module.h:74</code>),
+a <code>Function</code> owns <code>BasicBlock</code>s (<code>llvm/include/llvm/IR/Function.h:67</code>),
+a <code>BasicBlock</code> owns <code>Instruction</code>s (<code>llvm/include/llvm/IR/BasicBlock.h:64</code>)
+as intrusive lists — no vector-of-statements, no re-parsing. An
+<code>Instruction</code> <em>is a</em> <code>User</code> <em>is a</em> <code>Value</code>: one object that knows its
+operands (the uses it makes) and is known by its users (the uses made
+of it). The textual <code>.ll</code> files and binary bitcode are serializations
+of this graph — <code>llvm::parseIR</code> (<code>llvm/lib/IRReader/IRReader.cpp:68</code>)
+sniffs the buffer and hands back the same pointer graph either way.</li>
+<li><strong>The optimizer is not a phase; it is a scheduled list of passes.</strong>
+<code>opt -O2</code> literally rewrites itself into the pipeline string
+<code>default&lt;O2&gt;</code> (<code>llvm/tools/opt/optdriver.cpp:775–786</code>), which the
+PassBuilder parses — <code>default&lt;O2&gt;</code> is registered as an ordinary
+pipeline alias in the pass registry table
+(<code>llvm/lib/Passes/PassRegistry.def:275</code>, a <code>MODULE_PASS_WITH_PARAMS</code>
+entry exactly like user-visible passes). Inside, the default pipeline
+composes sub-pipelines: <code>buildPerModuleDefaultPipeline</code>
+(<code>llvm/lib/Passes/PassBuilderPipelines.cpp:1767</code>) chains
+<code>buildModuleSimplificationPipeline</code> (<code>:1120</code>) then
+<code>buildModuleOptimizationPipeline</code> (<code>:1515</code>), nesting module→CGSCC→
+function→loop managers via adaptor passes.</li>
+<li><strong>Codegen is the same architecture repeated one level down.</strong> After
+IR-level passes, <code>CodeGenPassBuilder::buildPipeline</code>
+(<code>llvm/include/llvm/Passes/CodeGenPassBuilder.h:203</code>) schedules the
+machine passes through the <em>same</em> new-PM machinery (a
+<code>MachineFunctionPassManager</code>, <code>llvm/include/llvm/CodeGen/MachinePassManager.h</code>),
+down through instruction selection — the classic path builds a
+per-basic-block DAG of <code>SDNode</code>s (<code>SelectionDAGISel::runOnMachineFunction</code>,
+<code>llvm/lib/CodeGen/SelectionDAG/SelectionDAGISel.cpp:605</code>), the newer
+GlobalISel path translates IR to generic machine instructions
+(<code>IRTranslator::runOnMachineFunction</code>,
+<code>llvm/lib/CodeGen/GlobalISel/IRTranslator.cpp:4227</code>) — into a
+<code>MachineFunction</code> of <code>MachineInstr</code>s, then <code>AsmPrinter</code> lowers to
+<code>MCInst</code>s and <code>MCObjectStreamer::emitInstruction</code>
+(<code>llvm/lib/MC/MCObjectStreamer.cpp:401</code>) encodes them into an object
+file. Four representations, each with its own verifier.</li>
+<li><strong>Targets are data too.</strong> <code>llvm/lib/Target/</code> is ~25 CPU/GPU targets,
+each described largely in TableGen <code>.td</code> files (X86 alone: 163 files,
+e.g. <code>llvm/lib/Target/X86/X86.td</code>); TableGen (<code>llvm/include/llvm/TableGen/Record.h</code>,
+<code>Record</code>/<code>RecordKeeper</code>) expands those records into generated C++
+tables the selectors and assemblers consume. Even the IR&#39;s own
+intrinsics are a TableGen file (<code>llvm/include/llvm/IR/Intrinsics.td:794</code>,
+<code>class Intrinsic</code>).</li>
+<li><strong>Where the spine is:</strong> <code>.ll</code>/bitcode → <code>parseIRFile</code> → Module graph →
+<code>PassBuilder</code> → <code>PassManager::run</code> (passes + analyses + invalidation)
+→ <code>CodeGenPassBuilder</code> → SelectionDAG/GlobalISel → MachineFunction →
+regalloc → <code>AsmPrinter</code> → MC layer → <code>.o</code>. The Walkthrough walks
+exactly this, minus frontend.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-add-function-from-ll-text-to-an-elf-object-file">Walkthrough: one add function, from .ll text to an ELF object file</h2>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant F as foo.ll
+    participant R as parseIRFile (IRReader.cpp:95)
+    participant PB as PassBuilder
+    participant PM as ModulePassManager.run
+    participant AM as AnalysisManager
+    participant CG as CodeGenPassBuilder
+    participant IS as SelectionDAGISel.cpp:605
+    participant MF as MachineFunction
+    participant AP as AsmPrinter.cpp:2052
+    participant MC as MCObjectStreamer.cpp:401
+
+    F-&gt;&gt;R: parse text (or bitcode)
+    R-&gt;&gt;R: build pointer graph — Value/User/Use wired
+    R-&gt;&gt;PB: Module + &quot;default&lt;O2&gt;&quot;
+    PB-&gt;&gt;PB: PassRegistry.def:275 alias → buildPerModuleDefaultPipeline
+    PB-&gt;&gt;PM: MPM (module→CGSCC→function→loop adaptors)
+    PM-&gt;&gt;AM: getAnalysis&lt;DominatorTreeAnalysis&gt;
+    AM--&gt;&gt;PM: cached tree (or compute now)
+    PM-&gt;&gt;PM: pass runs → returns PreservedAnalyses → AM.invalidate
+    PM-&gt;&gt;CG: module handed to codegen pipeline
+    CG-&gt;&gt;IS: per function: Legalize → Select (SelectCodeCommon:3354)
+    IS-&gt;&gt;MF: MachineInstrs (virtual regs)
+    MF-&gt;&gt;MF: regalloc + machine passes (MIR verify: MachineFunction.h:977)
+    MF-&gt;&gt;AP: emitFunctionBody (AsmPrinter.cpp:2052)
+    AP-&gt;&gt;MC: MCInst → encode
+    MC--&gt;&gt;F: ELF .o (emitInstToData, MCObjectStreamer.cpp:437)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="text-becomes-a-pointer-graph">Text becomes a pointer graph</h3>
+<p><code>llvm::parseIRFile</code>
+(<code>llvm/lib/IRReader/IRReader.cpp:95</code>) sniffs the buffer, dispatches to
+the <code>.ll</code> parser or the bitcode reader (<code>parseIR</code>, <code>:68</code>), and returns a
+<code>Module</code>. Nothing &quot;holds&quot; the program as text anymore: each <code>%result = add i32 %a, %b</code> line becomes an <code>Instruction</code> object whose two operands
+are pointers to the <code>Value</code>s for <code>%a</code>/<code>%b</code>, wired through co-allocated
+<code>Use</code> records. Names (<code>%a</code>) live in a symbol table for serialization and
+debugging; identity in memory is the pointer.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-pipeline-is-parsed-like-any-input">The pipeline is parsed like any input</h3>
+<p><code>opt</code> never
+special-cases optimization levels: <code>-O2</code> becomes the string
+<code>default&lt;O2&gt;</code> (<code>llvm/tools/opt/optdriver.cpp:775–786</code>) and
+<code>PassBuilder::parsePassPipeline</code> (<code>llvm/lib/Passes/PassBuilder.cpp:2707</code>)
+parses it against the registry, where <code>default</code> is a table entry
+(<code>llvm/lib/Passes/PassRegistry.def:275</code>) whose expansion calls
+<code>buildPerModuleDefaultPipeline</code> — the same parser that accepts
+<code>-passes=&#39;instcombine,loop-unroll&#39;</code> or an out-of-tree plugin&#39;s name.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="passes-run-inside-one-loop-with-one-contract">Passes run inside one loop with one contract</h3>
+<p><code>PassManager::run</code> (<code>llvm/include/llvm/IR/PassManagerImpl.h:28</code>) is the
+whole engine: for each pass — ask instrumentation to allow/skip, run it,
+call <code>AM.invalidate(IR, PassPA)</code> with the pass&#39;s returned
+<code>PreservedAnalyses</code>, and intersect the aggregate set. A pass that
+rewrites CFG must return <code>PreservedAnalyses::none()</code>; one that only
+deleted dead instructions returns the set minus, say, the dominator
+tree. <code>default&lt;O2&gt;</code> expands into nested managers
+(<code>buildPerModuleDefaultPipeline</code>, <code>PassBuilderPipelines.cpp:1767</code>:
+simplification <code>:1800</code>, then optimization <code>:1803</code>) so loops get function
+passes without re-walking the module.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="analyses-are-computed-lazily-cached-and-invalidated-by-contract">Analyses are computed lazily, cached, and invalidated by
+contract</h3>
+<p>The first pass to ask for
+<code>DominatorTreeAnalysis</code> (<code>llvm/include/llvm/IR/Dominators.h:270</code>) pays
+for it; later passes get it from the <code>AnalysisManager</code> cache — until a
+pass fails to preserve it. Even cross-level invalidation is explicit:
+when a module pass deletes a function, a proxy result walks the cached
+function analyses and clears them
+(<code>FunctionAnalysisManagerModuleProxy::Result::invalidate</code>,
+<code>llvm/lib/IR/PassManager.cpp:41</code>). Wrong <code>PreservedAnalyses</code> = stale
+dominator tree = miscompiled binary; the contract is load-bearing.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="instrumentation-is-a-plugin-point-too">Instrumentation is a plugin point too</h3>
+<p>The same loop
+fetches <code>PassInstrumentation</code> as an analysis
+(<code>PassInstrumentationCallbacks</code>, <code>llvm/include/llvm/IR/PassInstrumentation.h:74</code>):
+<code>-print-after-all</code>, IR-change reports (<code>-print-changed</code>), the pass
+verifier
+(<code>VerifyInstrumentation</code>,
+<code>llvm/lib/Passes/StandardInstrumentations.cpp:1456</code>), and
+<code>-time-trace</code> (<code>TimeProfilingPassesHandler</code>, <code>:1572</code>) are all just
+registered callbacks — and <code>runBeforePass</code> can skip a pass entirely
+(e.g. <code>optnone</code> functions).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="selection-ir-becomes-target-instructions">Selection: IR becomes target instructions</h3>
+<p>The codegen
+pipeline reaches <code>SelectionDAGISel::runOnMachineFunction</code>
+(<code>llvm/lib/CodeGen/SelectionDAG/SelectionDAGISel.cpp:605</code>), which lowers
+each basic block to a DAG, legalizes target-unsupported operations, and
+pattern-matches it into <code>MachineInstr</code>s
+(<code>SelectAllBasicBlocks</code>, <code>:646</code>, defined <code>:1656</code>; table-driven matching
+in <code>SelectCodeCommon</code>, <code>:3354</code>, generated from the target&#39;s <code>.td</code>
+patterns). FastISel (<code>llvm/lib/CodeGen/SelectionDAG/FastISel.cpp:1543</code>)
+tries a quick path first and falls back to the DAG. GlobalIsel takes
+the other route through <code>IRTranslator</code>
+(<code>llvm/lib/CodeGen/GlobalISel/IRTranslator.cpp:4227</code>) — same
+destination, more incremental passes.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="machine-code-is-emitted-through-one-last-ir">Machine code is emitted through one last IR</h3>
+<p>Virtual
+registers are assigned physical ones (a scheduling problem over the
+<code>MachineFunction</code>, whose own <code>MachineInstr</code>s can be serialized to MIR
+text via <code>printMIR</code>, <code>llvm/include/llvm/CodeGen/MIRPrinter.h</code>, and
+verified by <code>MachineFunction::verify</code>,
+<code>llvm/include/llvm/CodeGen/MachineFunction.h:977</code>). The
+<code>AsmPrinter::emitFunctionBody</code> (<code>llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp:2052</code>)
+lowers each <code>MachineInstr</code> to an <code>MCInst</code>, and
+<code>MCObjectStreamer::emitInstruction</code> (<code>llvm/lib/MC/MCObjectStreamer.cpp:401</code>)
+encodes it straight into object-file fragments
+(<code>emitInstToData</code>, <code>:437</code>) — ELF, Mach-O, or Wasm, chosen by the
+target&#39;s object writer.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-function-crossed-four-representations-each-seam-contractual">One function crossed four representations, each seam
+contractual</h3>
+<p><code>.ll</code> text → IR graph → optimized IR graph →
+MachineFunction/MCInst → object file; every crossing is a serialized,
+verifiable, separately testable format — which is exactly why 25+ targets
+and 20+ languages can share this machinery.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>Value</code>/<code>User</code>/<code>Use</code> — the IR as a self-maintaining graph.</strong>
+<strong>What:</strong> every IR entity is a <code>Value</code>
+(<code>llvm/include/llvm/IR/Value.h:75</code>, one <code>SubclassID</code> byte driving
+<code>isa</code>/<code>dyn_cast</code>); a <code>User</code> is a <code>Value</code> that has operands; each
+operand slot is a <code>Use</code> (<code>llvm/include/llvm/IR/Use.h:35</code>) — four
+pointers: the used <code>Val</code>, the owning <code>User</code>, and <code>Next</code>/<code>Prev</code> links
+threading it into the <em>used value&#39;s</em> doubly-linked use list. Operand
+arrays are co-allocated <em>before</em> the <code>User</code> object itself
+(<code>User::User</code>, <code>llvm/include/llvm/IR/User.h:119</code> —
+<code>Use *Operands = reinterpret_cast&lt;Use *&gt;(this) - NumUserOperands</code>),
+with the default <code>operator new</code> deleted (<code>User.h:54</code>, <code>void *operator new(size_t) = delete</code>) so the choice
+(inline vs &quot;hung-off&quot; for resizable users like PHINodes) is explicit.
+<strong>Why:</strong> def-use chains are the queries every pass asks
+(&quot;who uses this value?&quot;), and mutation is the hot path:
+<code>Value::replaceAllUsesWith</code> (<code>llvm/lib/IR/Value.cpp:553</code>) walks the
+use list and rewires every user in O(uses) — no re-scan of the module,
+no patching of names. The alternative — an AST with symbol tables, or
+immutable IR rebuilt per transform — pays O(module) per edit.</p>
+</li>
+<li><p><strong>The intrusive <code>SymbolTableList</code> containers.</strong>
+<strong>What:</strong> <code>BasicBlock</code>s and <code>Instruction</code>s live in
+<code>SymbolTableList</code>s (<code>BasicBlock.h:64</code>, <code>Function.h:67</code>), built on the
+intrusive <code>ilist</code> (<code>llvm/include/llvm/ADT/ilist.h</code>): the list lives
+<em>inside</em> the nodes, no separate node allocation.
+<strong>Why:</strong> passes splice, move, and delete instructions constantly —
+<code>splice</code>/<code>erase</code> are pointer surgery, never container copies, and an
+iterator stays valid across re-parenting. The symbol table half keeps
+<code>%names</code> resolvable only when someone asks (name lookup is a service,
+not identity).</p>
+</li>
+<li><p><strong>The <code>AnalysisManager</code> cache + <code>PreservedAnalyses</code>.</strong>
+<strong>What:</strong> per-IRUnit (module/function/loop/machine-function) maps from
+analysis identity key → cached result
+(<code>llvm/include/llvm/IR/PassManager.h:277</code>,
+<code>Analysis.h:112</code>); passes return a <code>PreservedAnalyses</code> set that
+<code>AM.invalidate</code> uses to evict. <strong>Why:</strong> it makes &quot;run Dominators once,
+reuse until the CFG changes&quot; a <em>declared contract</em> rather than
+convention — compile time is the product&#39;s second output, and this is
+the memoization discipline that keeps O2 pipelines feasible. The
+rejected alternative (recompute on every request) is what made the
+legacy pass manager&#39;s analysis churn expensive.</p>
+</li>
+<li><p><strong><code>MachineFunction</code>/<code>MachineInstr</code> — the second IR, honestly
+serialized.</strong> <strong>What:</strong> post-selection code as instructions over
+<em>virtual</em> registers with operands that are registers, immediates,
+frame indices, or block refs (<code>llvm/include/llvm/CodeGen/MachineInstr.h:72</code>);
+printable/parsable as MIR (<code>printMIR</code>,
+<code>llvm/include/llvm/CodeGen/MIRPrinter.h</code>) and checked by its own
+verifier (<code>MachineFunction::verify</code>, <code>MachineFunction.h:977</code>).
+<strong>Why:</strong> machine-level passes (scheduling, regalloc) need register
+classes and physical facts LLVM IR deliberately doesn&#39;t have — but the
+<em>methodology</em> (serializable IR + verifier + pass pipeline, even the
+same <code>MachineFunctionPassManager</code> with per-pass
+<code>MachineFunctionProperties</code> contracts in
+<code>llvm/include/llvm/CodeGen/MachinePassManager.h</code>) is
+cloned from the layer above.</p>
+</li>
+<li><p><strong>TableGen <code>Record</code>s — target descriptions as data.</strong>
+<strong>What:</strong> a small records language (<code>llvm/include/llvm/TableGen/Record.h</code>)
+in which each target&#39;s registers, instructions, selection patterns,
+and calling conventions are declared (X86: <code>llvm/lib/Target/X86/X86.td</code>
+and 160+ sibling <code>.td</code> files); the <code>llvm-tblgen</code> tool expands them
+into generated C++ that selection and assembly consult.
+<strong>Why:</strong> a new CPU mostly should not write C++ — it should describe
+itself, the same &quot;generate the surface from data&quot; move as
+<a href="../pytorch/">PyTorch&#39;s</a> <code>native_functions.yaml</code> or <a href="../ffmpeg/">FFmpeg&#39;s</a>
+configure-generated component lists.</p>
+</li>
+<li><p><strong><code>LLVMContext</code> + uniquing tables.</strong> <strong>What:</strong> the context owns the
+type and constant uniquing tables (<code>llvm/include/llvm/IR/LLVMContext.h:62–69</code>,
+tables in <code>llvm/lib/IR/LLVMContextImpl.h:1538</code> — <code>ConstantUniqueMap</code>
+at <code>:1636</code>), so <code>ConstantInt::get(i32, 42)</code> is pointer-equal everywhere
+(<code>llvm/include/llvm/IR/Constants.h:125</code>). <strong>Why:</strong> value numbering of
+constants and types for free — equality becomes pointer comparison for
+the majority of leaves in the IR graph; the cost is that a context
+provides no locking, so threaded compilation uses one context per
+thread (see section 3).</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph link[&quot;link-time parallelism (ThinLTO)&quot;]
+        IDX[&quot;module summaries + combined index&lt;br/&gt;ThinLTOCodeGenerator.cpp&quot;]
+        PLAN[&quot;FunctionImporter: which functions&lt;br/&gt;each partition imports (:223)&quot;]
+        TP[&quot;thinBackend per partition&lt;br/&gt;LTOBackend.cpp:652 — thread pool&quot;]
+        PART[&quot;each partition: its own&lt;br/&gt;LLVMContext, its own pipeline run&quot;]
+    end
+    IDX --&gt; PLAN --&gt; TP --&gt; PART
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Inside one compile, the IR world is single-threaded.</strong> <code>LLVMContext</code>
+&quot;provides no locking guarantees, so you should be careful to have one
+context per thread&quot; (<code>llvm/include/llvm/IR/LLVMContext.h:67–69</code>), and
+passes mutate shared graphs — there is no lock story to cite because
+there are no locks. Concurrency is bought <em>outside</em> the IR: at module
+granularity.</li>
+<li><strong>ThinLTO parallelizes across partitions, not within them.</strong> Pre-link,
+each module gets a summary index; the linker merges indexes, and the
+<code>FunctionImporter</code> (<code>llvm/lib/LTO/ThinLTOCodeGenerator.cpp:223</code>) plans
+which functions each backend should import; then each partition runs
+<code>thinBackend</code> (<code>llvm/lib/LTO/LTOBackend.cpp:652</code>) on its own thread
+with its own context. Even plain parallel codegen refuses to share:
+<code>splitCodeGen</code> (<code>LTOBackend.cpp:516</code>) serializes module partitions to
+<em>bitcode on the main thread</em> &quot;in order to avoid data races&quot; and each
+worker deserializes into a fresh context (<code>:520–568</code>) — the honest
+boundary of a mutable pointer-graph design: serialize at the seam,
+never share the graph.</li>
+<li><strong>Failure = corrupted invariants, so verification is a lifecycle.</strong>
+The IR Verifier (<code>llvm/lib/IR/Verifier.cpp:148</code>, an <code>InstVisitor</code>
+walking every invariant; <code>VerifierPass::run</code>, <code>:8093</code>) runs on input,
+output, and optionally after every pass (<code>-verify-each</code>); machine code
+gets its own verifier (<code>MachineFunction::verify</code>). A crash mid-pass
+prints &quot;Running pass X on function Y&quot; from the pretty-stack machinery
+wired into the run loop (<code>StackTraceEntry</code>,
+<code>llvm/include/llvm/IR/PassManagerImpl.h:29–50</code>) — the same
+instrumentation seam as the timers. <code>-run-twice</code> re-runs pipelines to
+shake out stateful passes; <code>llvm-reduce</code> and the <code>.ll</code>/MIR round-trips
+make minimal reproducers a <em>format property</em>, not a heroic effort.</li>
+<li><strong>Backpressure does not exist; compile-time budgets do.</strong> Nothing
+throttles the optimizer from outside — instead the design fights
+quadratic pass behavior structurally: the analysis cache
+(section 2), <code>optnone</code>/<code>optsize</code> as IR <em>attributes</em> that passes
+respect, and instrumentation (<code>-time-trace</code>) to find the offenders.
+Compile time is managed as a measured property of pipelines, the way
+<a href="../haproxy/">HAProxy</a> manages latency as a budget.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is the IR and the pass contracts, not a
+compiler binary.</strong> LLVM ships as libraries: frontends construct IR
+with <code>IRBuilder</code> (<code>llvm/include/llvm/IR/IRBuilder.h</code>) or the C API
+(<code>llvm-c/Core.h</code> — the seam out-of-tree frontends bind), then hand a
+<code>Module</code> to a <code>PassBuilder</code>-composed pipeline and a <code>TargetMachine</code>
+that emits files (<code>addPassesToEmitFile</code>,
+<code>llvm/include/llvm/Target/TargetMachine.h:431</code>; new-style
+<code>CodeGenPassBuilder::buildPipeline</code>, <code>CodeGenPassBuilder.h:203</code>).</li>
+<li><strong>Passes are the plugin unit, and the seam is deliberate.</strong> An
+out-of-tree <code>.so</code> exposes one C symbol, <code>llvmGetPassPluginInfo</code>
+(<code>llvm/include/llvm/Plugins/PassPlugin.h:129–138</code>), returning a
+<code>PassPluginLibraryInfo</code> (<code>:45</code>) whose callback receives the
+<code>PassBuilder</code> and registers pipeline-parsing callbacks, extension
+points, or analyses. <code>PassPlugin::Load</code>
+(<code>llvm/lib/Plugins/PassPlugin.cpp:16</code>) is dlopen + symbol lookup + a
+strict API-version check (<code>LLVM_PLUGIN_API_VERSION</code>, header <code>:36</code>) —
+plugins are version-pinned to their LLVM build, by design. This is the
+seam the Enzyme autodiff compiler and many research passes grow
+through, and inside the default pipeline itself the same mechanism
+runs:
+<code>invokePipelineStartEPCallbacks</code> fires extension points mid-pipeline
+(<code>PassBuilderPipelines.cpp:1794</code>).</li>
+<li><strong>The pipeline string is an API.</strong> <code>-passes=&#39;function(mem2reg),...&#39;</code>
+with nested managers, parameters (<code>loop-unroll&lt;full-unroll-max-count=N&gt;</code>),
+and printable back (<code>PassManager::printPipeline</code>,
+<code>llvm/include/llvm/IR/PassManager.h:203</code>; <code>opt -print-pipeline-passes</code>,
+<code>NewPMDriver.cpp</code>) — the optimizer&#39;s configuration is data that tools
+round-trip, the <a href="../redis/">Redis</a>-commands.json / <a href="../kubernetes/">Kubernetes</a>
+schema move applied to a compiler.</li>
+<li><strong>Honest wart:</strong> the C++ API has <em>no</em> stability policy — every release
+can (and does) break it, so out-of-tree users ride the release train
+or pin; the C API is smaller and slower-moving but forever trailing.
+The pass registry&#39;s <code>.def</code> macro tables (<code>PassRegistry.def</code>) are
+compile-time — adding pass <em>names</em> means rebuilding, though adding
+passes at runtime is first-class via plugins. And the legacy pass
+manager still coexists (<code>llvm/lib/IR/LegacyPassManager.cpp</code>, ~1.5k
+lines) because not all codegen plumbing migrated; two parallel
+extension surfaces is a real maintenance tax.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-one-shared-mutable-ir-for-all-languages-and-targets">Trade-off 1: one shared, mutable IR for all languages and targets</h3>
+<ul>
+<li><strong>Tension:</strong> M languages × N targets is M×N compilers; only a shared
+meeting point makes it M+N. But the meeting point must be rich enough
+for every language&#39;s semantics and low enough for every target&#39;s
+machine — an impossible average in the abstract.</li>
+<li><strong>Choice:</strong> a low, RISC-like, SSA IR (<code>LangRef</code>, <code>llvm/docs/LangRef.md</code>)
+with explicit escape hatches: intrinsics declared in TableGen
+(<code>Intrinsics.td:794</code>) for everything LLVM doesn&#39;t model (GC
+safepoints, coroutines, vendor ops), metadata and debug info as
+side-channels (<code>llvm/include/llvm/IR/Metadata.h</code>), function
+attributes as a parallel vocabulary, and a <code>DataLayout</code> string the
+frontends must honor (<code>llvm/lib/IR/DataLayout.cpp:201</code> parses it) so
+the IR is never lying about memory.</li>
+<li><strong>Evidence:</strong> the intrinsic list is the invoice for &quot;low IR&quot;:
+<code>llvm/include/llvm/IR/Intrinsics.td</code> is 3.2k lines of semantics LLVM
+chose <em>not</em> to understand; PHINode (<code>llvm/include/llvm/IR/Instructions.h:2701</code>)
+plus the GEP instruction (address arithmetic, not pointer math) show
+the IR bending toward both worlds.</li>
+<li><strong>Given up:</strong> high-level optimization — LLVM re-finds structure
+(inlining, SROA) that a source-level IR would have kept for free;
+frontends like Rust lower guarantees into checks LLVM can remove but
+not reason about; the long-running literature on low IRs losing
+source-level optimization opportunity is this trade&#39;s receipt.</li>
+<li><strong>Verdict:</strong> right when the frontends <em>want</em> to be thin and targets
+churn (exactly the CPU/GPU world); wrong when the product is
+source-level insight — which is why MLIR (built by the same
+community) exists: a meta-IR for defining <em>higher</em> seams, and why
+<a href="../cpython/">CPython</a> and V8 keep richer, language-specific bytecode
+tiers instead.</li>
+</ul>
+<h3 id="trade-off-2-aggressive-in-place-mutation-of-a-shared-graph-over-immutable-ir">Trade-off 2: aggressive in-place mutation of a shared graph over immutable IR</h3>
+<ul>
+<li><strong>Tension:</strong> optimization is constant rewriting; every transform is
+cheaper if edits are pointer surgery — but any pass can corrupt any
+invariant of a shared mutable graph, and parallelism inside one module
+becomes nearly impossible.</li>
+<li><strong>Choice:</strong> the <code>Use</code>-list machinery makes every edit locally
+consistent (<code>replaceAllUsesWith</code>, <code>Value.cpp:553</code>; operand arrays
+co-allocated, <code>User.h:119</code>); correctness pressure is routed into the
+Verifier lifecycle and crash tooling (section 3) rather than into
+immutability; thread-safety is achieved by not sharing (one
+<code>LLVMContext</code> per thread; bitcode serialization between threads).</li>
+<li><strong>Evidence:</strong> <code>Value::doRAUW</code> (<code>Value.cpp:518</code>) — the entire mechanism
+is one while-loop over the use list, the IR&#39;s most-executed edit;
+<code>splitCodeGen</code>&#39;s serialize-to-bitcode-then-parallelize dance
+(<code>LTOBackend.cpp:520–568</code>); <code>-verify-each</code> and <code>VerifyInstrumentation</code>
+(<code>StandardInstrumentations.cpp:1456</code>).</li>
+<li><strong>Given up:</strong> functional-style IRs (immutable nodes, persistent
+data structures) would give free snapshots, trivial parallel passes,
+and no verifier — at the cost of allocation churn and copying on
+every transform, a trade successor IRs like MLIR and Cranelift
+deliberately re-priced with more value-oriented operation models.</li>
+<li><strong>Verdict:</strong> right when one machine optimizes one module
+sequentially and compile time must stay flat (pointer edits are
+nearly free); wrong when you need concurrent passes, undo, or
+IR-diff tooling as a first-class feature — then you pay for
+immutability (or for MLIR-style value-typed operations).</li>
+</ul>
+<h3 id="trade-off-3-the-pipeline-as-parseable-pluggable-data-over-fixed-phases">Trade-off 3: the pipeline as parseable, pluggable data over fixed phases</h3>
+<ul>
+<li><strong>Tension:</strong> every consumer wants a slightly different optimizer
+(Rust&#39;s aliasing rules, PGO, sanitizers, research passes) — but an
+optimizer is only correct as a <em>sequence</em>, and order-sensitivity is
+where compilers rot.</li>
+<li><strong>Choice:</strong> the pipeline is a first-class string parsed against a
+registry (<code>parsePassPipeline</code>, <code>PassBuilder.cpp:2707</code>; registry table
+<code>PassRegistry.def</code>), default pipelines are aliases in that same table
+(<code>PassRegistry.def:275</code>), and plugins inject passes at every level,
+including inside defaults via extension-point callbacks
+(<code>PassBuilderPipelines.cpp:1794</code>). Analyses ride along under an
+explicit preservation contract (<code>PreservedAnalyses</code>,
+<code>llvm/include/llvm/IR/Analysis.h:112</code>).</li>
+<li><strong>Evidence:</strong> <code>opt -O2</code> → <code>&quot;default&lt;O2&gt;&quot;</code>
+(<code>optdriver.cpp:775–786</code>); <code>printPipeline</code> round-trips what actually
+ran (<code>NewPMDriver.cpp</code>, print at <code>:545+</code>); the proxy-invalidation
+machinery that keeps nested managers honest
+(<code>PassManager.cpp:41</code>).</li>
+<li><strong>Given up:</strong> guaranteed phase structure — nothing stops a plugin
+from scheduling disaster (a pass that lies in its
+<code>PreservedAnalyses</code> miscompiles silently downstream); pipeline
+strings are configuration whose failure mode is <em>performance</em>, not
+errors; and the number of orderings to test grows combinatorially,
+which is why the default pipelines are curated by hand
+(<code>PassBuilderPipelines.cpp</code> is the museum).</li>
+<li><strong>Verdict:</strong> right for an infrastructure project whose users are
+compiler engineers — the string is the interface between rustc and
+LLVM&#39;s optimizer. Wrong for an application compiler with one fixed
+behavior, where the same freedom is untestable surface area.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>llvm/docs/LangRef.md</code> — the IR contract, the document every
+frontend and backend signs. Read the module/function/instruction
+overview and one intrinsic&#39;s spec; this is the &quot;constitution&quot; the
+code below enforces.</li>
+<li><code>llvm/include/llvm/IR/Use.h:35</code> then <code>User.h:119</code> — the def-use
+machinery and the co-allocation trick (<code>operator new</code> deleted at
+<code>User.h:54</code>); draw the four pointers of a <code>Use</code> and the
+doubly-linked list hanging off a <code>Value</code> before moving on.</li>
+<li><code>llvm/lib/IR/Value.cpp:518</code> — <code>Value::doRAUW</code>: the IR&#39;s hottest
+edit; note the constant-uniquing special case (<code>handleOperandChange</code>)
+and the PHI-successor fixup at the end.</li>
+<li><code>llvm/include/llvm/IR/BasicBlock.h:64</code> + <code>llvm/include/llvm/ADT/ilist.h</code>
+— intrusive lists everywhere: instructions are nodes <em>in</em> their
+block; <code>splice</code> is pointer surgery. Then <code>Module.h:74</code>/<code>Function.h:67</code>
+for the same pattern one level up.</li>
+<li><code>llvm/include/llvm/IR/PassManagerImpl.h:28</code> — the new PM&#39;s entire
+engine in ~90 lines: instrumentation hooks, run, invalidate,
+intersect. Everything else in the optimizer is a passenger.</li>
+<li><code>llvm/lib/Passes/PassRegistry.def:275</code> and <code>llvm/tools/opt/optdriver.cpp:775</code>
+— watch <code>-O2</code> become the string <code>default&lt;O2&gt;</code> and resolve through
+the same table as every other pass; then
+<code>PassBuilderPipelines.cpp:1767</code> for what the alias expands into
+(simplification <code>:1120</code> → optimization <code>:1515</code>).</li>
+<li><code>llvm/include/llvm/IR/PassInstrumentation.h:74</code> +
+<code>llvm/lib/Passes/StandardInstrumentations.cpp:1572</code> — the
+instrumentation seam: pick one client (<code>-print-changed</code>,
+<code>-time-trace</code>, the pass verifier at <code>:1456</code>) and see it is only
+registered callbacks.</li>
+<li><code>llvm/lib/IR/PassManager.cpp:41</code> — cross-IRUnit invalidation: the
+proxy that clears function analyses when a module pass deletes
+functions; this is where the <code>PreservedAnalyses</code> contract meets
+reality.</li>
+<li><code>llvm/include/llvm/Plugins/PassPlugin.h:45</code> +
+<code>llvm/lib/Plugins/PassPlugin.cpp:16</code> — the whole plugin mechanism:
+one C symbol, a version check, a callback holding the PassBuilder.</li>
+<li><code>llvm/lib/CodeGen/SelectionDAG/SelectionDAGISel.cpp:605</code> — IR meets
+target: per-BB DAG build, legalize, then <code>SelectAllBasicBlocks</code>
+(<code>:646</code>) into MachineInstrs; note the FastISel quick path
+(<code>FastIsel.cpp:1543</code>) and fallback.</li>
+<li><code>llvm/include/llvm/CodeGen/MachineInstr.h:72</code> +
+<code>llvm/include/llvm/CodeGen/MIRPrinter.h</code> — the second IR: virtual
+registers, serializable MIR, its own verifier
+(<code>MachineFunction.h:977</code>); then <code>AsmPrinter.cpp:2052</code> →
+<code>MCObjectStreamer.cpp:401</code> for the last lowering into object files.</li>
+<li><code>llvm/lib/Target/X86/X86.td</code> (or any target&#39;s root <code>.td</code>) +
+<code>llvm/include/llvm/IR/Intrinsics.td:794</code> — targets <em>and</em> IR
+semantics as TableGen data; close the loop by noticing
+<code>SelectCodeCommon</code> (<code>SelectionDAGISel.cpp:3354</code>) consumes tables
+generated from these very files.</li>
+</ol>
+<p>You have now traced one function from <code>.ll</code> text through a
+data-scheduled optimizer into machine code — across four IRs, each with
+a verifier, all joined by def-use chains and preservation contracts.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Put a serializable intermediate representation at every internal
+seam, and make the seams verifiable</strong> — <code>.ll</code>, bitcode, and MIR give
+LLVM minimal reproducers, diffable outputs, and testing (<code>lit</code> +
+FileCheck over the <em>format</em>) as free consequences of the design.</li>
+<li><strong>Make identity pointer-equal by uniquing at creation</strong> — types and
+constants (<code>LLVMContextImpl.h:1636</code>) turn equality checks into
+comparisons everywhere downstream; anywhere equality is hot, don&#39;t
+hash later, unique earlier.</li>
+<li><strong>Let the heavy mutation live in one structure that maintains its own
+invariants incrementally</strong> — <code>replaceAllUsesWith</code> keeps def-use
+truth current at every edit, so no pass re-derives it; pair it with a
+verifier you can run at every boundary (section 3&#39;s lifecycle).</li>
+<li><strong>Express configuration as a parseable/printable language over a
+registry</strong> — the <code>-passes</code> string makes the optimizer&#39;s behavior
+inspectable (<code>-print-pipeline-passes</code>), diffable in code review, and
+extendable by plugins without recompiling the tool; this is the
+pattern behind every &quot;config is data&quot; system in this atlas.</li>
+<li><strong>Make invalidation an explicit contract, not a cache-flush</strong> —
+<code>PreservedAnalyses</code> + proxy invalidation is the discipline to copy
+whenever analysis results and mutations share a program; stale caches
+are the silent miscompilers of any pipeline architecture.</li>
+<li><strong>Parallelize by serializing at the seam, not by locking inside</strong> —
+<code>splitCodeGen</code>&#39;s bitcode handoff admits the honest boundary of shared
+mutable state; choose the boundary deliberately instead of sprinkle
+locks where they&#39;ll deadlock.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 8–10 hours — split into
+the IR core (stops 1–4), the pass pipeline (5–8), and codegen
+(9–12); each sitting stands alone.</li>
+<li>Prerequisites: comfortable C++ (templates, multiple inheritance,
+placement allocation); SSA form basics (what a phi node is — ten
+minutes of reading <code>LangRef</code>&#39;s phi section suffices); rough compiler
+vocabulary (frontend/backend, register allocation). The
+<a href="../cpython/">CPython</a> bytecode dive is good calibration for &quot;an IR
+you can interpret&quot;; no prior LLVM experience required — but keep
+<code>llvm/docs/LangRef.md</code> open throughout.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>llvm/docs/LangRef.md</code> in the repo — the LLVM IR reference, the
+single most load-bearing document in the project.</li>
+<li><code>llvm/docs/NewPassManager.md</code> and <code>llvm/docs/WritingAnLLVMPass.md</code> —
+the pass manager design and the official tutorial this dive&#39;s
+sections 2–4 walk in code.</li>
+<li>Chris Lattner&#39;s CGO 2004 paper &quot;LLVM: A Compilation Framework for
+Lifelong Program Analysis &amp; Transformation&quot; and the 2002 master&#39;s
+thesis &quot;LLVM: An Infrastructure for Multi-Stage Optimization&quot; — the
+original N×M→N+M argument, straight from the author.</li>
+<li>The <a href="../cpython/">CPython</a>, <a href="../nodejs/">Node.js</a>, and <a href="../pytorch/">PyTorch</a>
+dives in this atlas — the language-runtime answers to &quot;what does an
+IR buy you&quot;: bytecode plus in-place specialization, tiered IR
+lowering, and graph capture lowering into LLVM-generated kernels,
+respectively.</li>
+<li>Adve et al., &quot;LLVM IR: A Complete and Verifiable Intermediate
+Representation for Optimizing Compilers&quot; (CGO 2021) — the paper this
+dive&#39;s &quot;the IR is the contract&quot; theme formalizes.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../neovim/"><span class="dir">← Previous dive</span>Neovim: the editor as an RPC server — one seam for every face</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 36 of 36 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

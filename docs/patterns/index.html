@@ -25,7 +25,7 @@
 </nav>
 <main id="main">
 <div class="page article-layout">
-<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
+<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</a></li><li><a href="#15-the-intermediate-representation-is-the-architecture">15. The intermediate representation is the architecture</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
 <div>
   <header class="article-header"><h1>Patterns index: design lessons that recur</h1>
   <p class="lead">The deep-dives teach systems; this index teaches <strong>design</strong>. Each pattern appears in two or more canonical codebases — the recurrence is the signal.</p></header>
@@ -285,7 +285,12 @@ BPF programs — extend a monolith without forking it;
 <a href="../dive/neovim/">Neovim</a> — msgpack-RPC as the one seam for
 UIs, embedders, plugin hosts, and even the built-in terminal UI
 (a child process speaking the same protocol), with additive-only
-versioning making it safe for a decade of clients.</p>
+versioning making it safe for a decade of clients;
+<a href="../dive/llvm/">LLVM</a> — passes as the plugin unit: one C symbol
+(<code>llvmGetPassPluginInfo</code>) registers pipeline-parsing callbacks into
+the PassBuilder, so out-of-tree optimizers (Enzyme&#39;s autodiff) hook
+the compiler without forking it — and the pass registry itself is the
+seam the <code>-passes</code> pipeline language plugs into.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -338,7 +343,13 @@ artifacts, not review diligence;
 declared once with FUNC_API attributes in <code>api/*.c</code>; generators
 emit the perfect-hash dispatch table, Lua bindings, runtime
 metadata, docs, and the twin server/client halves of the UI event
-protocol (<code>ui_events.in.h</code> → packers and handlers).</p>
+protocol (<code>ui_events.in.h</code> → packers and handlers);
+<a href="../dive/llvm/">LLVM</a> — the pass vocabulary is a macro table
+(<code>PassRegistry.def</code>) that generates the pipeline parser, and CPU
+targets are TableGen <code>.td</code> records expanded into generated selector
+tables (even <code>default&lt;O2&gt;</code> is a registry alias, not driver code — so
+the optimizer&#39;s configuration, its targets, and its extension
+surface are all data).</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>
@@ -395,6 +406,40 @@ learning. Costs: warmup latency (cold code runs the baseline),
 memory for feedback and multiple code versions, and deopt storms
 when shapes churn. Short-lived processes should stay at CPython&#39;s
 specialization tier or Lua&#39;s none at all.</p>
+<h2 id="15-the-intermediate-representation-is-the-architecture">15. The intermediate representation is the architecture</h2>
+<p><strong>Shape:</strong> instead of translating problem → solution in one step, the
+system freezes a serializable intermediate representation at the
+seam, checks it with a verifier, and makes every transformation a
+small, composable stage over it — so N producers and M consumers
+cost N+M, not N×M.</p>
+<p><strong>Seen in:</strong> <a href="../dive/llvm/">LLVM</a> — the pattern&#39;s cathedral: a
+pointer-graph IR with def-use chains, a Verifier enforcing the
+contract, passes scheduled by a parseable pipeline string, and the
+whole design cloned again into machine IR; <a href="../dive/sqlite/">SQLite</a>
+— every SQL statement compiles to a VDBE bytecode program before it
+runs, making the query plan inspectable and re-executable;
+<a href="../dive/cpython/">CPython</a> — bytecode as a poor man&#39;s IR: no
+SSA and a stack machine, yet the same bet (serialize the program,
+then transform it — the adaptive interpreter specializing hot opcodes
+in place is a mini-optimizer over it); <a href="../dive/pytorch/">PyTorch</a>
+— torch.compile captures the eager tape into a graph IR that
+TorchInductor lowers into Triton/C++ (kernels that bottom out in
+LLVM — the pattern composing with itself); <a href="../dive/llama-cpp/">llama.cpp</a>
+— ggml tensor graphs: models <em>are</em> dataflow IR that a generic backend
+executes, which is why 160 architectures are just files.</p>
+<p><strong>Why it recurs:</strong> the IR is where every concern meets — frontends,
+optimizers, backends, debuggers, serializers — so freezing it (with a
+verifier) turns each of those into an independently developed,
+independently testable program over shared data. V8&#39;s tiering
+(Ignition bytecode → Maglev → TurboFan) is the same insight inside a
+runtime: each tier is one more lowering over an IR.</p>
+<p><strong>Reach for it when:</strong> more than one producer or more than one
+consumer of the program/work exists, or will. The price is paying for
+the IR itself — a data structure that must stay honest under mutation
+(LLVM&#39;s Use lists, its Verifier, and its serialize-then-parallelize
+concurrency boundary are the invoice) — and losing whatever your
+source language knew that the IR doesn&#39;t (LLVM&#39;s intrinsics list is
+that loss, itemized).</p>
 <hr>
 <h2 id="how-to-use-this-index-while-learning">How to use this index while learning</h2>
 <ol>

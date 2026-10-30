@@ -426,6 +426,35 @@ projects:
       compiler-runtime contract: the keyword is the API, four
       subsystems are the implementation.
 
+  # ── compilers ──────────────────────────────────────────────────────
+
+  - id: llvm
+    name: LLVM
+    repo: https://github.com/llvm/llvm-project
+    language: C++
+    license: Apache-2.0 WITH LLVM-exception
+    domains: [compiler]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The compiler infrastructure the industry breathes through — clang,
+      Rust, Swift, Julia, Zig, and the Triton kernels behind PyTorch's
+      torch.compile all lower onto it — and it won that ubiquity through
+      one architectural bet: freeze a single intermediate representation
+      (LLVM IR) good enough that N frontends and M backends meet in the
+      middle, turning N×M compilers into N+M. Teaches the IR as the
+      architectural seam: an in-memory pointer graph (Value/User/Use)
+      with incrementally maintained def-use chains and a Verifier as the
+      contract, a pass pipeline expressed as parseable data
+      (-passes=default<O2> is a registry alias, not driver code),
+      analyses cached and invalidated by explicit PreservedAnalyses
+      contracts, plugins loading through one C symbol, and the whole
+      architecture cloned one level down into machine IR (MIR) and
+      TableGen-described targets. The pairing dive for CPython (bytecode
+      as a poor man's IR), V8 (tiering as an IR pipeline), and PyTorch
+      (TorchInductor lowering into LLVM).
+
   # ── search engines ───────────────────────────────────────────────────
 
   - id: elasticsearch
