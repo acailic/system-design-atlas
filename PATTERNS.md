@@ -127,7 +127,10 @@ site-instance script thread implements the WHATWG event-loop
 processing model, so one page's hang cannot stall another site;
 [HAProxy](deep-dives/haproxy.md) — one poll loop per thread, but with
 the loop's own scheduler made explicit: budgeted tasklet run queues
-in ebtrees, weighted by class, policed by a CPU-time watchdog.
+in ebtrees, weighted by class, policed by a CPU-time watchdog;
+[Go runtime](deep-dives/go.md) — the readiness demultiplexer hidden
+*under* a thread scheduler: epoll parks and readies whole goroutines,
+so the loop exists but user code never sees a callback.
 
 **Why it recurs:** I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.
@@ -155,7 +158,11 @@ allocation-debt-paced steps (`luaC_step`) so a guest language never
 pauses its host's frame budget; [linux](deep-dives/linux.md) —
 kswapd reclaims memory in budgeted background passes so allocation
 never stalls on a full scan, and readahead turns one small read into
-a window of prefetched I/O so the next reads hit the page cache.
+a window of prefetched I/O so the next reads hit the page cache;
+[Go runtime](deep-dives/go.md) — the whole GC is this rule at war with
+an allocation rate: concurrent mark on a 25% CPU budget, allocation
+billed as scanning debt (`gcAssistAlloc`), and Green Tea batching
+spans to keep each unit of mark work cache-local.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.

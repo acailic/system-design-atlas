@@ -402,6 +402,30 @@ projects:
       architecture (feedback vectors, deopt points) when raw speed is the
       product.
 
+  - id: go
+    name: Go runtime
+    repo: https://github.com/golang/go
+    language: Go, Assembly
+    license: BSD-3-Clause
+    domains: [runtime, language]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      The canonical M:N green-thread runtime: goroutines are 2 KiB
+      resumable stacks (escape analysis + copy-on-grow stacks make that
+      safe), scheduled onto a handful of OS threads by per-P run queues
+      and work stealing, with "blocking" I/O parked in an integrated
+      epoll netpoller and a concurrent tri-color GC paid for by a
+      compiler-emitted hybrid write barrier. That stack of co-designed
+      decisions is why `go func()` turned blocking-style servers into
+      cloud-native infrastructure's default shape — Docker, Kubernetes,
+      and Terraform all ride it — and why every major platform since
+      (Java Loom virtual threads, Kotlin coroutines, Swift
+      concurrency) copied the model. Teaches cheapness as a
+      compiler-runtime contract: the keyword is the API, four
+      subsystems are the implementation.
+
   # ── search engines ───────────────────────────────────────────────────
 
   - id: elasticsearch

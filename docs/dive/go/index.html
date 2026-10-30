@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go runtime: two letters that hide a tiny operating system — System Design Atlas</title>
+<meta name="description" content="The Go runtime is a scheduler, a memory allocator, a garbage collector, and a network poller living underneath a two-letter keyword — and its design thesis is cheapness as a compiler–runtime">
+<meta property="og:title" content="Go runtime: two letters that hide a tiny operating system — System Design Atlas">
+<meta property="og:description" content="The Go runtime is a scheduler, a memory allocator, a garbage collector, and a network poller living underneath a two-letter keyword — and its design thesis is cheapness as a compiler–runtime">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/go/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/go/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-http-request-socket-to-scheduler-to-gc-and-back">Walkthrough: one HTTP request, socket to scheduler to GC and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>Go runtime: two letters that hide a tiny operating system</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/golang/go" rel="noopener">BSD-3-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>2aae1000ea1d4b28923b96db28acf4e3b99d6aff</code> · 2026-10-19, go1.27.3 · <a href="https://github.com/golang/go" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">The Go runtime is a scheduler, a memory allocator, a garbage collector,
+and a network poller living underneath a two-letter keyword — and its
+design thesis is <strong>cheapness as a compiler–runtime contract</strong>: a
+goroutine costs ~2 KiB because stacks start small and grow by copying
+(<code>copystack</code>), the scheduler multiplexes millions of them onto a handful
+of OS threads with per-P shards and work stealing (<code>findRunnable</code>),
+&quot;blocking&quot; reads actually park in an integrated epoll loop (<code>netpoll</code>),
+heap allocation stays rare because compile-time escape analysis keeps
+values on those growable stacks (<code>cmd/compile/internal/escape</code>), and
+the concurrent garbage collector runs <em>while your handler executes</em> —
+paid for by a write barrier the compiler emits into every pointer store
+(<code>gcWriteBarrier</code>). This deep-dive walks one <code>net/http</code> request through
+all of it: goroutine birth, socket park and steal-wake, the escape
+verdict, and a GC cycle whose mark phase your own handler&#39;s stores
+feed.</p>
+<p>Read it against <a href="../libuv/">libuv</a> and <a href="../nodejs/">Node.js</a> — the
+single-threaded event loop is the <em>other</em> famous answer to &quot;many
+concurrent I/O flows&quot;: libuv demultiplexes readiness and calls you
+back; Go parks the whole goroutine in the runtime and keeps your code
+looking sequential. And read it below the <a href="../linux/">Linux kernel</a>
+dive: the runtime is a user-space tenant of the very scheduler
+machinery that dive walks (EEVDF virtual time, vruntime, wait queues),
+and it deliberately re-implements a dumber one — run queues plus
+stealing, no fairness policy — because it owns its &quot;processes&quot; down to
+the stack pointer. Go&#39;s cloud-infrastructure ubiquity (Docker,
+Kubernetes, Terraform, etcd — all in this catalog or its lineage) is
+the popularity dividend of exactly this bet: servers written in
+straight-line code that scale anyway.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A kitchen where the orders are sticky notes.</strong> In most kitchens, one
+chef per customer, and hiring a chef is slow and expensive (an OS
+thread with a big fixed stack). Here, every order is written on a
+small sticky note (a goroutine with a 2 KB stack) and the kitchen has
+just a few chefs (OS threads, <code>m</code>s) working at numbered stations
+(procs, <code>p</code>s — one per CPU you allow). A chef takes the top note from
+his station&#39;s spike (the run queue, <code>runqget</code>); when a note needs the
+oven (&quot;read the socket&quot;), the chef pins it to the oven&#39;s board — no
+chef waits — and grabs the next note (the park: <code>gopark</code>, the oven
+board is the netpoller, an epoll set). When the oven dings, a bell
+rings for <em>some</em> idle chef, who unpins the note and spikes it at any
+station (<code>goready</code>). If a chef&#39;s spike is empty he walks to a random
+other station and takes half the pile from its <em>back</em> (work stealing,
+<code>stealWork</code>) — so notes keep moving without a head chef handing
+everything out. Sticky notes start small; if a recipe outgrows one,
+the chef copies it onto a bigger note mid-recipe, carefully re-drawing
+the arrows that pointed at it (stack copying, <code>copystack</code>, which is
+why you may keep pointers to your own locals). Meanwhile the cleaners
+(the garbage collector) mark everything still in use <em>while cooking
+continues</em>: whenever a chef hands an ingredient from one note to
+another shelf during cleaning week, he scribbles it on his pad first
+(the write barrier, <code>gcWriteBarrier</code>) so the cleaners never miss it;
+and if a chef cooks too long without yielding, the manager taps his
+shoulder with a signal stick (preemption: <code>sysmon</code> + SIGURG).</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> cheap concurrency is not one
+trick — the notes must start tiny (growable stacks), anyone must be
+able to pick one up (stealing), waiting must free the chef (the
+netpoller), and cleaning must not stop cooking (concurrent GC with a
+write barrier); all four are one contract, and the language&#39;s <code>go</code>
+keyword cashes it in.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    subgraph user[&quot;user code — your program&quot;]
+        HTTP[&quot;net/http server.go:3529 Serve&lt;br/&gt;one goroutine per connection (c.serve)&quot;]
+        CODE[&quot;your handler: allocates, stores pointers, calls go func()&quot;]
+    end
+
+    subgraph sched[&quot;scheduler — runtime/proc.go&quot;]
+        NEWP[&quot;newproc :5334 (the go keyword)&quot;]
+        SCH[&quot;schedule :4150 / findRunnable :3404&lt;br/&gt;local runq → global runq → netpoll(0) → steal&quot;]
+        STEAL[&quot;stealWork :3843 — 4 passes, random victim order&quot;]
+    end
+
+    subgraph gmp[&quot;G · M · P — runtime/runtime2.go&quot;]
+        G[&quot;g :471 — stack + gobuf + status (~2 KB start)&quot;]
+        M[&quot;m :616 — OS thread; g0 stack; curg&quot;]
+        P[&quot;p :774 — the shard: runq[256], runnext,&lt;br/&gt;mcache, wbBuf, gcw, timers&quot;]
+    end
+
+    subgraph poller[&quot;netpoller — runtime/netpoll.go + netpoll_epoll.go&quot;]
+        PD[&quot;pollDesc rg/wg semaphore words&lt;br/&gt;netpollblock :548 CAS park&quot;]
+        EPOLL[&quot;netpoll :113 — epoll_wait(128 events)&lt;br/&gt;netpollopen :64: one ET registration, both directions&quot;]
+    end
+
+    subgraph mem[&quot;memory — runtime/malloc.go, mheap.go&quot;]
+        ESC[&quot;escape analysis (compile time)&lt;br/&gt;cmd/compile/internal/escape&quot;]
+        MCACHE[&quot;mcache per P — size classes,&lt;br/&gt;mallocgc :1067 lock-free fast path&quot;]
+    end
+
+    subgraph gc[&quot;GC — runtime/mgc*.go&quot;]
+        START[&quot;gcStart :733 — 2 brief STWs, concurrent mark&quot;]
+        WB[&quot;gcWriteBarrier asm_amd64.s:1306&lt;br/&gt;+ wbBuf buffer (mwbbuf.go)&quot;]
+        GT[&quot;Green Tea mark (1.27 default)&lt;br/&gt;span queues, dual mark/scan bits&quot;]
+        ASSIST[&quot;gcAssistAlloc :499 — allocators pay off GC debt&quot;]
+    end
+
+    subgraph under[&quot;underneath (not this codebase)&quot;]
+        KERNEL[&quot;Linux kernel scheduler — EEVDF, per-CPU runqueues&lt;br/&gt;(the Linux dive walks this)&quot;]
+    end
+
+    HTTP --&gt; CODE --&gt; NEWP
+    CODE --&gt;|pointer store during mark| WB
+    CODE --&gt;|new object| ESC --&gt; MCACHE
+    CODE --&gt;|socket read| PD --&gt; EPOLL
+    EPOLL --&gt;|netpollready| SCH
+    NEWP --&gt; P
+    SCH --&gt; STEAL --&gt; M
+    G -. multiplexed onto .-&gt; M -. needs a .-&gt; P
+    MCACHE --&gt; START --&gt; GT
+    WB --&gt; GT
+    START --&gt; ASSIST
+    M --&gt; KERNEL
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Three letters, three owners.</strong> A <code>g</code> (runtime2.go:471) is a
+goroutine: a stack, a saved context (<code>sched gobuf</code>), a status word.
+An <code>m</code> (runtime2.go:616) is an OS thread with two stacks of its own
+(<code>g0</code> for runtime code, <code>gsignal</code>). A <code>p</code> (runtime2.go:774) is a
+<em>license to execute Go code</em> on an m — GOMAXPROCS of them exist —
+and owns everything hot: the local run queue (<code>runq [256]</code>,
+<code>runnext</code>), the <code>mcache</code> allocator shard, the write-barrier buffer,
+GC work queues, the timer heap. The M:N mapping is: many Gs, a few
+Ms, and Ps as the shards that keep the common path lock-free.</li>
+<li><strong>The spine:</strong> one HTTP request from <code>Serve</code>&#39;s accept loop
+(<code>go c.serve(connCtx)</code>, server.go:3604) through goroutine birth
+(<code>newproc</code>), a blocking-style socket read that parks in the
+netpoller (<code>netpollblock</code> → <code>gopark</code>), the steal-driven wake, and a
+GC cycle interleaved with the handler&#39;s own allocations and pointer
+stores. Section 6 orders the whole walk.</li>
+<li><strong>The runtime is the whole platform&#39;s stdlib basement:</strong> <code>net</code>,
+<code>os</code>, and <code>time</code> are thin wrappers whose blocking entry points
+(like <code>internal/poll.(*FD).Read</code>, fd_unix.go:141) drop into runtime
+functions through <code>//go:linkname</code> — the seam between stdlib and
+runtime is private-API-shaped by design.</li>
+<li><strong>What it does NOT do:</strong> no fair-share scheduling policy (no
+priorities, no virtual-time fairness like the kernel&#39;s EEVDF — a
+spin-friendly loop relies on 10 ms retake preemption), no GC
+compaction or generations, and no supervision/restart of crashed
+goroutines — an unrecovered panic takes the process down.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-http-request-socket-to-scheduler-to-gc-and-back">Walkthrough: one HTTP request, socket to scheduler to GC and back</h2>
+<p class="walkthrough-intro">On the site you can step through this; in the repo it reads top to
+bottom. The same trip, drawn:</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as Serve goroutine (M1)
+    participant CG as conn.serve goroutine
+    participant S as some M2: schedule/findRunnable
+    participant N as netpoller (epoll_wait)
+    participant GC as GC mark cycle
+
+    C-&gt;&gt;A: TCP connect
+    A-&gt;&gt;A: go c.serve (newproc → runqput runnext, wakep)
+    A-&gt;&gt;CG: CG runs on some M
+    CG-&gt;&gt;N: readRequest → read() = EAGAIN&lt;br/&gt;netpollblock → gopark (CG parked)
+    S-&gt;&gt;N: findRunnable: netpoll(0) empty → epoll_wait (block)
+    C-&gt;&gt;CG: request bytes arrive
+    N--&gt;&gt;S: EPOLLIN → netpollready → goready → runqput
+    S-&gt;&gt;CG: CG runs, handler allocates (mallocgc, escape verdicts fixed at compile time)
+    CG-&gt;&gt;GC: heap goal crossed at a mallocgc → gcStart
+    GC-&gt;&gt;GC: brief STW (sweep term) → concurrent mark (25% workers)
+    CG-&gt;&gt;GC: handler stores pointer: gcWriteBarrier → wbBuf → span queue (Green Tea)
+    GC-&gt;&gt;GC: gcMarkDone → brief STW (mark term) → concurrent sweep
+    CG-&gt;&gt;C: response written, finishRequest, loop for next request
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="accept-then-a-two-letter-spawn">Accept, then a two-letter spawn</h3>
+<p><code>(*Server).Serve</code>
+(server.go:3529) loops on <code>l.Accept()</code> and, per connection, calls
+<code>go c.serve(connCtx)</code> (server.go:3604) — the entire concurrency
+decision of Go&#39;s HTTP stack is this one line. The <code>go</code> statement
+compiles to a call to <code>runtime.newproc</code> (proc.go:5334), which wraps
+the function closure in a recycled <code>g</code> (<code>gfget</code>, proc.go:5558 —
+goroutine structs are pooled), sets up its ~2 KB stack, and puts it
+on the current P&#39;s <code>runnext</code> slot (<code>runqput</code>, proc.go:7529) — the
+&quot;wake me next&quot; fast path for parent→child handoff — then calls
+<code>wakep</code> (proc.go:3227) so an idle thread can pick it up immediately.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-handler-allocates-and-most-of-it-never-touches-the-heap">The handler allocates, and most of it never touches the
+heap</h3>
+<p>When <code>conn.serve</code> (server.go:1949) parses the request
+(<code>readRequest</code>, server.go:1032) and dispatches to your handler
+(<code>serverHandler.ServeHTTP</code>, server.go:2157), every <code>&amp;User{...}</code> you
+build got its allocation verdict at <em>compile time</em>: escape analysis
+(<code>cmd/compile/internal/escape</code>, <code>escape.Funcs</code>, escape.go:125) keeps
+a value on the goroutine&#39;s stack unless its address could outlive the
+frame. Values that stay on the stack are free — freed by simply
+returning, invisible to the GC, and safe because the frame can grow
+(<code>newstack</code>, stack.go:1055, copies the stack and adjusts pointers to
+locals). Values that escape pay <code>mallocgc</code> (malloc.go:1067): a
+lock-free bump from the P&#39;s <code>mcache</code> span for their size class, tiny
+sizes coalesced (<code>mallocgcTiny</code>, malloc.go:1208).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="a-blocking-read-is-a-park">A &quot;blocking&quot; read is a park</h3>
+<p>Your handler reads the
+body; <code>internal/poll.(*FD).Read</code> (fd_unix.go:141) tries <code>read(2)</code>,
+gets <code>EAGAIN</code>, and calls <code>waitRead</code> (fd_unix.go:170) —
+<code>poll_runtime_poll_wait</code> → <code>runtime.poll_runtime_pollWait</code>
+(netpoll.go:342) → <code>netpollblock</code> (netpoll.go:548): a CAS loop on the
+<code>pollDesc</code>&#39;s <code>rg</code> word (<code>pdNil → pdWait</code>, consuming <code>pdReady</code> if the
+event already fired) and then <code>gopark</code> (proc.go:457), which stores
+the wait reason, switches to the scheduler on the g0 stack
+(<code>mcall(park_m)</code>), and marks the G <code>_Gwaiting</code>. The OS thread never
+blocked on the socket; the <em>goroutine</em> did. Contrast the <a href="../libuv/">libuv</a>
+loop, where this same moment would end your callback and return
+control to the loop — in Go your callback simply pauses, stack and
+all.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-freed-thread-goes-hunting">The freed thread goes hunting</h3>
+<p>With the conn goroutine
+parked, its M re-enters <code>schedule</code> (proc.go:4150) →
+<code>findRunnable</code> (proc.go:3404), the broker loop: local run queue
+(<code>runqget</code>), then global queue (half of it, <code>globrunqgetbatch</code>),
+then a non-blocking <code>netpoll(0)</code> probe, then work stealing
+(<code>stealWork</code>, proc.go:3843: four passes over Ps in random order,
+stealing half a victim&#39;s queue, timers and <code>runnext</code> only on the
+last pass), then idle GC marking, then timers — and only then parks
+the thread in <code>stopm</code> (proc.go:3007). The spinning-thread budget
+(<code>2*nmspinning &lt; busy Ps</code>, and the design comment at the top of
+proc.go) is the anti-thrash governor on this hunt.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="the-oven-dings-the-note-finds-a-chef">The oven dings; the note finds a chef</h3>
+<p>The client&#39;s
+bytes arrive; some thread blocked in <code>netpoll</code>
+(netpoll_epoll.go:113, <code>epoll_wait</code> over a 128-event batch — every
+socket was registered once, edge-triggered, for both directions, by
+<code>netpollopen</code>, netpoll_epoll.go:64) sees <code>EPOLLIN</code>:
+<code>netpollready</code> (netpoll.go:494) CASes the <code>pollDesc</code> word to
+<code>pdReady</code> and hands the parked G to <code>goready</code> (proc.go:493) →
+<code>ready</code> (proc.go:1133), which marks it runnable, queues it on some
+P&#39;s run queue, and wakes a thread if needed. Your handler resumes
+with the request bytes exactly where <code>readRequest</code> left off — the
+park/wake pair is invisible to it, which is the entire product.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="meanwhile-a-gc-cycle-starts-under-the-handler">Meanwhile, a GC cycle starts under the handler</h3>
+<p>Heap
+allocations accumulate; one <code>mallocgc</code> crosses the pacer&#39;s heap goal
+(the check is in the allocation path itself, malloc.go:1340–1341,
+<code>gcTrigger{kind: gcTriggerHeap}</code>) and <code>gcStart</code> (mgc.go:733) runs:
+a brief stop-the-world for sweep termination (mgc.go:835), then
+concurrent mark. Marking runs on dedicated background workers
+(<code>gcBgMarkWorker</code>, mgc.go:1766, dispatched by
+<code>gcController.findRunnableGCWorker</code>, mgcpacer.go:859 — 25% of GOMAXPROCS
+dedicated, plus fractional workers to hit the exact CPU goal) <em>and</em>
+on allocating goroutines themselves: <code>gcAssistAlloc</code> (mgcmark.go:499)
+makes each allocation scan its fair share first — GC backpressure
+proportional to allocation rate. Your handler&#39;s <code>node.Next = &amp;Node{}</code>
+during mark does not go straight to memory: the compiler-inserted
+<code>gcWriteBarrier</code> (asm_amd64.s:1306) appends the old and new pointers
+to the P&#39;s write-barrier buffer (<code>wbBuf</code>, mwbbuf.go:42) in ~20
+instructions, flushing to the GC&#39;s grey work when full. In go1.27 the
+grey work is Green Tea — <em>spans</em>, not objects, are queued
+(FIFO span queues; dual mark/scan bitmaps in each span), so scanning
+visits memory in size-class-sized, cache- and prefetch-friendly
+batches (mgcmark_greenteagc.go header).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="termination-sweep-and-the-loop-continues">Termination, sweep, and the loop continues</h3>
+<p>When the
+grey set drains, <code>gcMarkDone</code> (mgc.go:997) does the second brief
+stop-the-world (mgc.go:1066), scans what little remains, flips to
+sweep (<code>sweepone</code>, mgcsweep.go:359, concurrent with your handler),
+and the pacer (<code>mgcpacer.go</code>) sets the next heap goal from GOGC /
+GOMEMLIMIT. Your handler writes the response and returns;
+<code>finishRequest</code> flushes; <code>conn.serve</code> loops to read the <em>next</em>
+request on the same goroutine — or, when the connection closes, the
+G exits through <code>goexit</code> and its struct returns to the <code>gfput</code> pool.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="one-request-four-subsystems-zero-application-locks">One request, four subsystems, zero application locks</h3>
+<p>The request was served by a goroutine that was created, parked,
+stolen or woken, scheduled, and garbage-collected around — all from
+<code>go</code> + blocking-looking code, with the only visible costs being a
+couple of 2 KiB stacks, some mcache bumps, and a pointer-append in a
+write barrier.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="g-the-goroutine-as-stack-saved-context-runtime2-go-471">g — the goroutine as (stack + saved context) (runtime2.go:471)</h3>
+<p>A <code>g</code> is remarkably small: <code>stack</code> bounds, a <code>sched</code> gobuf (SP, PC,
+a few registers — everything <code>gogo</code> must restore), an atomic status
+word, and pointers for its role relationships (<code>m.curg</code>, sudogs for
+channel/netpoll waits). That is the whole trick: a goroutine is
+<em>just</em> a resumable stack, so creating one is a pooled-struct
+allocation plus a 2 KiB stack (<code>stackMin</code>, stack.go:78), not an
+8 MiB mmap + kernel task. Status transitions (<code>_Grunnable</code>,
+<code>_Grunning</code>, <code>_Gwaiting</code>, <code>_Gsyscall</code>…) are the runtime&#39;s entire
+state machine; every subsystem in this dive is machinery for moving
+Gs between those states honestly.</p>
+<h3 id="p-the-shard-that-makes-the-hot-path-lock-free-runtime2-go-774">p — the shard that makes the hot path lock-free (runtime2.go:774)</h3>
+<p>The <code>p</code> is the design decision that carries the scheduler: GOMAXPROCS
+processors, each owning <code>runq [256]guintptr</code> plus the <code>runnext</code> slot
+(a single-word CAS fast path for &quot;run this freshly readied G next&quot;,
+runtime2.go:820 — see <code>runqput</code>, proc.go:7529), the <code>mcache</code>
+allocation shard, the <code>wbBuf</code> write-barrier buffer, the GC work
+queues, and the timer heap. Producer and consumer of the local run
+queue are the same P in the common case, so the queue is a
+single-producer/single-consumer ring with acquire/release ordering —
+no locks on scheduling, allocating, or barrier-recording until work
+must move <em>between</em> Ps, and only then does stealing or the global
+queue appear. It is per-CPU sharding (cf. the kernel&#39;s per-CPU
+runqueues in the <a href="../linux/">Linux</a> dive) expressed as an
+object.</p>
+<h3 id="polldesc-rg-wg-the-waiter-is-the-goroutine-runtime-netpoll-go">pollDesc rg/wg — the waiter <em>is</em> the goroutine (runtime/netpoll.go)</h3>
+<p>Each polled fd has two atomic words, <code>rg</code>/<code>wg</code>, cycling through
+<code>pdNil/pdWait/pdReady</code> (and holding a <code>*g</code> pointer while parked).
+<code>netpollblock</code> (netpoll.go:548) CASes <code>pdNil → pdWait</code>, parks the G
+with <code>gopark</code>, and stores the G in the word; the waker
+(<code>netpollunblock</code>, netpoll.go:591) CASes the G out and returns it to
+<code>goready</code>. Note what is absent: no wait-queue objects, no lock
+protecting &quot;who is waiting&quot; — the wait is a state of the semaphore
+word itself, and the goroutine (which cannot be freed while parked)
+is its own wait node. Sockets register with epoll once,
+edge-triggered for both directions (<code>netpollopen</code>,
+netpoll_epoll.go:64 — unlike <a href="../libuv/">libuv</a>, whose watcher masks
+are re-armed per poll); readiness is remembered in <code>rg</code>/<code>wg</code>, so the
+edge trigger is only ever a nudge.</p>
+<h3 id="size-class-spans-mcache-allocation-without-a-lock-malloc-go-mheap-go">Size-class spans + mcache — allocation without a lock (malloc.go, mheap.go)</h3>
+<p>The heap is cut into <code>mspan</code>s, each serving one of ~68 size classes;
+each P&#39;s <code>mcache</code> holds a free slot per class, so <code>mallocgc</code>
+(malloc.go:1067) is: size class → mcache span → bump pointer, with
+the tiny allocator batching sub-16-byte objects into shared slots
+(<code>mallocgcTiny</code>, malloc.go:1208). Only when a span runs dry does it
+refill from the central <code>mcentral</code>/<code>mheap</code> under a lock — the
+classic sharded-allocator shape, and also the anti-fragmentation
+answer to Go&#39;s non-compacting GC: free lists live <em>inside</em> each span
+by size class, so fragmentation cannot mix sizes within a span. The
+GC trigger check rides the same path (<code>gcTrigger{kind: gcTriggerHeap}</code>
+at malloc.go:1341), which is why &quot;allocation <em>is</em> the GC clock.&quot;</p>
+<h3 id="dual-mark-scan-bits-fifo-span-queues-the-green-tea-grey-set-mgcmark-greenteagc-go">Dual mark/scan bits + FIFO span queues — the Green Tea grey set (mgcmark_greenteagc.go)</h3>
+<p>The classic grey set was a stack of object pointers (<code>gcDrain</code>,
+LIFO); in go1.27 (baseline-on, <code>internal/buildcfg/exp.go:86</code>) the
+unit of grey work became the <em>span</em>: first pointer to an object sets
+its mark bit and queues the span (FIFO,
+<code>spanQueue.put</code>, mgcmark_greenteagc.go:377); later, the span&#39;s
+pending marks are diffed against its scan bits
+(<code>scanObject</code>, mgcmark_greenteagc.go:1187) and the newly-marked
+objects — adjacent in the span, same size class — are scanned as a
+batch, with generated SIMD scanners in <code>internal/runtime/gc/scan</code>.
+Deliberately trading immediacy (delaying scans to accumulate) for
+locality: the same trade LevelDB&#39;s LSM makes with writes, made by a
+GC with its heap.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>What runs concurrently:</strong> any number of Gs; at most GOMAXPROCS at
+a time own a P and execute Go code; Ms beyond that exist only for
+blocked-in-syscall or cgo work (<code>entersyscall</code> detaches the P so
+the scheduler keeps running). GOMAXPROCS itself is now
+container-aware by default (cgroup CPU quota, proc.go:939–947) —
+a rare case of the runtime reading the <em>host&#39;s</em> scheduling intent.</li>
+<li><strong>Preemption is layered:</strong> cooperative checks at function
+prologues and channel operations; <code>sysmon</code>&#39;s <code>retake</code>
+(proc.go:6681) force-preempts any G running past
+<code>forcePreemptNS = 10 ms</code> (proc.go:6679) by sending SIGURG
+(<code>sigPreempt</code>, signal_unix.go:74; handler <code>asyncPreempt</code>,
+preempt.go:305) — a signal-based interrupt to a thread executing
+arbitrary compiled code, safe because the signal handler lands on
+the m&#39;s gsignal stack and folds the CPU state into a goroutine
+switch. <code>suspendG</code> (preempt.go:106) is the stop-the-world
+machinery&#39;s per-G handshake built on the same signals.</li>
+<li><strong>The memory model is a promise the scheduler keeps:</strong> happens-before
+edges come from channels (a send parks/readies via the same
+<code>gopark</code>/<code>ready</code> pair you saw on sockets), mutexes, and atomics;
+the runtime&#39;s stores during mark are ordered by the write barrier.
+The <a href="https://go.dev/ref/mem">Go memory model</a> is the user-facing
+contract of exactly these mechanics.</li>
+<li><strong>Failure is loud, per-goroutine, then fatal:</strong> <code>panic</code> unwinds
+only the panicking goroutine (its own stack, its own defers);
+an unrecovered panic kills the whole process — there is no
+supervision or restart built in (contrast pattern 4&#39;s supervisor
+workers in <a href="../../patterns/">PATTERNS.md</a>: Go pushes that
+responsibility to the process layer — let it crash, let systemd
+restart). Out-of-memory is likewise a hard crash after GC cycles
+fail to reclaim under the GOMEMLIMIT-enforced goal.</li>
+<li><strong>Overload behavior:</strong> the GC <em>is</em> the backpressure — allocate
+faster than mark drains and <code>gcAssistAlloc</code> bills your allocations
+scanning time, slowing exactly the goroutines causing the pain;
+the CPU limiter (<code>gcCPULimiter</code>, mgcpacer.go) caps total GC CPU so
+the pacer would rather fall behind than steal the machine.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is a language, not a library:</strong> <code>go</code>,
+<code>select</code>, channels are the concurrency API; the <code>runtime</code> package
+exposes the knobs (<code>GOMAXPROCS</code>, <code>Gosched</code>, <code>GC</code>, <code>SetFinalizer</code>,
+<code>LockOSThread</code>), and <code>GODEBUG</code>/<code>GOMEMLIMIT</code>/<code>GOEXPERIMENT</code>
+environment variables are the operational interface — the runtime
+is one of the few systems whose config surface is mostly <em>env
+vars</em>, versioned by the compatibility promise (godebug defaults
+flip per release).</li>
+<li><strong>The seams are deliberately non-public.</strong> stdlib ↔ runtime runs on
+<code>//go:linkname</code> private symbol injection (<code>poll_runtime_pollWait</code>
+at netpoll.go:342 is reached that way from <code>internal/poll</code>); the
+runtime comment above <code>goready</code> (proc.go:472–478) keeps a &quot;hall of
+shame&quot; list of outside packages linknaming into it — a seam used
+<em>against</em> its designers (gvisor et al.), tolerated under issue
+67401&#39;s freeze rules. cgo is the sanctioned foreign-code seam, at
+the price of leaving the scheduler&#39;s control for the call&#39;s
+duration.</li>
+<li><strong>Pluggability is compile-time, not runtime:</strong> GOEXPERIMENT flags
+ship alternative implementations in-tree (the Green Tea mark lives
+beside the classic one, <code>mgcmark_greenteagc.go</code> /
+<code>mgcmark_nogreenteagc.go</code>, selected at toolchain build time) —
+the runtime&#39;s answer to the kernel&#39;s <code>sched_class</code> vtables is &quot;no
+plugin policies at all; ship experiments and pick a winner.&quot;</li>
+<li><strong>Honest warts:</strong> scheduler behavior is invisible to OS tooling
+(a &quot;thread&quot; running 10,000 goroutines confuses <code>top</code> and priority
+knobs); <code>LockOSThread</code> exists precisely because the M:N mapping
+leaks (GUI threads, C libraries that assume thread identity); and
+the GC&#39;s non-compacting choice means heap layout churns — external
+fragmentation and page-fault behavior are why the
+<code>arena</code>/off-heap escape hatch (<code>runtime/arena.go</code>) exists at all.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-m-n-work-stealing-goroutines-over-1-1-threads-or-an-event-loop">Trade-off 1: M:N work-stealing goroutines over 1:1 threads or an event loop</h3>
+<ul>
+<li><strong>Tension:</strong> servers want 100k+ concurrent flows; OS threads cost
+an 8 MiB default stack and a µs-scale context switch, while event
+loops (<a href="../libuv/">libuv</a>, <a href="../nodejs/">Node.js</a>) buy scalability by
+forcing continuation-passing style onto every I/O-bound program.</li>
+<li><strong>Choice:</strong> goroutines — 2 KiB resumable stacks multiplexed by the
+runtime onto GOMAXPROCS-worth of threads, with per-P run queues,
+stealing, and an integrated netpoller so that <em>blocking-style</em>
+code parks cheaply.</li>
+<li><strong>Evidence:</strong> <code>newproc</code> → <code>runqput(next)</code> + <code>wakep</code>
+(proc.go:5334–5342) — spawn is queue bookkeeping; <code>findRunnable</code>
+(proc.go:3404) with <code>stealWork</code>&#39;s four random-order passes
+(proc.go:3843) — load balancing with no central queue; the park
+handshake <code>netpollblock</code> (netpoll.go:548) → <code>gopark</code> (proc.go:457)
+vs. <code>netpoll</code> (netpoll_epoll.go:113) → <code>goready</code> — an epoll loop
+the programmer never sees; <code>copystack</code> (stack.go:929) making the
+2 KiB start safe.</li>
+<li><strong>Given up:</strong> OS-level fairness and isolation — no per-goroutine
+CPU shares or priorities (the kernel&#39;s EEVDF gives every task
+provable lag bounds; Go&#39;s runq+steal gives statistical balance
+only, policed by the 10 ms <code>retake</code>); every G is hostage to one
+address space and one GC; cgo and locked threads punch holes in
+the multiplexing; and scheduler-internal queues are opaque to ops.</li>
+<li><strong>Verdict:</strong> right when concurrency is data-shape-shaped — many
+mostly-waiting flows per core, which is nearly every server (and
+is why Docker, Kubernetes, and most of the cloud-native stack are
+written in Go). Wrong when you need per-task scheduling <em>policy</em>,
+hard isolation between tasks, or a handful of CPU-bound pipelines
+— use processes/threads and let the kernel scheduler (the
+<a href="../linux/">Linux</a> dive) do its job.</li>
+</ul>
+<h3 id="trade-off-2-concurrent-tri-color-mark-with-a-hybrid-write-barrier-over-stop-the-world-or-refcounting">Trade-off 2: concurrent tri-color mark with a hybrid write barrier over stop-the-world or refcounting</h3>
+<ul>
+<li><p><strong>Tension:</strong> whole-heap collection pauses (original Go GC, 2014)
+are unacceptable at web-service tail latencies; reference
+counting can&#39;t free cycles and taxes <em>every</em> store always.</p>
+</li>
+<li><p><strong>Choice:</strong> mark while the mutators run, keep it correct with a
+hybrid Yuasa-deletion + Dijkstra-insertion barrier on pointer
+stores, two brief STW bookends per cycle, a CPU-budgeted pacer,
+and allocation assists as the throttle.</p>
+</li>
+<li><p><strong>Evidence:</strong> the barrier and its proof sketch are the header of
+<code>runtime/mbarrier.go</code> —</p>
+<pre><code class="language-go">//     writePointer(slot, ptr):
+//         shade(*slot)
+//         if current stack is grey:
+//             shade(ptr)
+//         *slot = ptr
+</code></pre>
+<p>(© The Go Authors, BSD-3-Clause) — compiled into every pointer
+store as the buffered <code>gcWriteBarrier</code> (asm_amd64.s:1306: two
+pointer appends to <code>p.wbBuf</code>, flushing to <code>wbBufFlush</code> only when
+full — a handful of instructions on the fast path); the STW bookends at mgc.go:835 and :1066; the CPU budget in
+<code>findRunnableGCWorker</code> (mgcpacer.go:859) and <code>gcCPULimiter</code>; the
+throttle in <code>gcAssistAlloc</code> (mgcmark.go:499) reached from the
+allocation path itself (malloc.go:1340). The barrier is what let
+Go stop re-scanning stacks mid-cycle (the 17503
+&quot;eliminate-rescan&quot; proposal referenced in mbarrier.go).</p>
+</li>
+<li><p><strong>Given up:</strong> compaction and generational collection — the heap
+stays where allocation put it (fragmentation handled by size
+classes; relocation would break the pointer-into-goroutine-stack
+assumptions elsewhere); some mutator throughput during mark (the
+barrier + assists are a tax of roughly a few percent, felt most by
+pointer-heavy workloads); and <em>p99 sensitivity</em>: the GC runs
+concurrent, but assists convert allocation spikes into latency.</p>
+</li>
+<li><p><strong>Verdict:</strong> right for high-allocation-rate services that need
+sub-millisecond pauses without giving up <code>malloc</code>-style ergonomics
+— Go&#39;s whole server ecosystem is the proof. Wrong for
+deterministic-latency or footprint-minimal systems (arenas,
+free-lists, or ARC/RC designs — the <a href="../redis/">Redis</a> and
+<a href="../cpython/">CPython</a> choices — buy predictability with
+programmer discipline).</p>
+</li>
+</ul>
+<h3 id="trade-off-3-compiler-runtime-co-design-escape-analysis-growable-stacks-over-fixed-stacks-or-an-all-heap-model">Trade-off 3: compiler–runtime co-design (escape analysis + growable stacks) over fixed stacks or an all-heap model</h3>
+<ul>
+<li><strong>Tension:</strong> 2 KiB stacks only work if deep or surprising frames
+can grow — but movable stacks break every raw pointer into a
+frame; and &quot;everything on the heap&quot; (early JVM-style, or naive
+safe languages) forfeits the cache locality and zero cost that
+make stack allocation the default in C.</li>
+<li><strong>Choice:</strong> contiguous stacks that start at <code>stackMin</code> 2048 bytes
+(stack.go:78) and grow/shrink by copying with pointer adjustment;
+a compile-time dataflow pass deciding stack vs. heap for every
+value; and the two decisions wired together — escape analysis
+exists <em>because</em> stacks are real and movable, and stack scanning
+(cheap, at safepoints) is what makes non-escaping allocation free.</li>
+<li><strong>Evidence:</strong> <code>newstack</code> (stack.go:1055) reached from the
+<code>morestack</code> prologue check (asm_amd64.s:597) → <code>copystack</code>
+(stack.go:929) with its <code>adjustinfo.delta</code> walk that rewrites
+pointers <em>into the frame itself</em>, including sudogs on channels;
+escape analysis&#39;s two invariants and location-graph algorithm are
+the header of <code>cmd/compile/internal/escape/escape.go</code>, entered via
+<code>Funcs</code> (escape.go:125) — observable by any reader with
+<code>go build -gcflags=-m</code>.</li>
+<li><strong>Given up:</strong> assembly and cgo frames cannot grow (g0 stacks are
+fixed and generous instead); deep-recursion workloads pay repeated
+stack copies; interior-pointer tricks in runtime/asm must respect
+the adjustment protocol; and the compiler is forever coupled to
+runtime internals (no independent implementations of either).</li>
+<li><strong>Verdict:</strong> right when the unit of work is small and numerous —
+millions of 2 KiB stacks fit where thousands of 8 MiB threads
+don&#39;t, and escape analysis keeps the steady-state allocation rate
+(the GC&#39;s clock) low. Wrong for systems that can bound stack depth
+by construction — fixed stacks are then simpler and copy-free.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<p>Work this in the clone (<code>git clone --depth 1 -b go1.27.3 https://github.com/golang/go clones/go</code> — or from the canonical
+go.googlesource.com mirror; the SHA matches). Budget two sittings:
+scheduler (stops 1–6), then memory/GC (stops 7–12).</p>
+<ol>
+<li><code>src/runtime/runtime2.go:471</code> <code>type g struct</code>, <code>:616</code> <code>type m struct</code>, <code>:774</code> <code>type p struct</code> — read the field comments as the
+vocabulary of every later stop; find <code>runq [256]</code>, <code>runnext</code>,
+<code>mcache</code>, <code>wbBuf</code>, <code>gcw</code> on the p, and <code>curg</code>/<code>g0</code> on the m.</li>
+<li><code>src/runtime/proc.go</code> lines 30–110, the scheduler design comment
+(work-stealing rationale, spinning-thread budget, handoff rules) —
+the runtime&#39;s own design doc; then <code>:5334</code> <code>newproc</code> →
+<code>:7529</code> <code>runqput</code> (watch the <code>runnext</code> CAS) and <code>:3227</code> <code>wakep</code>.</li>
+<li><code>src/runtime/proc.go:4150</code> <code>schedule</code> → <code>:3404</code> <code>findRunnable</code> —
+read the <em>order</em> of sources (local → global → netpoll probe →
+steal → idle GC → timers → <code>stopm</code>:3007) and the spinning
+invariants; then <code>:3843</code> <code>stealWork</code> (random victim order,
+timers/<code>runnext</code> only on the final pass).</li>
+<li><code>src/net/http/server.go:3529</code> <code>(*Server).Serve</code> — the accept
+loop; <code>:3604</code> the <code>go c.serve(connCtx)</code> line; <code>:1949</code>
+<code>conn.serve</code>, <code>:1032</code> <code>readRequest</code>, <code>:2157</code> the
+<code>ServeHTTP</code> dispatch. The user-space half of the spine.</li>
+<li><code>src/internal/poll/fd_unix.go:141</code> <code>(*FD).Read</code> — the EAGAIN →
+<code>waitRead</code> (:170) handoff; <code>src/runtime/netpoll.go:342</code>
+<code>poll_runtime_pollWait</code> → <code>:548</code> <code>netpollblock</code> (the
+<code>pdNil/pdWait/pdReady</code> CAS dance) → <code>src/runtime/proc.go:457</code>
+<code>gopark</code> (<code>mcall(park_m)</code>). The park.</li>
+<li><code>src/runtime/netpoll_epoll.go:36</code> <code>netpollinit</code> (epoll + the
+break eventfd), <code>:64</code> <code>netpollopen</code> (one edge-triggered
+registration, both directions — compare libuv&#39;s per-poll mask
+updates), <code>:113</code> <code>netpoll</code> (the <code>epoll_wait</code> loop),
+<code>:81</code> <code>netpollBreak</code>; back in <code>netpoll.go:494</code> <code>netpollready</code> →
+<code>netpollunblock:591</code> → <code>proc.go:493</code> <code>goready</code> → <code>:1133</code>
+<code>ready</code>. The wake.</li>
+<li><code>src/runtime/stack.go:1055</code> <code>newstack</code> → <code>:929</code> <code>copystack</code> —
+read <code>adjustinfo</code> and <code>adjustpointers</code>; then the prologue side in
+<code>src/runtime/asm_amd64.s:597</code> <code>runtime·morestack</code>. The 2 KiB bet
+being paid.</li>
+<li><code>src/cmd/compile/internal/escape/escape.go</code> — the header comment
+(invariants, location graph, parameter tags), then <code>:125</code> <code>Funcs</code>.
+Compile the walkthrough&#39;s handler with
+<code>go build -gcflags=-m .</code> and watch the verdicts.</li>
+<li><code>src/runtime/malloc.go:1067</code> <code>mallocgc</code> → <code>:1208</code> <code>mallocgcTiny</code>
+→ <code>:996</code> <code>mcache.nextFree</code>; the size-class table (68 classes) in
+<code>src/internal/runtime/gc/sizeclasses.go</code>; <code>:1340</code> the <code>gcTrigger</code> check that
+makes allocation the GC&#39;s clock.</li>
+<li><code>src/runtime/mgc.go:733</code> <code>gcStart</code> — walk the phases:
+sweep-termination STW (:835), concurrent mark setup, background
+workers (<code>:1766</code> <code>gcBgMarkWorker</code>), <code>:997</code> <code>gcMarkDone</code>, the
+second STW (:1066), <code>:1360</code> <code>gcMarkTermination</code>; then
+<code>src/runtime/mgcpacer.go:859</code> <code>findRunnableGCWorker</code> for the
+25% dedicated + fractional worker split and the CPU limiter.</li>
+<li><code>src/runtime/mbarrier.go</code> — the hybrid-barrier header (pseudocode
+and proof sketch); <code>src/runtime/asm_amd64.s:1306</code>
+<code>gcWriteBarrier&lt;&gt;</code> (the buffered fast path and <code>wbBufFlush</code>);
+<code>src/runtime/mwbbuf.go:42</code> <code>wbBuf</code>. Where your handler&#39;s stores
+pay for concurrency.</li>
+<li><code>src/runtime/mgcmark_greenteagc.go</code> — the header (dual mark/scan
+bits, FIFO span queues), <code>:377</code> <code>spanQueue.put</code>, <code>:1187</code>
+<code>scanObject</code>; contrast <code>mgcmark_nogreenteagc.go:143</code> for the
+classic per-object scan; then <code>src/runtime/mgcsweep.go:359</code>
+<code>sweepone</code>. Finish with preemption completing M:N:
+<code>src/runtime/proc.go:6679</code> <code>forcePreemptNS</code> + <code>:6681</code> <code>retake</code>,
+<code>src/runtime/preempt.go:305</code> <code>asyncPreempt</code>, and
+<code>src/runtime/signal_unix.go:74</code> <code>sigPreempt = _SIGURG</code>.</li>
+</ol>
+<p>You have now traced one HTTP request end-to-end — born by a two-letter
+keyword, parked on a semaphore word, stolen awake, allocated by a
+compile-time verdict, and marked concurrently around its own pointer
+stores — through every subsystem that makes <code>go</code> a keyword worth
+having.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the unit of concurrency a resumable stack, not a thread</strong>
+(<code>newproc</code> + <code>copystack</code>): once spawn is pooled-struct cheap and
+frames can grow, &quot;one goroutine per connection/actor/request&quot;
+stops being an architecture risk and becomes the default — Java&#39;s
+Loom virtual threads and Kotlin coroutines are this lesson
+arriving elsewhere.</li>
+<li><strong>Shard the hot path into P-like carriers and steal, don&#39;t share</strong>
+(<code>p.runq</code>/<code>mcache</code>/<code>wbBuf</code>, <code>stealWork</code>): make the common case
+single-owner lock-free, and let idle workers <em>pull</em> half a queue
+instead of everyone pushing through a central one.</li>
+<li><strong>Park by writing your continuation into the thing you wait on</strong>
+(<code>pollDesc.rg/wg</code>): the waiter is the goroutine and the wait is a
+CAS on a semaphore word — no wait-queue objects, no lock, one
+handoff edge case (the already-ready race) handled by the state
+machine.</li>
+<li><strong>Make background work a CPU budget with debt, not a thread</strong>
+(<code>gcController</code> 25% goal + <code>gcAssistAlloc</code>): pacing tied to the
+<em>cause</em> of the work (allocation) automatically throttles the
+abuser and protects everyone else — backpressure as a ledger.</li>
+<li><strong>Batch by locality when you must sweep through memory</strong> (Green
+Tea&#39;s dual mark/scan bits, FIFO span queues): delaying work until
+its neighborhood accumulates turned a correctness-driven scan into
+a prefetch-friendly one — the LSM compaction insight, applied to
+a GC.</li>
+<li><strong>Co-design the boundary you own</strong> (escape analysis ↔ growable
+stacks ↔ write barrier): Go&#39;s cheapness lives in a contract
+between compiler and runtime that neither could honor alone;
+identify your system&#39;s equivalent pair and design them together.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong>. Realistic budget: 10–12 hours — two
+sittings for the reading path, best done with a Go program running
+under <code>GODEBUG=schedtrace=1000,scheddetail=1</code> beside you, and
+<code>go build -gcflags=-m</code> for stop 8.</li>
+<li>Prerequisites: fluent Go (channels, defer, select); scheduler
+basics from the <a href="../libuv/">libuv</a> dive (what an event loop buys
+and costs — this dive is its antithesis) and optionally the
+<a href="../linux/">Linux</a> dive&#39;s scheduler section (runqueues, vruntime —
+the layer underneath); tri-color marking in one sitting (the Go
+GC guide linked below suffices); enough x86-64 to read the short
+<code>gcWriteBarrier</code>/<code>morestack</code> assembly stops (skippable — the
+surrounding Go code carries the semantics).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li><code>src/runtime/proc.go</code>&#39;s top-of-file design comment — the
+scheduler&#39;s own design document; read it before any blog post.</li>
+<li><em>A Guide to the Go Garbage Collector</em> —
+<a href="https://go.dev/doc/gc-guide">https://go.dev/doc/gc-guide</a> — the pacer, GOGC/GOMEMLIMIT, and
+assists from the user&#39;s side.</li>
+<li>Proposal 17503, <em>Eliminate STW stack re-scanning</em> —
+<a href="https://github.com/golang/proposal/blob/master/design/17503-eliminate-rescan.md">https://github.com/golang/proposal/blob/master/design/17503-eliminate-rescan.md</a>
+— the design doc behind the hybrid write barrier, cited from
+<code>mbarrier.go</code> itself.</li>
+<li>The Green Tea mark header in <code>src/runtime/mgcmark_greenteagc.go</code>
+and the 2025 Go blog GC posts — the locality-first redesign this
+dive&#39;s step 6 walks.</li>
+<li>The Go memory model — <a href="https://go.dev/ref/mem">https://go.dev/ref/mem</a> — the user-facing
+contract of the park/ready and barrier mechanics.</li>
+<li>R. D. Blumofe &amp; C. E. Leiserson, <em>Scheduling Multithreaded
+Computations by Work Stealing</em> (1999) — the theory the run queue<ul>
+<li>stealing split implements.</li>
+</ul>
+</li>
+<li>E. W. Dijkstra et al., <em>On-the-fly garbage collection: an exercise
+in cooperation</em> (1978) — the insertion half of Go&#39;s barrier;
+<code>mgc.go</code>&#39;s header credits it directly.</li>
+<li>The sibling atlas dives: <a href="../libuv/">libuv</a> and <a href="../nodejs/">Node.js</a>
+(the event-loop answer to the same C10K question),
+<a href="../cpython/">CPython</a> (reference counting as the opposite GC bet),
+and <a href="../linux/">Linux</a> (the host scheduler the M:N layer rides on).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../linux/"><span class="dir">← Previous dive</span>Linux kernel: one frozen door, ten thousand pluggable rooms</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 30 of 30 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
