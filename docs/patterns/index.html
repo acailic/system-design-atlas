@@ -67,7 +67,9 @@ restart; <a href="../dive/elasticsearch/">Elasticsearch</a> — the translog
 is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&quot; (flush);
 <a href="../dive/zookeeper/">ZooKeeper</a> — FileTxnLog appends every
 proposal and fsyncs before the follower acks, so election is just
-&quot;highest log wins.&quot;</p>
+&quot;highest log wins&quot;; <a href="../dive/rocksdb/">RocksDB</a> — one WAL
+multiplexed over column families whose CF-tagged record types double
+as a prepare/commit/rollback transaction protocol.</p>
 <p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
 mechanical replay.</p>
@@ -162,7 +164,10 @@ a window of prefetched I/O so the next reads hit the page cache;
 <a href="../dive/go/">Go runtime</a> — the whole GC is this rule at war with
 an allocation rate: concurrent mark on a 25% CPU budget, allocation
 billed as scanning debt (<code>gcAssistAlloc</code>), and Green Tea batching
-spans to keep each unit of mark work cache-local.</p>
+spans to keep each unit of mark work cache-local;
+<a href="../dive/rocksdb/">RocksDB</a> — compaction budgets made explicit:
+a token-bucket rate limiter throttles background I/O while a stall
+ladder turns overload into published, steerable slowdown states.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -191,7 +196,11 @@ phones to airliners; <a href="../dive/leveldb/">LevelDB</a> — <code>Env</code>
 whole OS surface; <a href="../dive/nginx/">nginx</a> — event-module vtables
 (epoll/kqueue/select behind one macro);
 <a href="../dive/libuv/">libuv</a> — the whole product is this pattern: one
-loop core, one <code>uv__io_poll</code> per platform.</p>
+loop core, one <code>uv__io_poll</code> per platform;
+<a href="../dive/rocksdb/">RocksDB</a> — <code>Env</code> later split into <code>FileSystem</code></p>
+<ul>
+<li><code>SystemClock</code> when the single OS seam itself grew too broad.</li>
+</ul>
 <p><strong>Why it recurs:</strong> portability is architectural, not a build flag; the
 interface is where testing doubles (in-memory VFS, memdb) come from.</p>
 <p><strong>Reach for it when:</strong> the system must outlive your current platform
