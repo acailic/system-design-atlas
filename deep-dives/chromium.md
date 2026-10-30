@@ -218,7 +218,7 @@ partition. This is where Chrome-the-product gets to veto without
 content-the-engine knowing it exists — the same seam VS Code uses
 for its extension contributions.
 
-**Step 3 — Where will this document live?** The request reaches
+**Step 3 — Where the document will live.** The request reaches
 `RenderFrameHostManager::GetFrameHostForNavigation`
 (render_frame_host_manager.cc:1931) for its frame's `FrameTreeNode`.
 The manager computes the destination `SiteInstanceImpl`
