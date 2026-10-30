@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V8: an engine that bets — tiers, feedback, and the machinery for taking bets back — System Design Atlas</title>
+<meta name="description" content="V8 is the JavaScript engine in Chrome, Node.js, Deno, and Electron — billions of executions a day of a language with no static types, whose users nonetheless measure it in milliseconds. The ">
+<meta property="og:title" content="V8: an engine that bets — tiers, feedback, and the machinery for taking bets back — System Design Atlas">
+<meta property="og:description" content="V8 is the JavaScript engine in Chrome, Node.js, Deno, and Electron — billions of executions a day of a language with no static types, whose users nonetheless measure it in milliseconds. The ">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/v8/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/v8/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-add-source-to-guarded-machine-code-and-back">Walkthrough: one add, source to guarded machine code and back</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>V8: an engine that bets — tiers, feedback, and the machinery for taking bets back</h1>
+    <div class="meta-chips"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/v8/v8" rel="noopener">BSD-3-Clause</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>c22aa636c65fc075c2287c775a962a3013c21e45</code> · 2026-10-16 · <a href="https://github.com/v8/v8" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">V8 is the JavaScript engine in Chrome, Node.js, Deno, and Electron —
+billions of executions a day of a language with <strong>no static types</strong>,
+whose users nonetheless measure it in milliseconds. The design idea
+this dive teaches is <strong>speculation as architecture</strong>: V8 observes
+types and object shapes while code runs (feedback), compiles the same
+function through four increasingly aggressive tiers (Ignition
+interpreter → Sparkplug baseline → Maglev mid-tier → TurboFan
+optimizing compiler), wraps every assumption in a machine-level guard,
+and — the part that makes the whole gamble honest — has a complete,
+designed mechanism for <strong>taking a bet back</strong> (the Deoptimizer plus a
+dependency registry that invalidates optimized code when a Map
+transition proves it wrong). Around that core sit two more betable
+structures: hidden classes (<code>Map</code>s) that turn dynamic property access
+into constant-offset loads, and a concurrent, incremental collector
+that never stops the world for long. The unit of embedding is the
+<code>Isolate</code> — one heap, one realm — grouped into cages that share only
+immutable state.</p>
+<p>Read it against the atlas&#39;s other runtimes: <a href="../cpython/">CPython</a>
+took the same feedback idea only as far as <em>specializing an
+interpreter</em> and stayed portable C; <a href="../lua/">Lua</a> skipped speculation
+entirely and spent its budget on embeddability; V8 is the maximalist
+answer — everything is speculated, and the engine&#39;s size is the
+price. The <a href="../nodejs/">Node.js</a> dive shows the customer side of this
+API at full scale.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A theater troupe where the actors memorize only the lines that keep
+repeating — and can forget them instantly.</strong> A new play starts with
+the understudy reading straight from the script (the Ignition
+interpreter running bytecode). Each time a line is spoken, a tally
+mark goes in the margin of the script itself (the feedback byte
+embedded in the bytecode): &quot;this plus sign has always seen two small
+whole numbers.&quot; After the line repeats often enough, a coach (first
+Sparkplug, then Maglev, finally TurboFan) rehearses a <em>special
+version of the scene</em> where the props are guaranteed to be two
+numbers — much faster to perform. Every prop room has labeled shelf
+diagrams (hidden classes, <code>Map</code>s): each toy box carries a pointer to
+its diagram, and two boxes shelved the same way share one diagram,
+so &quot;grab the third shelf&quot; never needs searching. The moment a string
+walks on stage where a number was promised, the special scene is
+torn up <em>on the spot</em> (a deoptimization) and the understudy resumes
+reading the script — no crash, just a slower scene until a new,
+wider bet is rehearsed. Meanwhile janitors sweep the stage <em>during
+the show</em> (concurrent marking), keeping sticky notes on shelves that
+changed (write barriers), and the newest toys live in a small
+side room that gets emptied wholesale every few scenes (the young
+generation scavenger). Each theater (an <code>Isolate</code>) owns its own
+stage and prop room; theaters in the same building share only the
+blueprint cabinet (the read-only heap) — never live props.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> a language without types whose
+product is speed must <em>discover</em> types at runtime — so V8 spends its
+complexity budget on observing (feedback), specializing (tiers), and
+cheaply retracting (deopt + GC), not on the language itself.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    SRC[&quot;.js source&quot;]
+    FE[&quot;front end — lazy: Parser / PreParser,&lt;br/&gt;src/parsing/parser.cc&quot;]
+    IGN[&quot;Ignition bytecode — bytecode-generator.cc:8039&lt;br/&gt;VisitArithmeticExpression → Add&lt;br/&gt;(feedback byte embedded in the bytecode)&quot;]
+    subgraph tiers[&quot;execution tiers — tiering-manager.cc:434 ShouldOptimize&quot;]
+        T1[&quot;Ignition — interpreter handlers in machine code,&lt;br/&gt;dispatch table interpreter.cc:108&quot;]
+        T2[&quot;Sparkplug — baseline-compiler.cc:544,&lt;br/&gt;bytecode compiled 1:1, call sites patched to typed builtins&quot;]
+        T3[&quot;Maglev — maglev-graph-builder.cc:16491&lt;br/&gt;Build, mid-tier graph compiler&quot;]
+        T4[&quot;TurboFan — pipeline.cc:505 PipelineCompilationJob&lt;br/&gt;sea-of-nodes → Turboshaft machine graph&quot;]
+    end
+    FB[&quot;the feedback fabric&lt;br/&gt;embedded bytes + FeedbackVector&lt;br/&gt;globals.h:2531 binop lattice, :1920 IC states&quot;]
+    DEP[&quot;dependencies + Deoptimizer&lt;br/&gt;compilation-dependencies.h Commit,&lt;br/&gt;deoptimizer.cc:1651 DoComputeOutputFrames&quot;]
+    subgraph heapc[&quot;heap — heap.h:773&quot;]
+        NEW[&quot;young gen — scavenger.cc:1628&lt;br/&gt;(Cheney copying)&quot;]
+        OLD[&quot;old gen — mark-compact.cc:526,&lt;br/&gt;incremental + concurrent marking&quot;]
+    end
+    ISO[&quot;Isolate (one realm, one heap)&lt;br/&gt;IsolateGroup: cage + code range +&lt;br/&gt;shared read-only heap — isolate-group.h:72&quot;]
+    EMB[&quot;embedder: Chrome / Node / d8&lt;br/&gt;v8::Isolate + v8::Platform&quot;]
+
+    SRC --&gt; FE --&gt; IGN --&gt; T1
+    T1 --&gt;|&quot;budget interrupt, ~400 calls&quot;| T3
+    T1 --&gt;|&quot;Sparkplug, early&quot;| T2
+    T3 --&gt;|&quot;~3k calls&quot;| T4
+    T2 &amp; T3 &amp; T4 -.-&gt;|&quot;guard fails → deopt&quot;| T1
+    FB --&gt; T4
+    DEP -.-&gt; T4
+    T1 &amp; T2 &amp; T3 &amp; T4 --&gt; heapc
+    ISO --&gt; heapc
+    EMB --&gt; ISO
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>The front end is lazy.</strong> Scripts are pre-parsed cheaply
+(<code>Parser</code>/<code>PreParser</code>, <code>src/parsing/parser.h</code>); a function&#39;s real
+bytecode is generated on first call via <code>Runtime_CompileLazy</code>
+(<code>src/runtime/runtime-compiler.cc:228</code>) → <code>Compiler::Compile</code>
+(<code>src/codegen/compiler.cc:3051</code>). Cold functions never cost more
+than a stub.</li>
+<li><strong>Four tiers, one function.</strong> The same <code>BytecodeArray</code> backs all of
+them. Ignition executes it through generated handler code; Sparkplug
+compiles each bytecode to machine code one-to-one
+(<code>src/baseline/baseline-compiler.cc:544 VisitSingleBytecode</code>);
+Maglev builds a fast graph (<code>src/maglev/maglev-graph-builder.cc:16491 Build</code>); TurboFan is the top tier (<code>src/compiler/pipeline.cc:505 PipelineCompilationJob</code>). Promotion is decided by budget counters,
+not timers (section 3).</li>
+<li><strong>The feedback fabric.</strong> Binary and compare operations carry their
+type feedback <em>in the bytecode itself</em> — a byte operand that can
+only widen (<code>kSignedSmall</code> → <code>kNumber</code> → <code>kAny</code>; the bitmask lattice
+at <code>src/common/globals.h:2531</code>). Property accesses use
+<code>FeedbackVector</code> slots whose IC state matures from MONOMORPHIC to
+MEGAMORPHIC (<code>globals.h:1920</code>). Both feed the optimizing tiers.</li>
+<li><strong>The heap is split by lifetime.</strong> New objects in a semispace young
+generation collected by Cheney-style copying (<code>Heap::Scavenge</code>,
+<code>src/heap/heap.cc:2617</code>); survivors are promoted to an old
+generation collected by mark-compact with incremental marking on the
+main thread and concurrent marking on platform jobs
+(<code>src/heap/concurrent-marking.cc:365 RunMajor</code>). Write barriers are
+the protocol that lets collectors and mutator coexist.</li>
+<li><strong>The isolate model.</strong> One <code>Isolate</code> = one heap, one stack, one
+realm; an <code>IsolateGroup</code> (<code>src/init/isolate-group.h:72</code>) owns the
+pointer-compression cage, the code range, and the read-only heap
+shared by its isolates. Embedders create many isolates per process —
+Chrome one per site, Node one per worker — and V8 owns no OS threads
+itself: it rents them through <code>v8::Platform</code>.</li>
+</ul>
+<p>The <strong>spine</strong> of this dive is one function — <code>function add(a, b) { return a + b; }</code> — called ten thousand times: lazy compile →
+interpreted with feedback → baseline → optimized with guards → a
+string arrives → deopt → re-optimize. Every subsystem above appears
+in that story, in that order.</p>
+<div class="walkthrough">
+<h2 id="walkthrough-one-add-source-to-guarded-machine-code-and-back">Walkthrough: one add, source to guarded machine code and back</h2>
+<p class="walkthrough-intro">The spine as a story — step through it on the site or read straight
+down. It is the complete speculation cycle: bet placed, bet won,
+bet retracted, wider bet placed.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant S as source (add function)
+    participant I as Ignition (builtins-x64.cc:1075)
+    participant F as feedback (embedded byte / FeedbackVector)
+    participant T as TieringManager (tiering-manager.cc:585)
+    participant O as TurboFan (pipeline.cc:505)
+    participant D as Deoptimizer (deoptimizer.cc:290)
+    S-&gt;&gt;I: lazy compile → BytecodeArray: Ldar, Add, Return
+    I-&gt;&gt;F: Add handler (interpreter-generator.cc:1052) runs Smi path,&lt;br/&gt;records kSignedSmall via binary-op-assembler.cc:27
+    I-&gt;&gt;T: FeedbackCell budget hits zero →&lt;br/&gt;Runtime_BytecodeBudgetInterrupt_Ignition
+    T-&gt;&gt;T: ShouldOptimize: invocation counts&lt;br/&gt;(maglev 400 / turbofan 3000)
+    T-&gt;&gt;O: queue Maglev, then TurboFan job
+    O-&gt;&gt;O: PrepareJobImpl (main thread, heap broker) →&lt;br/&gt;ExecuteJobImpl (background: graph, inlining, lowering) →&lt;br/&gt;FinalizeJobImpl (install + dependencies Commit)
+    O--&gt;&gt;I: optimized add(int32/double + guards), entry via JSDispatchTable
+    Note over I,D: 10,000 calls later: add(&quot;a&quot;, 1)
+    I-&gt;&gt;D: guard fails → DeoptimizationEntry_Eager (builtins-x64.cc:5594)
+    D-&gt;&gt;D: DoComputeOutputFrames rebuilds Ignition frames&lt;br/&gt;from TranslatedState (translated-state.h:48)
+    D--&gt;&gt;I: resume in interpreter, feedback byte widens (kAny)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="lazy-compile-with-room-for-guesses">Lazy compile, with room for guesses</h3>
+<p>The script is
+pre-parsed; <code>add</code> is a stub until first call. Then
+<code>Runtime_CompileLazy</code> → <code>Compiler::Compile</code> runs the real parser and
+<code>BytecodeGenerator::VisitArithmeticExpression</code>
+(<code>src/interpreter/bytecode-generator.cc:8039</code>) emits <code>Ldar a; Add b; Return</code> — where <code>Add</code> reserves an operand byte for its feedback
+(<code>kFeedbackIsEmbedded</code>, <code>src/common/globals.h:972</code>). The bytecode is
+born with a place to learn.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="first-call-execute-and-observe">First call: execute and observe</h3>
+<p>The call lands in
+<code>Builtins::Generate_InterpreterEntryTrampoline</code>
+(<code>src/builtins/x64/builtins-x64.cc:1075</code>), which decrements the
+closure&#39;s <code>FeedbackCell</code> interrupt budget by the bytecode&#39;s length,
+then jumps through the dispatch table to the handler for <code>Add</code> —
+generated machine code (<code>IGNITION_HANDLER(Add)</code>,
+<code>src/interpreter/interpreter-generator.cc:1052</code>). Its fast path in
+<code>BinaryOpAssembler::Generate_AddWithFeedback</code>
+(<code>src/ic/binary-op-assembler.cc:27</code>) tries Smi+Smi, and on success
+writes <code>kSignedSmall</code> into the embedded feedback byte before
+returning the result. Observation is a side effect of execution.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-feedback-matures">The feedback matures</h3>
+<p>Call it with <code>1.5</code> and the same
+handler falls through Smi checks to the double path, widening the
+byte to <code>kNumber</code> — the lattice only ever widens (combine, never
+reset: <code>UpdateEmbeddedFeedback</code>, <code>src/runtime/runtime-compiler.cc:163</code>).
+In baseline code, the observed type additionally rewrites the call
+site to a typed builtin (<code>TryPatchBaselineCodeImpl</code>,
+<code>src/runtime/runtime-compiler.cc:176</code>) — shipped as &quot;Sparkplug+&quot;
+(<code>src/flags/feature-flags.h:239</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-budget-interrupt">The budget interrupt</h3>
+<p>Each entry decremented the budget
+by the function&#39;s bytecode size, so after enough calls it goes
+negative: the trampoline calls <code>Runtime_BytecodeBudgetInterrupt_Ignition</code>
+(<code>src/runtime/runtime-internal.cc:482</code>) →
+<code>TieringManager::OnInterruptTick</code> (<code>src/execution/tiering-manager.cc:585</code>)
+→ <code>ShouldOptimize</code> (<code>:434</code>) against invocation counts: Maglev at
+~400 invocations on desktop (1000 under <code>ANDROID</code>), TurboFan at ~3000
+(<code>src/flags/flag-definitions.h:1123</code> and <code>:1140</code>). No timers, no
+profilers — promotion is paid for in the hot path itself.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="optimize-off-the-hot-path">Optimize off the hot path</h3>
+<p>The TurboFan job is a
+three-act play over three thread contexts (<code>src/compiler/pipeline.cc</code>):
+<code>PrepareJobImpl</code> (<code>:692</code>) serializes heap access on the main thread
+through the JSHeapBroker; <code>ExecuteJobImpl</code> (<code>:761</code>) builds and
+optimizes the sea-of-nodes graph on a background thread — reading
+the matured feedback (<code>kSignedSmall</code>), inlining small callees,
+lowering <code>+</code> to untagged int32/float64 arithmetic behind type and
+Map guards — then translates to Turboshaft for machine code;
+<code>FinalizeJobImpl</code> (<code>:804</code>) installs the code and commits its
+assumptions via <code>CompilationDependencies::Commit</code>
+(<code>src/compiler/compilation-dependencies.h:38</code>): &quot;this Map was
+stable,&quot; &quot;this field was const,&quot; &quot;the NoElements protector held.&quot;</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="hot-and-guarded">Hot and guarded</h3>
+<p>The function&#39;s entry now lives in the
+<code>JSDispatchTable</code> (<code>src/sandbox/js-dispatch-table.h</code>); installing a
+tier is an entrypoint swap under the function&#39;s dispatch handle
+(<code>src/objects/js-function-inl.h:221</code>). Calls no longer tag, untag, or
+dispatch bytecodes — they execute guarded machine code. The bet is
+paying off thousands of times a second.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="the-string-arrives-deopt">The string arrives: deopt</h3>
+<p><code>add(&quot;a&quot;, 1)</code> fails the
+guard. Control lands in <code>Builtins::Generate_DeoptimizationEntry_Eager</code>
+(<code>src/builtins/x64/builtins-x64.cc:5594</code>) → <code>Deoptimizer::New</code>
+(<code>src/deoptimizer/deoptimizer.cc:290</code>), and
+<code>DoComputeOutputFrames</code> (<code>:1651</code>) reconstructs complete Ignition
+frames from the <code>TranslatedState</code> (<code>src/deoptimizer/translated-state.h:48</code>)
+metadata the compiler left behind — every live variable, at the exact
+bytecode offset it belongs to. Execution resumes in the interpreter
+as if nothing happened, except the feedback byte now says <code>kAny</code>, so
+the <em>next</em> optimized version bets on both.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="speculation-closed-loop">Speculation, closed loop</h3>
+<p>Nothing crashed and nothing
+was lost: the function fell back to the tier that always works, the
+feedback recorded the truth, and the engine is free to bet again on
+wider grounds. Invalidate a <em>Map</em> instead of a value and the same
+retraction happens to whole swaths of code at once —
+<code>DependentCode::DeoptimizeDependencyGroups</code>
+(<code>src/objects/dependent-code.cc:176</code>) sweeps every optimized function
+that bet on the old shape.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<ul>
+<li><p><strong><code>Map</code> — the hidden class.</strong>
+<strong>What:</strong> every heap object starts with a pointer to its <code>Map</code>
+(<code>src/objects/map.h:257</code>): instance size, elements kind, and the
+<code>DescriptorArray</code> of named properties
+(<code>instance_descriptors</code>, <code>map.h:793</code>) with each field&#39;s offset and
+representation. Adding a property doesn&#39;t touch the object&#39;s
+layout — it follows or extends a transition tree
+(<code>raw_transitions</code>, <code>map.h:583</code>; encodings in
+<code>src/objects/transitions.h:252</code>), so objects of the same shape
+literally share one diagram.
+<strong>Why:</strong> property access <code>point.x</code> becomes &quot;map check, then load at
+constant offset 12&quot; — the load ICs and the optimizing tiers both
+key on Maps. The alternative (per-object dictionaries) exists as
+the <em>slow mode</em> escape hatch; the price of Maps is transition
+churn and deprecation: field types generalize over time, old Maps
+are deprecated and instances migrated
+(<code>src/objects/map-updater.cc:1102 DeprecateTransitionTree</code>,
+<code>:368 TryUpdateNoLock</code>), and every generalization is a chance to
+invalidate code that bet on the old shape.</p>
+</li>
+<li><p><strong>Feedback: an embedded byte lattice, plus IC slots.</strong>
+<strong>What:</strong> arithmetic/comparison bytecodes carry their feedback as a
+byte operand inside the <code>BytecodeArray</code> (operand indices pinned at
+<code>src/common/globals.h:981</code>); its values form a bitmask lattice
+(<code>kSignedSmall = 0x1</code> … <code>kAny = 0x1FF</code>, <code>globals.h:2531</code>) that
+combines by widening. Property ICs instead hold slots in a
+<code>FeedbackVector</code> (<code>src/objects/feedback-vector.h:306</code>) whose state
+walks UNINITIALIZED → MONOMORPHIC → POLYMORPHIC → MEGAMORPHIC
+(<code>globals.h:1920</code>); megamorphic sites lean on a global two-level
+stub cache of 4096 + 1024 entries (<code>src/ic/stub-cache.h:88</code>).
+<strong>Why:</strong> speculation needs observation that is cheap (one byte
+write or one slot store in the same cache line as the work),
+monotone (the lattice never narrows, so no oscillation), and
+readable offline by compilers. This is CPython&#39;s
+adaptive-specialization idea (<code>Python/specialize.c</code>) taken to the
+extreme of patching generated code — and it is why the two engines
+converged: both discover types they were never told.</p>
+</li>
+<li><p><strong><code>FeedbackCell</code> budget + <code>JSDispatchTable</code>.</strong>
+<strong>What:</strong> each closure&#39;s <code>FeedbackCell</code> holds an <code>interrupt_budget</code>
+(decremented by bytecode length per call in the trampoline); each
+<code>JSFunction</code> holds a dispatch handle into the isolate&#39;s
+<code>JSDispatchTable</code> (<code>src/objects/js-function.h:203</code>), whose entries
+carry the current entrypoint, code, and parameter count
+(<code>src/sandbox/js-dispatch-table.h:242</code>).
+<strong>Why:</strong> tiering state lives <em>on the function</em>, priced by its own
+size — and because the entrypoint is indirect, promoting or
+deoptimizing a function is one table write
+(<code>src/objects/js-function-inl.h:221</code>), atomic with respect to
+every caller. Cheap bets require cheap switches.</p>
+</li>
+<li><p><strong><code>BytecodeArray</code> + the generated dispatch table.</strong>
+<strong>What:</strong> Ignition is a register machine whose roughly 250
+bytecodes each have <em>generated machine-code</em> handlers, one per
+bytecode and operand scale,
+installed into a dispatch table at startup
+(<code>src/interpreter/interpreter.cc:108 SetBytecodeHandler</code>, <code>:333 Initialize</code>); each handler ends by computing the next bytecode and
+jumping (<code>DispatchToBytecode</code>, <code>src/interpreter/interpreter-assembler.cc:1245</code>).
+Handlers are written once as assembler macros
+(<code>IGNITION_HANDLER</code> in <code>src/interpreter/interpreter-generator.cc</code>),
+with a Turboshaft-based generator being introduced alongside
+(<code>src/interpreter/interpreter-generator-tsa.cc</code>).
+<strong>Why:</strong> one DSL generates the whole interpreter for every
+architecture — the same move as CPython&#39;s <code>bytecodes.c</code>, except
+the output is machine code, so &quot;interpreter&quot; here is already
+compiled, and handlers can inline Smi fast paths without a C
+compiler in the loop at runtime.</p>
+</li>
+<li><p><strong>Handle scopes — the embedding currency.</strong>
+<strong>What:</strong> everything crossing the C++ boundary is a <code>Local&lt;T&gt;</code>
+handle into the current <code>HandleScope</code>&#39;s block
+(<code>include/v8-local-handle.h:99</code>, <code>:112</code>; backing allocation
+<code>src/handles/handles.h:288 CreateHandle</code>).
+<strong>Why:</strong> the GC moves objects; the embedder must never hold a raw
+pointer. A handle is an indirect slot the GC rewrites — Lua&#39;s
+virtual-stack discipline (its API tray), scaled to millions of
+calls per second and wrapped in C++ types.</p>
+</li>
+</ul>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph main[&quot;main thread (per Isolate) — all JS execution&quot;]
+        JS[&quot;Ignition / Sparkplug / Maglev / TurboFan code,&lt;br/&gt;safepoints + stack checks in frames&quot;]
+        IM[&quot;incremental marking steps&lt;br/&gt;on allocation — incremental-marking.h:99&quot;]
+        WB[&quot;store path: CombinedWriteBarrier&lt;br/&gt;heap-write-barrier-inl.h:52&lt;br/&gt;(marking OR generational remembered set)&quot;]
+    end
+    subgraph bg[&quot;background threads — rented from the embedder&#39;s v8::Platform&quot;]
+        CM[&quot;concurrent marking jobs&lt;br/&gt;concurrent-marking.cc:365 RunMajor&quot;]
+        TF[&quot;TurboFan / Maglev graph phases&lt;br/&gt;pipeline.cc:761 ExecuteJobImpl&quot;]
+        SW[&quot;concurrent sweeping&lt;br/&gt;mark-compact.cc:6264 Sweep&quot;]
+    end
+    JS --&gt; WB --&gt; IM
+    IM &lt;--&gt;|&quot;shared marking worklists&quot;| CM
+    CM --&gt; SW
+    TF --&gt;|&quot;heap access via JSHeapBroker / LocalHeap&quot;| JS
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>JS execution is single-threaded per isolate; everything else is
+a guest.</strong> The interpreter/baseline/optimized code and the mutator
+run on the embedder&#39;s main thread. Marking (major GC) proceeds as
+small steps interleaved on that thread — paced by allocation, like
+Lua&#39;s debt-paced <code>luaC_step</code> — <em>and</em> as concurrent jobs posted to
+the embedder&#39;s platform (<code>V8::GetCurrentPlatform()-&gt;PostJob</code>,
+<code>src/heap/concurrent-marking.cc:701</code>). V8 owns zero threads;
+Chrome&#39;s scheduler or Node&#39;s default platform supply them. This is
+the same &quot;rent, don&#39;t own&quot; inversion as libuv&#39;s thread pool, and
+it is why V8 composes with arbitrary hosts.</li>
+<li><strong>The write barrier is the contract.</strong> Every tagged store funnels
+through <code>WriteBarrier::CombinedWriteBarrierInternal</code>
+(<code>src/heap/heap-write-barrier-inl.h:52</code>), which decides on the
+spot: is the collector marking (record this slot in a marking
+worklist) or is this an old→new pointer (record in the remembered
+set the young-gen scavenger will walk)? One branch on the hot
+store path buys the right to move marking and evacuation off the
+critical path — the mutator pays a tax so the collectors can be
+lazy. (<code>--disable-write-barriers</code> implies disabling incremental
+marking: <code>src/flags/flag-definitions.h:473</code> — the coupling is
+explicit.)</li>
+<li><strong>Young GC is a wholesale evacuation, old GC is a negotiated
+pause.</strong> <code>Heap::Scavenge</code> (<code>src/heap/heap.cc:2617</code>) copies live
+young objects between semispaces (&quot;Implements Cheney&#39;s copying
+algorithm&quot;) — young deaths are free. Major collection
+(<code>MarkCompactCollector::CollectGarbage</code>, <code>src/heap/mark-compact.cc:526</code>)
+marks incrementally/concurrently, then takes a short pause for the
+final atomic step, then sweeps concurrently (<code>:6264</code>).</li>
+<li><strong>Failure is layered by design</strong>: a failed speculation is not an error
+at all — it is a deopt (step 7 of the walkthrough). Invalidated
+<em>dependencies</em> batch-deoptimize dependent code
+(<code>DependentCode::DeoptimizeDependencyGroups</code>,
+<code>src/objects/dependent-code.cc:176</code>). Exhausted memory raises the
+<code>RangeError</code> every JS programmer knows; a corrupted internal
+invariant is a <code>CHECK</code> crash — V8 is deliberately <em>not</em> resilient
+to its own bugs, trading recovery for auditability (same stance as
+SQLite&#39;s assert-heavy core).</li>
+<li><strong>Isolation across realms.</strong> Isolates in one process share only
+their group&#39;s cage, code range, and read-only heap
+(<code>src/init/isolate-group.h:150</code>, <code>:198</code>); a shared space exists
+for explicitly shared objects (shared strings/structs), and every
+other object is unreachable across isolates. One page&#39;s crash is
+one isolate&#39;s crash — the model Chrome needs per-site and Node
+needs per-worker.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The API is <code>Isolate</code> in, handles out.</strong> <code>v8::Isolate::New</code>
+(<code>src/api/api.cc:10320</code>) takes a <code>CreateParams</code> — snapshot blob,
+resource constraints — and hands back an isolate the embedder must
+<code>Enter</code>/<code>Exit</code> like a room. Inside, all values are <code>Local&lt;T&gt;</code>
+handles under a <code>HandleScope</code>; contexts (<code>v8::Context</code>) are the
+realm units. Compare <a href="../lua/">Lua</a>&#39;s tray: same &quot;never hand out a
+pointer&quot; rule, opposite scale — Lua optimizes for being small
+enough to embed anywhere; V8 optimizes for being <em>the</em> engine,
+embeddable by a handful of huge hosts.</li>
+<li><strong>The embedder supplies the machine.</strong> <code>v8::Platform</code> (see
+<code>include/v8-platform.h</code>) is the inversion seam: V8 asks the host
+for worker threads, foreground task runners, and monotonically
+increasing time. Concurrent marking, optimizing compilation, and
+even GC scheduling callbacks all flow through it — which is how
+the same engine ticks inside Chrome&#39;s renderer scheduler and a
+plain Node process.</li>
+<li><strong>Snapshots are the startup story.</strong> V8 deserializes a
+pre-serialized heap image at boot (<code>Snapshot::Initialize</code>,
+<code>src/snapshot/snapshot.cc:178</code>), so a fresh isolate starts with the
+entire built-in library materialized — and <code>SnapshotCreator</code> lets
+embedders bake <em>their own</em> initialized heap into a custom blob.
+Cold-start cost is paid once, at build time.</li>
+<li><strong>Templates stamp out objects from C++.</strong> <code>FunctionTemplate</code> /
+<code>ObjectTemplate</code> let the host define functions and object shapes
+with interceptors, so the DOM (in Chrome) or <code>fs</code> (in Node) is
+built as native code behind JS-callable shapes — the same slot the
+metatable protocol serves in Lua, done at object-stamp time.</li>
+<li><strong>Honest wart:</strong> the surface is enormous and version-volatile.
+V8&#39;s API churns with the engine because it <em>is</em> the engine&#39;s
+internals with a veneer; the proof is Node.js needing N-API — a
+second, deliberately frozen ABI — for native addons to survive
+V8 upgrades (see the <a href="../nodejs/">Node.js</a> dive&#39;s two-tier seam).
+Lua kept one header stable for decades by never letting the API
+grow; V8 chose the opposite and pays in adapter layers.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-speculation-with-guards-over-static-types-or-plain-interpretation">Trade-off 1: speculation with guards over static types or plain interpretation</h3>
+<ul>
+<li><strong>Tension:</strong> JavaScript gives no type information up front; the
+product is speed on long-running programs anyway.</li>
+<li><strong>Choice:</strong> observe types at runtime (feedback bytes, IC slots),
+compile specialized guarded machine code in tiers, and re-frame
+wrong guesses as ordinary deopts instead of errors.</li>
+<li><strong>Evidence:</strong> the feedback lattice (<code>globals.h:2531</code>) and its
+embedded-byte update (<code>runtime-compiler.cc:163</code>); guards + the
+deopt entry (<code>builtins-x64.cc:5594</code>); installed assumptions
+(<code>compilation-dependencies.h:38 Commit</code>, with <code>DependOnStableMap</code>,
+<code>DependOnFieldConstness</code>, and protector cells).</li>
+<li><strong>Given up:</strong> simplicity (four compilers and a deoptimizer instead
+of one loop), memory (feedback vectors, Maps, several code objects
+per function), and warmup latency — a fresh function is <em>slower</em>
+than a naive interpreter until feedback exists, and deopt storms
+can make steady state oscillate.</li>
+<li><strong>Verdict:</strong> right when code runs long enough to amortize the
+bets — browsers and servers, exactly V8&#39;s hosts. CPython shows the
+portable middle path (specialize, never JIT); Lua shows the
+minimalist one (no speculation at all). If your workload is
+run-once scripts, the whole ladder is overhead — which is why V8
+itself ships <code>--jitless</code> and <code>--single-threaded</code> fallback modes.</li>
+</ul>
+<h3 id="trade-off-2-hidden-classes-over-dictionaries-for-every-object">Trade-off 2: hidden classes over dictionaries for every object</h3>
+<ul>
+<li><strong>Tension:</strong> property access dominates JS execution; dictionaries
+make every access a hash lookup, but objects are wildly dynamic by
+spec.</li>
+<li><strong>Choice:</strong> give every object a <code>Map</code> describing its shape; grow
+shapes through transition trees; let ICs and compilers key on Maps
+and bet on stability.</li>
+<li><strong>Evidence:</strong> <code>Map</code> itself (<code>map.h:257</code>), the elements-kind ladder
+that generalizes packed Smi → double → tagged arrays
+(<code>src/objects/elements-kind.h:94</code>), and the price tag:
+<code>MapUpdater</code> deprecation/migration machinery (<code>map-updater.cc:1102</code>,
+<code>map-updater.h:101 GeneralizeField</code>) plus megamorphic fallbacks
+(<code>stub-cache.h:88</code>).</li>
+<li><strong>Given up:</strong> memory per shape (every distinct layout is a live
+object), write-time costs on every transition, and a whole
+subsystem (map deprecation) that exists only to reconcile old bets
+with new shapes. Genuinely shapeless programs (thousands of
+distinct keys) force dictionary mode and pay a mode tax both ways.</li>
+<li><strong>Verdict:</strong> right because real programs stamp objects from few
+constructors — the bet almost always has few shapes to learn. It
+would be wrong for data that is truly schema-on-write (JSON blobs
+with arbitrary keys): there, prefer a dictionary-first design like
+CPython&#39;s <code>dict</code> — or V8&#39;s own slow mode.</li>
+</ul>
+<h3 id="trade-off-3-concurrent-incremental-gc-over-stop-the-world">Trade-off 3: concurrent, incremental GC over stop-the-world</h3>
+<ul>
+<li><strong>Tension:</strong> heaps are hundreds of MB; hosts enforce frame budgets
+(16ms) and request latencies that a full mark pause would blow.</li>
+<li><strong>Choice:</strong> never collect in one burst. Young gen: copying
+scavenger (deaths free, survivors promoted). Old gen: incremental
+marking steps on the main thread, concurrent marking on platform
+jobs, short atomic pause, concurrent sweeping
+(<code>heap.cc:2617</code>, <code>mark-compact.cc:526</code>/<code>:6264</code>,
+<code>concurrent-marking.cc:365</code>).</li>
+<li><strong>Evidence:</strong> the store-path barrier every mutator pays
+(<code>heap-write-barrier-inl.h:52</code>), and the job hand-off to the
+embedder&#39;s thread pool (<code>concurrent-marking.cc:701</code>).</li>
+<li><strong>Given up:</strong> raw throughput (barriers + worklist synchronization
+do more total work than a batch collector) and a great deal of
+complexity (safepoints, <code>LocalHeap</code> for off-thread access,
+collection barriers between threads).</li>
+<li><strong>Verdict:</strong> right whenever you are a guest in someone else&#39;s
+latency budget — the same reasoning as Lua&#39;s debt-paced GC and
+<a href="../redis/">Redis</a>&#39;s incremental rehash, at the scale where the
+janitors get their own threads. Wrong for batch jobs, where a
+stop-the-world sweep of a short-lived heap is simply cheaper.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>include/v8-local-handle.h</code> (99–180) — <code>HandleScope</code> and <code>Local</code>:
+the entire embedding protocol is &quot;create a scope, receive
+handles.&quot; Compare Lua&#39;s <code>lapi.c</code> tray while it is fresh; notice
+both engines ban raw object pointers for the same GC reason.</li>
+<li><code>src/init/isolate-group.h:72</code> — what a <em>group</em> owns (cage at
+<code>:150</code>, code range, shared read-only heap at <code>:198</code>) vs what each
+<code>Isolate</code> owns; this is Chrome&#39;s per-site isolation in miniature.</li>
+<li><code>src/objects/map.h:257</code> — the hidden class. Read the field
+diagram comment near the top, then <code>raw_transitions</code> (<code>:583</code>) and
+<code>instance_descriptors</code> (<code>:793</code>); open <code>src/objects/transitions.h</code>
+for how one pointer encodes &quot;no transitions / one weak ref / a
+whole array.&quot;</li>
+<li><code>src/objects/elements-kind.h:94</code> — the packed-Smi → packed-double
+→ packed ladder; arrays generalize one way, like the feedback
+lattice. Then <code>src/objects/map-updater.cc:1102</code> to see how
+generalization deprecates old maps.</li>
+<li><code>src/interpreter/bytecode-generator.cc:8039</code> — watch <code>a + b</code>
+become bytecode; find the <code>kFeedbackIsEmbedded</code> constant it uses
+(<code>src/common/globals.h:972</code>) and the operand-index constants
+below it (<code>:981</code>).</li>
+<li><code>src/builtins/x64/builtins-x64.cc:1075</code> — the trampoline: budget
+decrement, stack-limit check, dispatch-table load, <code>call</code>, and
+the loop back to <code>do_dispatch</code>. Read it as assembly-level prose:
+there is no interpreter loop <em>here</em> — handlers jump to handlers
+(<code>DispatchToBytecode</code>), and the trampoline is the re-entry and
+return point they fall back to.</li>
+<li><code>src/interpreter/interpreter-generator.cc:1052</code> (<code>Add</code>) and
+<code>:610</code> (<code>GetNamedProperty</code>) — two handler shapes: arithmetic with
+embedded feedback vs. property access through a <code>FeedbackVector</code>
+slot. Then the whole Add ladder in <code>src/ic/binary-op-assembler.cc:27</code>
+— Smi, double, string, oddball, generic.</li>
+<li><code>src/common/globals.h:1920</code> and <code>:2531</code> — the two lattices this
+engine runs on: IC states and binary-operation feedback. These
+enums are the contract between every tier.</li>
+<li><code>src/execution/tiering-manager.cc:585 OnInterruptTick</code> and <code>:434 ShouldOptimize</code> — the promotion decision; cross-check thresholds
+in <code>src/flags/flag-definitions.h:1115–1142</code> (feedback at 8 calls,
+Maglev at 400 on desktop, 1000 on Android, TurboFan at 3000, OSR
+at 500).</li>
+<li><code>src/compiler/pipeline.cc:505</code> — <code>PipelineCompilationJob</code>: read
+<code>PrepareJobImpl</code> (<code>:692</code>), <code>ExecuteJobImpl</code> (<code>:761</code>), and
+<code>FinalizeJobImpl</code> (<code>:804</code>) in order; notice which thread each
+runs on and where the JSHeapBroker serializes main-thread heap
+access. Then <code>src/compiler/compilation-dependencies.h</code> — the
+catalogue of bets (stable maps, field constness, protectors) —
+and the <code>turbolev</code> flag (<code>flag-definitions.h:1802</code>) hinting the
+graph builder itself is being replaced by Maglev&#39;s.</li>
+<li><code>src/deoptimizer/deoptimizer.cc:290</code> and <code>:1651</code>, plus
+<code>src/deoptimizer/translated-state.h:48</code> — how a deopt rebuilds
+interpreter frames; finish with
+<code>src/objects/dependent-code.cc:176</code> — invalidation deopt, the
+lazy counterpart that catches dependency breakers.</li>
+<li><code>src/heap/heap.h:773–787</code> — the space map; then <code>Heap::Scavenge</code>
+(<code>heap.cc:2617</code>) and <code>src/heap/scavenger.cc:1628</code> for the young
+gen; then <code>src/heap/mark-compact.cc:526</code>,
+<code>src/heap/incremental-marking.h:99</code>, <code>src/heap/concurrent-marking.cc:365</code>,
+and the barrier at <code>src/heap/heap-write-barrier-inl.h:52</code> —
+the whole latency story of section 3 in five functions.</li>
+</ol>
+<p>You have now traced one function from lazy source through four tiers
+of guarded machine code, back down through a deopt, and across two
+garbage collectors — the complete speculation cycle V8 exists to
+run. Fire up <code>d8 --trace-opt --trace-deopt --trace-gc</code> with your own
+<code>add</code> and watch the same story logged live.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make observation a side effect, and monotone.</strong> Feedback bytes
+written by the same instruction that computes the answer, in a
+lattice that only widens (<code>BinaryOperationFeedback</code>,
+<code>globals.h:2531</code>): adaptation with zero scheduling and no
+oscillation. Steal for any self-tuning system.</li>
+<li><strong>Validate bets at install time, and register their retraction.</strong>
+<code>CompilationDependencies::Commit</code> checks every assumption the
+optimizer made and attaches the code to the objects that could
+disprove it, so invalidation is automatic
+(<code>DependentCode::DeoptimizeDependencyGroups</code>). Optimistic
+concurrency — for code.</li>
+<li><strong>Price promotion in the hot path, not with timers.</strong> The
+interrupt budget decremented by bytecode length
+(<code>builtins-x64.cc:1075</code>) is Lua&#39;s allocation-debt trick applied to
+compilation tiering: cost proportional to work done, no scheduler.</li>
+<li><strong>Design the fallback before the fast path.</strong> TurboFan emits
+<code>TranslatedState</code> metadata so a deopt can resurrect exact
+interpreter state (<code>deoptimizer.cc:1651</code>). Any speculative system
+without a complete, tested retraction path is a crash with extra
+steps.</li>
+<li><strong>Generate the interpreter from one DSL.</strong> <code>IGNITION_HANDLER</code>
+macros (and the Turboshaft generator being phased in) produce
+per-architecture handler code from one source — the lesson
+CPython learned the same year, in portable C.</li>
+<li><strong>Rent your threads from the host.</strong> V8 owns no threads;
+<code>v8::Platform</code> inverts control so the same engine runs under
+Chrome&#39;s scheduler or a bare Node loop (<code>concurrent-marking.cc:701</code>).</li>
+<li><strong>Share only the immutable.</strong> Isolate groups share a cage, code
+range, and read-only heap — never mutable state
+(<code>isolate-group.h:198</code>). Cheap isolation plus cheap sharing is the
+pairing that made per-site/per-worker embedding viable.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <code>demanding</code>. Realistic budget: 10–12 hours — 4 for the
+tiering spine (stops 5–11 of the reading path), 3 for the
+feedback/Maps substrate, 3 for the heap, and the rest for
+experimenting with <code>d8</code>. Do not try to read V8 breadth-first; the
+codebase is ~2M lines and the atlas method (one story, every
+landmark opened) is the only sane way in.</li>
+<li>Prerequisites: comfortable C++ (macros, templates, RAII); compiler
+vocabulary (AST, bytecode, SSA/graph IR — the
+<a href="../cpython/">CPython</a> dive is the gentlest on-ramp); tagged
+pointers and tracing GC basics (<a href="../lua/">Lua</a>&#39;s <code>TValue</code> and
+<code>luaC_step</code> cover the ideas at 1/1000th the scale); enough x64
+assembly to read <code>Generate_InterpreterEntryTrampoline</code> as
+pseudo-code. Building V8 itself is optional — <code>d8</code> binaries (or
+jsvu) plus <code>--trace-*</code> flags deliver the runtime evidence without
+a gn/ninja build.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>v8.dev blog — the primary-source history of everything this dive
+cites in code: &quot;Ignition: V8&#39;s interpreter&quot; (2016), &quot;Launching
+Ignition and TurboFan&quot; (2017), &quot;Sparkplug&quot; (2021), the Maglev
+announcement (2023), &quot;Concurrent marking&quot; (2018), &quot;Jank Busters&quot;
+parts I–II (the Orinoco project: incremental/concurrent GC,
+2015–16), and the pointer-compression post (2020).</li>
+<li>v8.dev/docs — &quot;Embedding V8&quot; (the API walkthrough this dive&#39;s
+section 4 summarizes) and the TurboFan/Turboshaft internals docs.</li>
+<li>The <a href="../cpython/">CPython</a> and <a href="../lua/">Lua</a> dives in this atlas —
+the two other points on the feedback-vs-simplicity axis, and the
+friendliest way to hold V8&#39;s size in perspective.</li>
+<li>The <a href="../nodejs/">Node.js</a> dive — V8&#39;s largest embedder, where the
+handle-scope API and <code>v8::Platform</code> meet libuv.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../rocksdb/"><span class="dir">← Previous dive</span>RocksDB: LevelDB paged into Flash-scale production — column families, budgets, and a tuning surface</a>
+  <a href="../chromium/" style="text-align:right"><span class="dir">Next dive →</span>Chromium: a security model that forced a multi-process operating system for web content</a>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 32 of 40 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -23,7 +23,7 @@ event loops for I/O-bound work", "content-address your data". Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.
 
-The atlas points at 35 (and growing) canonical codebases and walks through
+The atlas points at 40 (and growing) canonical codebases and walks through
 the *decisions frozen into their code*: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -101,13 +101,21 @@ Deep-dives (the exemplars — more added over time):
 - [Linux kernel](deep-dives/linux.md) — frozen syscall ABI over vtable seams: fair-share EEVDF scheduler, lock-free page cache, RCU reads
 - [Go runtime](deep-dives/go.md) — M:N goroutines: GMP work-stealing scheduler, integrated netpoller, growable stacks + escape analysis, concurrent GC with a hybrid write barrier
 - [RocksDB](deep-dives/rocksdb.md) — LevelDB paged into production: column families over one WAL, stall ladders and I/O budgets, pluggable compaction
+- [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
+- [Chromium](deep-dives/chromium.md) — a security model that forced the architecture: sandboxed renderer processes, site isolation, Mojo capability IPC, the browser's mirrored frame tree
+- [Caddy](deep-dives/caddy.md) — goroutines instead of state machines, config as a provisioned document, automatic HTTPS as a subsystem
+- [Neovim](deep-dives/neovim.md) — editor as RPC server: msgpack-RPC UI seam, in-process Lua on the shared libuv loop
+- [LLVM](deep-dives/llvm.md) — one shared IR as the architectural seam: def-use pointer graph, pass pipeline as parseable data, N frontends × M backends into N+M
+- [ClickHouse](deep-dives/clickhouse.md) — columns all the way down: sparse-indexed immutable parts, granule skipping, PREWHERE, vectorized execution
+- [OpenJDK HotSpot](deep-dives/hotspot.md) — earned speed: tiered C1/C2 compilation with designed deoptimization, and the Serial→Parallel→G1→ZGC collector lineage behind one heap contract
+- [Prometheus](deep-dives/prometheus.md) — pull model made correct by absence-as-data: scrape clocks + staleness markers, WAL-protected head, immutable block compaction, rules as reconcile loops
+- [TiDB](deep-dives/tidb.md) — SQL as a thin skin over three services: stateless SQL nodes, one global clock (TSO), Raft-replicated MVCC storage (Percolator 2PC in TiKV)
 
-The catalog tracks 4 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — V8,
-and more —
+The catalog currently tracks no further heavyweight and
+high-teaching-value candidates awaiting deep-dives — every
+cataloged heavyweight already has one —
 across databases, queues, runtimes, containers, ML, browser engines,
-load balancers, and editors. Chromium is cataloged for
-targeted reading rather than a deep-dive by design (see its entry).
+load balancers, and editors.
 
 ## Status
 

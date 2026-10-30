@@ -25,7 +25,7 @@
 </nav>
 <main id="main">
 <div class="page article-layout">
-<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
+<nav class="toc" aria-label="Contents"><div class="toc-title">Patterns</div><ol><li><a href="#1-content-addressing-name-things-by-their-hash">1. Content addressing (name things by their hash)</a></li><li><a href="#2-write-ahead-logging-make-the-log-the-truth">2. Write-ahead logging (make the log the truth)</a></li><li><a href="#3-immutable-core-tiny-mutable-surface">3. Immutable core, tiny mutable surface</a></li><li><a href="#4-supervisor-expendable-workers">4. Supervisor + expendable workers</a></li><li><a href="#5-event-loop-readiness-demultiplexing">5. Event loop / readiness demultiplexing</a></li><li><a href="#6-amortize-every-unbounded-operation">6. Amortize every unbounded operation</a></li><li><a href="#7-declarative-state-reconcile-loops">7. Declarative state + reconcile loops</a></li><li><a href="#8-quarantine-the-environment-behind-one-interface">8. Quarantine the environment behind one interface</a></li><li><a href="#9-versioned-data-for-concurrent-readers-mvcc">9. Versioned data for concurrent readers (MVCC)</a></li><li><a href="#10-extension-seams-placed-where-the-design-flexes">10. Extension seams placed where the design flexes</a></li><li><a href="#11-sequential-i-o-and-zero-copy-as-throughput-primitives">11. Sequential I/O and zero-copy as throughput primitives</a></li><li><a href="#12-generate-the-surface-from-data">12. Generate the surface from data</a></li><li><a href="#13-dumb-core-smart-edges">13. Dumb core, smart edges</a></li><li><a href="#14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</a></li><li><a href="#15-the-intermediate-representation-is-the-architecture">15. The intermediate representation is the architecture</a></li><li><a href="#how-to-use-this-index-while-learning">How to use this index while learning</a></li></ol></nav>
 <div>
   <header class="article-header"><h1>Patterns index: design lessons that recur</h1>
   <p class="lead">The deep-dives teach systems; this index teaches <strong>design</strong>. Each pattern appears in two or more canonical codebases — the recurrence is the signal.</p></header>
@@ -69,7 +69,14 @@ is the WAL that decouples &quot;searchable&quot; (refresh) from &quot;durable&qu
 proposal and fsyncs before the follower acks, so election is just
 &quot;highest log wins&quot;; <a href="../dive/rocksdb/">RocksDB</a> — one WAL
 multiplexed over column families whose CF-tagged record types double
-as a prepare/commit/rollback transaction protocol.</p>
+as a prepare/commit/rollback transaction protocol;
+<a href="../dive/prometheus/">Prometheus</a> — the TSDB
+head&#39;s WAL protects only recent samples and fsyncs at segment
+rotation, a deliberately lighter durability point because metrics are
+re-scrapeable; <a href="../dive/tidb/">TiDB</a> — TiKV&#39;s raft-engine
+<em>is</em> the log: consensus entries persist there while applied state goes
+to RocksDB, whose own WAL the apply path can skip because the Raft log
+replays anything un-applied (raftstore fsm/apply.rs).</p>
 <p><strong>Why it recurs:</strong> sequential appends are the cheapest thing storage
 does; a single log turns unbounded crash-consistency problems into one
 mechanical replay.</p>
@@ -83,7 +90,10 @@ concentrated in one small, carefully synchronized component.</p>
 the only mutable pointers; <a href="../dive/leveldb/">LevelDB</a> — SSTables
 are immutable; the manifest (itself a log) is the mutable layout;
 <a href="../dive/kafka/">Kafka</a> — KRaft moved broker metadata into an
-append-only raft log.</p>
+append-only raft log; <a href="../dive/prometheus/">Prometheus</a> — the
+mutable surface is the head block (WAL-backed memory + m-mapped
+chunks); history lives in immutable time-windowed blocks that
+compaction merges upward and retention deletes whole.</p>
 <p><strong>Why it recurs:</strong> small mutable surfaces are auditable, lockable, and
 crash-safe; everything else becomes shareable and cacheable.</p>
 <p><strong>Reach for it when:</strong> reads dominate writes and history matters. The
@@ -107,7 +117,12 @@ random pipeline death;
 <a href="../dive/haproxy/">HAProxy</a> — the
 master re-executes itself per reload and the old worker hands its
 listening sockets to the new one over a socketpair, so the supervisor
-ever only owns supervision, never a single connection.</p>
+ever only owns supervision, never a single connection;
+<a href="../dive/chromium/">Chromium</a> — the
+browser process supervises sandboxed renderer processes it assumes
+are hostile: a dead renderer is a sad tab and a policy-ladder
+respawn, and a lying one is killed on a catalogued
+BadMessageReason.</p>
 <p><strong>Why it recurs:</strong> crash containment composes; supervision is easy
 precisely when the supervisor owns nothing user-visible.</p>
 <p><strong>Reach for it when:</strong> work is parallelizable and per-unit state is
@@ -137,7 +152,12 @@ the loop&#39;s own scheduler made explicit: budgeted tasklet run queues
 in ebtrees, weighted by class, policed by a CPU-time watchdog;
 <a href="../dive/go/">Go runtime</a> — the readiness demultiplexer hidden
 <em>under</em> a thread scheduler: epoll parks and readies whole goroutines,
-so the loop exists but user code never sees a callback.</p>
+so the loop exists but user code never sees a callback;
+<a href="../dive/chromium/">Chromium</a> — every
+process is threads-over-queues: the browser&#39;s named UI/IO threads
+plus a trait-tagged ThreadPool, and renderers whose main thread is
+the HTML event loop — with PostTask messages, not locks, as the
+officially documented cross-thread contract.</p>
 <p><strong>Why it recurs:</strong> I/O-bound servers are bounded by ready descriptors,
 not by CPU; a loop removes per-connection stacks and most locking.</p>
 <p><strong>Reach for it when:</strong> workload is I/O-bound with cheap per-event
@@ -167,7 +187,26 @@ billed as scanning debt (<code>gcAssistAlloc</code>), and Green Tea batching
 spans to keep each unit of mark work cache-local;
 <a href="../dive/rocksdb/">RocksDB</a> — compaction budgets made explicit:
 a token-bucket rate limiter throttles background I/O while a stall
-ladder turns overload into published, steerable slowdown states.</p>
+ladder turns overload into published, steerable slowdown states;
+<a href="../dive/v8/">V8</a> — marking runs
+as allocation-paced steps on the main thread plus concurrent jobs on
+the embedder&#39;s platform, with the store-path write barrier as the
+mutator&#39;s tax that buys never stopping for one big collection
+(<code>ConcurrentMarking::RunMajor</code>, <code>IncrementalMarking::AdvanceOnAllocation</code>);
+<a href="../dive/clickhouse/">ClickHouse</a>
+— background k-way merges keep the part tree shallow while inserts
+seal new parts, and the Aggregator flips to two-level tables at a
+size threshold so the final merge parallelizes; <a href="../dive/hotspot/">HotSpot</a> — the
+whole tiering idea is amortized optimization (compile only what the
+counters say is hot), and G1 shrinks each pause by evacuating only a
+region collection set sized against a declared pause goal
+(<code>G1YoungCollector::collect</code>, the <code>MaxGCPauseMillis</code> MMU tracker in
+<code>G1Policy</code>), while ZGC moves marking and relocation off the mutator
+entirely — the pauses left are two sub-millisecond stack scans;
+<a href="../dive/prometheus/">Prometheus</a>
+— full head chunks m-mapped off the heap by a background loop, head
+ranges frozen into blocks by a budget-watching compactor that warns
+when it falls behind, and the WAL truncated by checkpointing.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -181,7 +220,12 @@ control plane; <a href="../dive/moby/">Moby</a> — Config/HostConfig/State
 is the same spec/status split at container granularity (and restart
 policies are a reconcile loop over exit states);
 <a href="../dive/nats/">NATS</a> — JetStream converges stream placement
-toward <code>desiredRaftGroup</code> state when servers fail or are added.</p>
+toward <code>desiredRaftGroup</code> state when servers fail or are added;
+<a href="../dive/prometheus/">Prometheus</a> — rule groups re-derive
+complete state every evaluation: alert rules reconcile the active-alert
+map against the current query result, stale-mark series the previous
+eval produced, and even restore their <code>for</code> timers after a restart by
+querying the ALERTS_FOR_STATE series they wrote to their own TSDB.</p>
 <p><strong>Why it recurs:</strong> distributed systems miss events; idempotent
 convergence from any state survives what edge-triggered designs
 cannot.</p>
@@ -218,7 +262,11 @@ compaction truncates it; <a href="../dive/linux/">linux</a> — RCU is the
 same bet at memory granularity: readers walk page-cache and dentry
 structures under <code>rcu_read_lock</code> with no locks at all, writers
 publish replacements atomically, and reclamation waits a grace
-period (<code>synchronize_rcu</code>).</p>
+period (<code>synchronize_rcu</code>); <a href="../dive/tidb/">TiDB</a> — MVCC pushed out
+of the database engine entirely: one global clock (PD&#39;s TSO) stamps
+versions, TiKV stores them as key+timestamp records in two column
+families with in-flight intents in a third (Percolator&#39;s layout), and
+readers resolve &quot;latest version ≤ my snapshot&quot; with a seek.</p>
 <p><strong>Why it recurs:</strong> locking readers against writers is the bottleneck
 MVCC deletes; every system that did it never went back.</p>
 <p><strong>Reach for it when:</strong> read concurrency matters more than write
@@ -256,13 +304,34 @@ compatible implementations coexist in one program;
 <a href="../dive/pytorch/">PyTorch</a> — every extension (custom
 ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
+<a href="../dive/caddy/">Caddy</a> — every extension point is a
+namespace-addressed slot in one typed JSON config, resolved by
+reflection at provisioning time, which is how 133 modules compose
+behind one static binary;
 <a href="../dive/servo/">Servo</a> — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
 so shells and C hosts (servoshell, ffi/capi) extend without forking;
 <a href="../dive/linux/">linux</a> — vtables at every layer joint
 (<code>file_operations</code>, <code>sched_class</code>) let thousands of filesystems and
 drivers — and, via sched_ext, even whole CPU scheduling policies as
-BPF programs — extend a monolith without forking it.</p>
+BPF programs — extend a monolith without forking it;
+<a href="../dive/neovim/">Neovim</a> — msgpack-RPC as the one seam for
+UIs, embedders, plugin hosts, and even the built-in terminal UI
+(a child process speaking the same protocol), with additive-only
+versioning making it safe for a decade of clients;
+<a href="../dive/llvm/">LLVM</a> — passes as the plugin unit: one C symbol
+(<code>llvmGetPassPluginInfo</code>) registers pipeline-parsing callbacks into
+the PassBuilder, so out-of-tree optimizers (Enzyme&#39;s autodiff) hook
+the compiler without forking it — and the pass registry itself is the
+seam the <code>-passes</code> pipeline language plugs into; <a href="../dive/hotspot/">HotSpot</a> — garbage collection as the
+pluggable room: five collectors (Serial, Parallel, G1, ZGC,
+Shenandoah) behind one <code>CollectedHeap</code> + <code>BarrierSet</code> contract, each
+also emitting its barriers per compiler and per architecture
+(<code>gc/g1/c1</code>, <code>gc/g1/c2</code>, <code>cpu/x86/gc/z/z_x86_64.ad</code>), selected by a
+startup factory (<code>GCConfig::select_gc</code>); <a href="../dive/tidb/">TiDB</a> — the kvproto service contract plus PD
+placement rules are the seam: a columnar engine (TiFlash) joined the
+system as just another Raft replica of the same regions, with the SQL
+layer unchanged.</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -302,7 +371,34 @@ into Rust DOM bindings and JS glue, so the web API surface cannot
 drift from its implementations; <a href="../dive/linux/">linux</a> —
 <code>syscall_64.tbl</code> is the frozen syscall ABI as one data file, from
 which the dispatch switch, the <code>__x64_sys_*</code> stubs, and the tracing
-table are all generated.</p>
+table are all generated; <a href="../dive/v8/">V8</a> — the
+interpreter itself is generated: one <code>IGNITION_HANDLER</code> DSL per
+bytecode (with Torque-built builtins beside it) compiles to
+machine-code handlers for every architecture, the same move as
+CPython&#39;s <code>bytecodes.c</code> but stopping at nothing short of code;
+<a href="../dive/chromium/">Chromium</a> — ~1,900
+.mojom IDL files compile into typed, versioned IPC bindings for
+every process boundary, so validation and version skew are build
+artifacts, not review diligence;
+<a href="../dive/neovim/">Neovim</a> — every <code>nvim_*</code> API function is
+declared once with FUNC_API attributes in <code>api/*.c</code>; generators
+emit the perfect-hash dispatch table, Lua bindings, runtime
+metadata, docs, and the twin server/client halves of the UI event
+protocol (<code>ui_events.in.h</code> → packers and handlers);
+<a href="../dive/llvm/">LLVM</a> — the pass vocabulary is a macro table
+(<code>PassRegistry.def</code>) that generates the pipeline parser, and CPU
+targets are TableGen <code>.td</code> records expanded into generated selector
+tables (even <code>default&lt;O2&gt;</code> is a registry alias, not driver code — so
+the optimizer&#39;s configuration, its targets, and its extension
+surface are all data;
+<a href="../dive/clickhouse/">ClickHouse</a> — settings and factory
+registrations (engines, functions, codecs, formats) carry their own
+doc strings, so thousands of knobs and extensions stay
+user-visible without a second handbook); <a href="../dive/hotspot/">HotSpot</a> —
+the interpreter itself is generated at JVM startup from one <code>def()</code>
+per bytecode (<code>TemplateTable::initialize</code>), emitting a dispatch
+table of machine code per platform — the same move as CPython&#39;s
+<code>bytecodes.c</code>, one step further down to native code.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>
@@ -331,6 +427,68 @@ operations that need a global view (rebalancing without client
 updates, multi-key transactions) become impossible or bolted on
 later — which is exactly the cliff both Memcached and early Kafka
 hit, and what ZooKeeper/etcd exist to catch on the coordination side.</p>
+<h2 id="14-speculate-guard-deoptimize">14. Speculate, guard, deoptimize</h2>
+<p><strong>Shape:</strong> run a slow-but-correct baseline; record what actually
+happens (types, shapes, call targets); compile guarded fast paths
+that assume the observations hold; when a guard fails, fall back to
+the baseline and record the wider truth. Wrong guesses are a
+designed control-flow path, not an error.</p>
+<p><strong>Seen in:</strong> <a href="../dive/v8/">V8</a> — the full ladder: feedback
+bytes and IC states observed by Ignition, four tiers of guarded
+code, <code>Deoptimizer</code> rebuilding interpreter frames, and
+<code>CompilationDependencies</code> registering invalidations so a Map
+transition can retire whole batches of optimized code;
+<a href="../dive/cpython/">CPython</a> — the portable middle point: the
+same feedback-and-guards idea (3.11&#39;s adaptive interpreter)
+specializing bytecode in place, with deopt back to the generic
+opcode, and no JIT at all. <a href="../dive/lua/">Lua</a> is the control
+experiment: zero speculation, one honest interpreter.</p>
+<p><strong>Why it recurs:</strong> dynamic languages hide their types until runtime;
+when the workload is long-lived, learning-by-running beats both
+static typing (unshippable) and naive interpretation (unbearably
+slow). The engineering is not the specialization — it is making
+retraction complete and cheap, because a guess you cannot safely
+take back is a crash.</p>
+<p><strong>Reach for it when:</strong> the hot paths are stable enough to have
+repeating shapes/types and the process lives long enough to amortize
+learning. Costs: warmup latency (cold code runs the baseline),
+memory for feedback and multiple code versions, and deopt storms
+when shapes churn. Short-lived processes should stay at CPython&#39;s
+specialization tier or Lua&#39;s none at all.</p>
+<h2 id="15-the-intermediate-representation-is-the-architecture">15. The intermediate representation is the architecture</h2>
+<p><strong>Shape:</strong> instead of translating problem → solution in one step, the
+system freezes a serializable intermediate representation at the
+seam, checks it with a verifier, and makes every transformation a
+small, composable stage over it — so N producers and M consumers
+cost N+M, not N×M.</p>
+<p><strong>Seen in:</strong> <a href="../dive/llvm/">LLVM</a> — the pattern&#39;s cathedral: a
+pointer-graph IR with def-use chains, a Verifier enforcing the
+contract, passes scheduled by a parseable pipeline string, and the
+whole design cloned again into machine IR; <a href="../dive/sqlite/">SQLite</a>
+— every SQL statement compiles to a VDBE bytecode program before it
+runs, making the query plan inspectable and re-executable;
+<a href="../dive/cpython/">CPython</a> — bytecode as a poor man&#39;s IR: no
+SSA and a stack machine, yet the same bet (serialize the program,
+then transform it — the adaptive interpreter specializing hot opcodes
+in place is a mini-optimizer over it); <a href="../dive/pytorch/">PyTorch</a>
+— torch.compile captures the eager tape into a graph IR that
+TorchInductor lowers into Triton/C++ (kernels that bottom out in
+LLVM — the pattern composing with itself); <a href="../dive/llama-cpp/">llama.cpp</a>
+— ggml tensor graphs: models <em>are</em> dataflow IR that a generic backend
+executes, which is why 160 architectures are just files.</p>
+<p><strong>Why it recurs:</strong> the IR is where every concern meets — frontends,
+optimizers, backends, debuggers, serializers — so freezing it (with a
+verifier) turns each of those into an independently developed,
+independently testable program over shared data. V8&#39;s tiering
+(Ignition bytecode → Maglev → TurboFan) is the same insight inside a
+runtime: each tier is one more lowering over an IR.</p>
+<p><strong>Reach for it when:</strong> more than one producer or more than one
+consumer of the program/work exists, or will. The price is paying for
+the IR itself — a data structure that must stay honest under mutation
+(LLVM&#39;s Use lists, its Verifier, and its serialize-then-parallelize
+concurrency boundary are the invoice) — and losing whatever your
+source language knew that the IR doesn&#39;t (LLVM&#39;s intrinsics list is
+that loss, itemized).</p>
 <hr>
 <h2 id="how-to-use-this-index-while-learning">How to use this index while learning</h2>
 <ol>

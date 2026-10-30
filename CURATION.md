@@ -10,7 +10,7 @@ design-trivial, does not belong here.
 
 Each candidate is scored 1–5 per axis by whoever proposes it (and re-scored
 in review). Rough bar for inclusion: **no axis below 3, total ≥ 15**.
-Entries scoped as reference reading (e.g. Linux, Chromium) may sit
+Entries scoped as reference reading (e.g. Linux) may sit
 below the bar when their why-paragraph argues targeted-reading value;
 the bar governs deep-dive candidates.
 
@@ -79,8 +79,8 @@ PR).
 
 Domains tracked today: `os-kernel`, `database`, `storage-engine`, `cache`,
 `web-server`, `proxy-lb`, `vcs`, `queue-log`, `runtime`, `language`,
-`container`, `orchestration`, `ml-framework`, `browser-engine`, `editor`,
-`distributed`, `search-engine`, `networking`, `media`.
+`compiler`, `container`, `orchestration`, `ml-framework`, `browser-engine`,
+`editor`, `distributed`, `search-engine`, `networking`, `media`, `observability`.
 
 ## Scoring rubric
 

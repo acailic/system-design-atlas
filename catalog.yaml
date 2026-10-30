@@ -125,6 +125,30 @@ projects:
       files, and conservative extension points (WAL is the seam logical
       replication hooks into).
 
+  - id: clickhouse
+    name: ClickHouse
+    repo: https://github.com/ClickHouse/ClickHouse
+    language: C++
+    license: Apache-2.0
+    domains: [database, distributed]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 3, teachability: 4, domain_fit: 5 }
+    why: >
+      The database that made "scan a billion rows, answer in a second"
+      a commodity, and it won that slot with one shape applied
+      end-to-end: data is columnar in memory (Block/IColumn), columnar
+      on disk (per-column compressed files inside immutable,
+      primary-key-sorted parts), and processed in whole batches
+      (vectorized functions called once per granule, not once per
+      row) — so a query touches only the columns and granule ranges
+      it needs, guided by a sparse primary index of one key value per
+      ~8,192 rows. Read after LevelDB/RocksDB (LSM) and Elasticsearch
+      (inverted index) to complete the atlas's storage-engine
+      trilogy: the same immutable-parts + background-merges skeleton,
+      with the payload transposed to columns and the workload set to
+      aggregation.
+
   # ── storage engines ───────────────────────────────────────────────────
 
   - id: leveldb
@@ -207,7 +231,7 @@ projects:
     license: Apache-2.0
     domains: [web-server, proxy-lb]
     difficulty: gentle
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 3, clarity: 5, teachability: 5, domain_fit: 4 }
     why: >
       A modern web server where the idioms do the hard work: Go's
@@ -392,7 +416,7 @@ projects:
     license: BSD-3-Clause
     domains: [runtime, language]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 3 }
     why: >
       The fastest widely-deployed JS engine: Ignition interpreter, TurboFan
@@ -401,6 +425,30 @@ projects:
       a first read — the lesson is how speculative optimization shapes
       architecture (feedback vectors, deopt points) when raw speed is the
       product.
+
+  - id: hotspot
+    name: OpenJDK HotSpot
+    repo: https://github.com/openjdk/jdk
+    language: C++
+    license: GPL-2.0-only WITH Classpath-exception-2.0
+    domains: [runtime, language]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 4 }
+    why: >
+      The most-deployed managed runtime in existence — it runs on
+      millions of servers and desktops, and its patterns (tiered JIT,
+      concurrent copying collectors) are mirrored in Android's ART —
+      and it won that position with two architectural bets the whole industry
+      copied: speed earned at runtime by tiered, profile-guided
+      compilation with designed retraction (interpreter → C1 → C2,
+      uncommon traps and deoptimization), and garbage collection as a
+      swappable subsystem behind one CollectedHeap/BarrierSet contract
+      (Serial → Parallel → G1 → ZGC as an evolutionary lineage, one
+      binary). Included as the heavyweight rival of V8 — two engines
+      that independently converged on tiered, deoptimizable
+      speculation — and read targeted via the atlas map (tiering spine,
+      deopt, GC lineage), never cover to cover.
 
   - id: go
     name: Go runtime
@@ -425,6 +473,35 @@ projects:
       concurrency) copied the model. Teaches cheapness as a
       compiler-runtime contract: the keyword is the API, four
       subsystems are the implementation.
+
+  # ── compilers ──────────────────────────────────────────────────────
+
+  - id: llvm
+    name: LLVM
+    repo: https://github.com/llvm/llvm-project
+    language: C++
+    license: Apache-2.0 WITH LLVM-exception
+    domains: [compiler]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The compiler infrastructure the industry breathes through — clang,
+      Rust, Swift, Julia, Zig, and the Triton kernels behind PyTorch's
+      torch.compile all lower onto it — and it won that ubiquity through
+      one architectural bet: freeze a single intermediate representation
+      (LLVM IR) good enough that N frontends and M backends meet in the
+      middle, turning N×M compilers into N+M. Teaches the IR as the
+      architectural seam: an in-memory pointer graph (Value/User/Use)
+      with incrementally maintained def-use chains and a Verifier as the
+      contract, a pass pipeline expressed as parseable data
+      (-passes=default<O2> is a registry alias, not driver code),
+      analyses cached and invalidated by explicit PreservedAnalyses
+      contracts, plugins loading through one C symbol, and the whole
+      architecture cloned one level down into machine IR (MIR) and
+      TableGen-described targets. The pairing dive for CPython (bytecode
+      as a poor man's IR), V8 (tiering as an IR pipeline), and PyTorch
+      (TorchInductor lowering into LLVM).
 
   # ── search engines ───────────────────────────────────────────────────
 
@@ -568,7 +645,7 @@ projects:
     license: BSD-3-Clause AND others
     domains: [browser-engine]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 5, clarity: 2, teachability: 2, domain_fit: 2 }
     why: >
       The most dominant browser engine ever and the codebase behind
@@ -576,9 +653,9 @@ projects:
       utility processes), Mojo IPC, the V8/Blink split. Its process
       architecture — splitting rendering into sandboxed, killable
       processes — is what let Chrome win on security and stability while
-      rivals stayed monolithic. Cataloged for completeness and targeted
-      reading only; the atlas-level lesson is how a security model forced
-      the architecture, at the cost of enormous IPC complexity.
+      rivals stayed monolithic. The atlas-level lesson is how a security
+      model forced the architecture, at the cost of enormous IPC
+      complexity.
 
   # ── distributed systems ───────────────────────────────────────────────
 
@@ -620,6 +697,54 @@ projects:
       on: sessions, watches, and the read/write split that makes a
       coordination service scalable at all.
 
+  # ── observability ────────────────────────────────────────────────────
+
+  - id: prometheus
+    name: Prometheus
+    repo: https://github.com/prometheus/prometheus
+    language: Go
+    license: Apache-2.0
+    domains: [observability, storage-engine]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 4, teachability: 4, domain_fit: 5 }
+    why: >
+      The monitoring system that owns the metrics slot in the cloud-native
+      stack, and it won by inverting the ingestion model: pull, don't push.
+      The server scrapes every target on a known interval over plain HTTP,
+      so liveness, latency, and sample age are facts the monitor itself
+      observes — and absence is written into the database as staleness
+      markers, making "target gone" data rather than silence. Everything
+      else follows: a two-tier TSDB (WAL-protected mutable head, immutable
+      time-windowed blocks) with the same shape as an LSM engine, PromQL,
+      and an alert engine whose rule groups are scheduled reconcile loops
+      that write results — even their own restart state (ALERTS_FOR_STATE)
+      — back as ordinary series. Teaches observability as an architecture
+      problem: the exposition format, the scrape clock, and the storage
+      engine are one design.
+
+  - id: tidb
+    name: TiDB
+    repo: https://github.com/pingcap/tidb
+    language: Go (SQL layer), Rust (TiKV storage)
+    license: Apache-2.0
+    domains: [database, distributed]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 4, clarity: 3, teachability: 3, domain_fit: 5 }
+    why: >
+      The open-source distributed SQL database that actually shipped at
+      scale, and it won its slot by refusing to invent: it took PostgreSQL's
+      SQL semantics (in MySQL dialect), etcd-lineage Raft (raft-rs),
+      Percolator's coordinator-free 2PC, and RocksDB underneath — then made
+      them compose behind one narrow contract of ordered bytes, one global
+      timestamp (PD's TSO), and a KV protocol. That disaggregation is the
+      lesson: stateless SQL nodes, a clock-and-placement service, and
+      Raft-replicated MVCC key ranges each scale and evolve independently,
+      and a columnar engine (TiFlash) later joined as just another Raft
+      replica. Read it beside the etcd, PostgreSQL, and LevelDB dives to
+      watch three famous single-node ideas survive being fused.
+
   # ── editors ───────────────────────────────────────────────────────────
 
   - id: vscode
@@ -649,7 +774,7 @@ projects:
     license: Apache-2.0
     domains: [editor]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 3, clarity: 4, teachability: 4, domain_fit: 3 }
     why: >
       A 40-year-old editor architecture modernized without forking its

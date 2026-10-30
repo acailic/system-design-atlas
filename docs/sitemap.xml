@@ -32,5 +32,14 @@
   <url><loc>https://acailic.github.io/system-design-atlas/dive/linux/</loc></url>
   <url><loc>https://acailic.github.io/system-design-atlas/dive/go/</loc></url>
   <url><loc>https://acailic.github.io/system-design-atlas/dive/rocksdb/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/v8/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/chromium/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/caddy/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/neovim/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/llvm/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/clickhouse/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/hotspot/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/prometheus/</loc></url>
+  <url><loc>https://acailic.github.io/system-design-atlas/dive/tidb/</loc></url>
   <url><loc>https://acailic.github.io/system-design-atlas/patterns/</loc></url>
 </urlset>

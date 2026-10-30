@@ -33,7 +33,11 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `## Explain like I'm 10` section (with a `**Why the grown-ups did it this
   way:**` paragraph), unnumbered `## Walkthrough: …` section whose steps are
   exactly `**Step N — Title.**` / `**Outcome — Title.**` bold-lead paragraphs
-  (no code ticks in titles), and ```mermaid fenced diagrams. Numbered
+  (no code ticks in titles), and ```mermaid fenced diagrams. The
+  `## Walkthrough:` heading itself must also be plain text — inline code
+  ticks there silently break the stepper (build.mjs matches
+  `Walkthrough:[^<]*` and the test suite stays green; only the
+  step-through UI is lost). Numbered
   sections 1–9 keep their order; the two new sections are unnumbered so
   citations like "the reading path in section 6" stay stable.
 - Read-aloud + steppers are progressive enhancement in `site/assets/site.js`;
@@ -53,11 +57,18 @@ When updating this file, preserve this bar for all agents and keep entries conci
   voice picker filters `+` variants for this reason; cancel() surfaces as an
   `interrupted` error event (handled by the stale-utterance guard), and no
   boundary events fire, so verify progress by polling `speaking`.
+- TiDB dives need a THIRD pinned repo: the 2PC/txn client
+  (twoPhaseCommitter, RegionCache, lock resolver, ART MemDB) lives in
+  tikv/client-go — pin the exact `go.mod` version of the TiDB tag, plus
+  TiKV itself. TiKV's own release tags lag TiDB LTS lines (v8.5.x vs
+  TiDB v26.3.x): pin each repo's newest tag separately and say so in the
+  header, like etcd did with its extracted raft lib.
 
 ## Deep-dive process addenda (learned during the 13-dive expansion)
 
 - When adding a deep-dive, also update: `status:` in catalog.yaml, the coverage list in README.md, and (if the codebase instantiates a recurring lesson) the "Seen in" lists in PATTERNS.md — see CONTRIBUTING.md checklist.
-- Upstream refactors happen: redis/sqlite/git/kafka/etcd have all recently moved core code (git's odb/ layer, kafka's log engine to storage module Java, etcd's raft extracted to etcd-io/raft, VS Code ext-host paths, linux v7.2's do_syscall_64 now in arch/x86/entry/syscall_64.c and sched_ext under kernel/sched/ext/). Always grep for the function, never trust memory of layout. Same for Go: at go1.27 the size-class table moved to `internal/runtime/gc/sizeclasses.go`, `mallocgc` grew specialized paths (`mallocgcTiny`, `mallocgcSmallNoscan`), and Green Tea marking (`mgcmark_greenteagc.go`, baseline-on via `internal/buildcfg/exp.go`) replaced the classic `gcDrain`/`scanobject` story — pin releases (go1.27.3 tag fetches fine with `git fetch --depth 1 origin tag <tag>`), not master, and clone from github.com/golang/go or go.googlesource.com (SHAs match).
-- Cloning torvalds/linux: GitHub codeload and the gh api tarball endpoint both rate-limit (HTTP 429 by IP); the reliable route is resolving a release tag's SHA via the GitHub API (`repos/torvalds/linux/git/ref/tags/vX.Y`) and fetching the tarball from cdn.kernel.org (`pub/linux/kernel/vX.x/linux-X.Y.tar.xz`) — a tag snapshot is a valid pinned commit for torvalds/linux.
+- Upstream refactors happen: redis/sqlite/git/kafka/etcd have all recently moved core code (git's odb/ layer, kafka's log engine to storage module Java, etcd's raft extracted to etcd-io/raft, VS Code ext-host paths, linux v7.2's do_syscall_64 now in arch/x86/entry/syscall_64.c and sched_ext under kernel/sched/ext/). ClickHouse (dive #37): the old `IMergedBlockOutputStreamWriter` is now the `IMergeTreeDataPartWriter*` family, `QueryPipeline` moved to `src/QueryPipeline/`, `PipelineExecutor` to `src/Processors/Executors/Runtime/` — the sparse-index analysis landmark is `MergeTreeDataSelectExecutor::markRangesFromPKRange`. Always grep for the function, never trust memory of layout. Same for Go: at go1.27 the size-class table moved to `internal/runtime/gc/sizeclasses.go`, `mallocgc` grew specialized paths (`mallocgcTiny`, `mallocgcSmallNoscan`), and Green Tea marking (`mgcmark_greenteagc.go`, baseline-on via `internal/buildcfg/exp.go`) replaced the classic `gcDrain`/`scanobject` story — pin releases (go1.27.3 tag fetches fine with `git fetch --depth 1 origin tag <tag>`), not master, and clone from github.com/golang/go or go.googlesource.com (SHAs match). Chromium's frame_host/ logic now lives under content/browser/renderer_host/, and site-isolation concepts are split SiteInstance (principal) / SiteInstanceGroup (process view) / AgentSchedulingGroup (ordering) — classic-era docs are misleading.
+- The chromium shallow clone is ~7 GB / ~510k files (~45M LOC counted via `git ls-files | xargs wc -l`); plan clone time accordingly and never attempt full-file greps without a path filter.
+- HotSpot (dive #38, pinned jdk-27-ga 2026-08-19) moved a lot of lore: tieredThresholdPolicy is gone — the policy (5-level doc comment included) lives in share/compiler/compilationPolicy.{hpp,cpp}; safepointSynchronize.cpp → runtime/safepoint.cpp; oops/oopDesc.hpp → oops/oop.hpp; GenCollectedHeap → gc/serial/SerialHeap, markSweep → serialFullGC.cpp; HeapRegion renamed G1HeapRegion; G1 young pause extracted to G1YoungCollector; ZGC is generational (ZDriverMinor/Major actor threads) with colored-pointer layout documented in gc/z/zAddress.hpp. JVMCI/Graal JIT modules are NOT in the JDK 27 tree — don't cite them as in-tree pluggables. Cloning openjdk/jdk: plain `git clone --depth 1 --branch jdk-2N-ga` works (~1.1 GB checkout); resolve the tag sha via `git ls-remote --tags` for the pinned commit.
 - Parallel dive PRs collide in catalog.yaml/README.md/PATTERNS.md and the generated `docs/` (dive-count footers, index, sitemap): rebase onto main, union-resolve the source files (both dives' entries stay), recount README's "tracks N further" sentence by actually counting non-deep-dived catalog entries, then rebuild `docs/` instead of hand-merging generated HTML.
 - Cross-dive links use the `[Name](<id>.md)` form in deep-dives source; the builder rewrites them to `../<id>/` only when `deep-dives/<id>.md` exists on the branch — a link to a dive still sitting in an open PR renders as a (wrong-path) GitHub blob fallback until that PR merges and docs rebuild. Self-heals on the next rebuild after the sibling dive lands.

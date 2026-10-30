@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TiDB: SQL as a thin skin over three services that trust nobody — System Design Atlas</title>
+<meta name="description" content="TiDB is an open-source distributed SQL database that speaks the MySQL dialect — and it is really three services behind one narrow contract: stateless SQL nodes (TiDB), a placement-and-clock ">
+<meta property="og:title" content="TiDB: SQL as a thin skin over three services that trust nobody — System Design Atlas">
+<meta property="og:description" content="TiDB is an open-source distributed SQL database that speaks the MySQL dialect — and it is really three services behind one narrow contract: stateless SQL nodes (TiDB), a placement-and-clock ">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/tidb/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/tidb/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-update-parse-to-raft-commit">Walkthrough: one UPDATE, parse to Raft commit</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>TiDB: SQL as a thin skin over three services that trust nobody</h1>
+    <div class="meta-chips"><span class="chip domain">database</span><span class="chip domain">distributed</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/pingcap/tidb" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>—</code> · <a href="https://github.com/pingcap/tidb" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">TiDB is an open-source distributed SQL database that speaks the MySQL
+dialect — and it is really <strong>three services behind one narrow contract</strong>:
+stateless SQL nodes (TiDB), a placement-and-clock service (PD), and
+Raft-replicated MVCC storage (TiKV, RocksDB underneath). The single
+design idea this deep-dive teaches is <strong>disaggregation by contract</strong>:
+the SQL layer holds no data and knows nothing about placement; the
+storage layer knows nothing about SQL; the only shared truths are
+<em>ordered bytes</em>, <em>timestamps from one global clock</em>, and a KV protocol.
+Every hard problem — ACID across machines, snapshot isolation, scaling
+out — is solved with just those three primitives, largely by reusing
+designs this atlas has already dived alone: Raft (the etcd lineage),
+timestamp-stamped MVCC (the PostgreSQL lesson, different mechanism), and
+an LSM engine (the LevelDB/RocksDB lineage).</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A chain of translator offices, one town clock, and guarded warehouses.</strong>
+TiDB is a company with many friendly front offices (the stateless SQL
+nodes): they answer your questions in your language (SQL), but keep
+<em>nothing</em> on the shelves — you can open or close offices freely. The town
+hall (PD) owns the only official clock and the master map saying which
+guarded warehouse holds which range of shelf numbers. Each warehouse
+shelf-range (a region) is watched by a small committee of clerks (the
+Raft replicas) who agree on every line before writing it, so no warehouse
+ever contradicts its twin. A multi-warehouse contract (a distributed
+transaction) is signed in two phases: first a yellow sticky note
+(a prewrite lock) goes on every drawer involved — one note is declared
+the <em>master</em> (the primary key) — and only when the master&#39;s committee
+has confirmed its note does every drawer swap its sticky note for a
+permanent stamp (the commit record), each stamped with the town-hall time
+(the commit timestamp). Anyone who later finds a stray sticky note just
+asks the master&#39;s drawer what happened (lock resolution). And because
+every version of every line carries a town-hall time, &quot;show me the books
+as of 10:04&quot; (a snapshot read) works in every office identically.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> if the front office, the clock,
+and the shelves each trust only the shared contract — bytes, time, and
+protocol — then each can be added, replaced, or scaled without asking
+permission from the others, which is what makes one database survive
+growing from three machines to hundreds.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    C[&quot;MySQL client — wire protocol&quot;]
+    subgraph tidbL[&quot;TiDB — stateless SQL layer (Go)&quot;]
+        SES[&quot;session (pkg/session/session.go:2420 ExecuteStmt)&lt;br/&gt;statement lifecycle, txn retry&quot;]
+        PLAN[&quot;Compiler + planner&lt;br/&gt;(pkg/executor/compiler.go:50,&lt;br/&gt;pkg/planner/optimize.go:122)&quot;]
+        EXEC[&quot;volcano executors (pkg/executor/)&lt;br/&gt;reads via distsql: Select pkg/distsql/distsql.go:60&quot;]
+        CODEC[&quot;tablecodec (pkg/tablecodec/)&lt;br/&gt;rows &amp;amp; indexes as ordered keys&quot;]
+        TXN[&quot;txn client — tikv/client-go&lt;br/&gt;MemDB buffer (ART), 2PC committer,&lt;br/&gt;RegionCache routing, lock resolver&quot;]
+    end
+    subgraph pd[&quot;PD — placement &amp;amp; clock&quot;]
+        TSO[&quot;TSO — one global timestamp oracle&lt;br/&gt;(client-go oracle/oracles/pd.go:120)&quot;]
+        PLACE[&quot;region placement / split / balance&lt;br/&gt;placement rules (TiFlash, etc.)&quot;]
+    end
+    subgraph tikv[&quot;TiKV — replicated MVCC storage (Rust), one process per store&quot;]
+        SVC[&quot;gRPC kv service&lt;br/&gt;(src/server/service/kv.rs:1450)&quot;]
+        STOR[&quot;Storage (src/storage/mod.rs:196)&lt;br/&gt;reads: read pool; writes: TxnScheduler&lt;br/&gt;(scheduler.rs:421) + per-key latches&quot;]
+        MVCC[&quot;MVCC engine&lt;br/&gt;(src/storage/mvcc/txn.rs:60)&lt;br/&gt;CF_LOCK / CF_WRITE / CF_DEFAULT&quot;]
+        COPR[&quot;coprocessor (src/coprocessor/endpoint.rs:69)&lt;br/&gt;distsql executes here&quot;]
+        RAFTS[&quot;raftstore — one Raft group per region&lt;br/&gt;(peer.rs:3922 propose, apply fsm)&quot;]
+        LOG[(&quot;raft-engine — the consensus log&lt;br/&gt;(raft_log_engine/engine.rs:336)&quot;)]
+        ROCK[(&quot;RocksDB — LSM apply state&lt;br/&gt;(components/engine_rocks)&quot;)]
+    end
+
+    C --&gt; SES --&gt; PLAN --&gt; EXEC
+    EXEC --&gt; CODEC --&gt; TXN
+    TXN -- &quot;scan/coprocessor, prewrite, commit&quot; --&gt; SVC
+    TXN -- &quot;start_ts / commit_ts&quot; --&gt; TSO
+    TXN -- &quot;region → peer routing (cached)&quot; --&gt; PLACE
+    PLACE -.-&gt; RAFTS
+    SVC --&gt; STOR --&gt; MVCC
+    SVC --&gt; COPR
+    STOR -- &quot;proposed writes&quot; --&gt; RAFTS --&gt; ROCK
+    RAFTS --&gt; LOG
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>TiDB (SQL layer)</strong> parses (<code>pkg/parser</code>, a yacc grammar in
+<code>parser.y</code>), plans (<code>pkg/planner</code>), and executes (<code>pkg/executor</code>,
+a classic volcano iterator set) — but stores nothing. Its working
+state is a per-transaction in-memory write buffer (client-go&#39;s
+<code>MemDB</code>) and caches (schema, region routing). Add SQL nodes freely;
+sessions are just goroutines.</li>
+<li><strong>PD (Placement Driver)</strong> is the town hall: it allocates every
+transaction&#39;s timestamps through one TSO (timestamp oracle), and owns
+the region map — which TiKV peer leads which key range — plus
+split/balance decisions and placement rules (how a row store and a
+columnar store can both hold the same data).</li>
+<li><strong>TiKV (storage)</strong> is a shared-nothing cluster of stores; each store
+runs hundreds of Raft groups (one per region, a contiguous key range
+that splits as it grows). A txn-aware MVCC engine sits between the
+gRPC service and Raft; RocksDB persists applied state while a
+dedicated log engine (raft-engine) persists Raft logs — the log is the
+WAL, and TiKV can even skip RocksDB&#39;s own WAL on the apply path
+(<code>fsm/apply.rs:461</code>).</li>
+<li><strong>The spine</strong> — one <code>UPDATE t SET x=1 WHERE id=5</code> under the default
+pessimistic mode — is: <code>session.ExecuteStmt</code> (session.go:2420) →
+compile/plan (compiler.go:50, optimize.go:122) → point-get read at a
+snapshot timestamp → pessimistic lock → executor encodes the new row
+(<code>tables.go:748 addRecord</code> → <code>tablecodec.go:114</code>) into the MemDB
+buffer → on COMMIT, <code>session.CommitTxn</code> (session.go:981) → driver
+(<code>txn_driver.go:115</code>) → client-go <code>KVTxn.Commit</code> (txn.go:791) →
+<code>twoPhaseCommitter.execute</code> (2pc.go:1701): prewrite per region, a
+fresh commit timestamp from PD, commit of the primary key — each
+write entering TiKV&#39;s scheduler (<code>scheduler.rs:795</code>), becoming an
+MVCC modify (<code>mvcc/txn.rs:175-187</code>), proposed through Raft
+(<code>peer.rs:3922</code>), applied to RocksDB (<code>fsm/apply.rs:1473</code>).</li>
+</ul>
+<p>This is the atlas&#39;s three-layer pairing made flesh: <strong>Raft</strong> from the
+etcd dive (raft-rs, <code>Cargo.toml:206</code>, is the Rust sibling of etcd&#39;s
+library), <strong>SQL semantics and MVCC</strong> in the PostgreSQL dive&#39;s sense
+(same snapshot-isolation goals, completely different mechanism), and
+<strong>the LSM engine</strong> from the LevelDB/RocksDB lineage as the bottom
+substrate. TiDB&#39;s design lesson is what it <em>adds</em>: the narrow contract
+that lets the three evolve independently.</p>
+<div class="walkthrough">
+<h2 id="walkthrough-one-update-parse-to-raft-commit">Walkthrough: one UPDATE, parse to Raft commit</h2>
+<p class="walkthrough-intro">The spine as a story. Default settings: pessimistic transaction mode,
+one table with a primary key <code>id</code>, the row present.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as MySQL client
+    participant S as session (session.go 2420)
+    participant O as PD TSO (pd.go 218)
+    participant K as TiKV region leader
+    participant R as Raft group
+    C-&gt;&gt;S: UPDATE t SET x=1 WHERE id=5
+    S-&gt;&gt;S: parse → plan (PointGet + Update)
+    S-&gt;&gt;O: get start_ts (snapshot clock)
+    S-&gt;&gt;K: point get row key at start_ts (+ lock it: pessimistic, for_update_ts)
+    K--&gt;&gt;S: row value
+    S-&gt;&gt;S: encode new row (tablecodec) into MemDB (ART)
+    C-&gt;&gt;S: COMMIT
+    S-&gt;&gt;K: 2PC prewrite: locks in CF_LOCK (via Raft)
+    S-&gt;&gt;O: get commit_ts
+    S-&gt;&gt;K: commit primary key: CF_WRITE record (via Raft)
+    K-&gt;&gt;R: propose → quorum → apply → RocksDB
+    S--&gt;&gt;C: Query OK (secondaries finish in background)
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="receive-and-plan">Receive and plan</h3>
+<p>The session loop <code>ExecuteStmt</code>
+(<code>pkg/session/session.go:2420</code>) hands the AST to the compiler
+(<code>pkg/executor/compiler.go:50</code>), which runs the planner
+(<code>pkg/planner/optimize.go:122</code>) and gets back a physical plan — here a
+point-get feeding an Update executor. Notice how little the SQL layer
+assumes about storage: the plan speaks in table/index terms and only
+later becomes keys.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="buy-a-snapshot-time">Buy a snapshot time</h3>
+<p>The transaction&#39;s <code>start_ts</code> comes
+from PD&#39;s TSO (<code>oracle/oracles/pd.go:218 GetTimestamp</code>; the client
+implements the tiny <code>Oracle</code> interface, <code>oracle/oracle.go:49</code>). One
+clock for the whole cluster is what makes &quot;read as of T&quot; mean the same
+thing everywhere — TiDB&#39;s replacement for PostgreSQL&#39;s per-cluster
+snapshot bookkeeping.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="read-then-lock-what-you-read">Read, then lock what you read</h3>
+<p>The point-get resolves the
+row&#39;s key (<code>tablecodec.go:114 EncodeRowKeyWithHandle</code>) and reads via the
+snapshot (<code>pkg/store/driver/txn/snapshot.go:55</code> → client-go
+<code>KVSnapshot.Get</code>, <code>txnkv/txnsnapshot/snapshot.go:734</code>). Under pessimistic
+mode the same trip also acquires a lock on the key with a newer
+<code>for_update_ts</code> (<code>KVTxn.lockKeys</code>, <code>txnkv/transaction/txn.go:1387</code> →
+TiKV <code>actions/acquire_pessimistic_lock.rs</code>), so competing writers block
+here rather than failing at commit — TiDB&#39;s default answer to the
+optimistic-retry storms that plague wide transactions.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="write-into-the-buffer-not-the-database">Write into the buffer, not the database</h3>
+<p>The Update
+executor encodes the new row: <code>TableCommon.addRecord</code>
+(<code>pkg/table/tables/tables.go:748</code>) lays out columns via the codec and
+writes the mutation into the transaction&#39;s MemDB — an Adaptive Radix
+Tree in an arena (<code>internal/unionstore/memdb.go:52</code>, <code>art/art.go:31</code>).
+Nothing has left the SQL node; TiKV has never seen a tentative version.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="commit-starts-the-two-phase-dance">COMMIT starts the two-phase dance</h3>
+<p><code>session.CommitTxn</code>
+(<code>session.go:981</code>) → <code>tikvTxn.Commit</code> (<code>txn_driver.go:115</code>) →
+<code>KVTxn.Commit</code> (<code>txn.go:791</code>) builds the <code>twoPhaseCommitter</code>
+(<code>2pc.go:126</code>), whose <code>execute</code> (<code>2pc.go:1701</code>) drains the MemDB into
+mutations (<code>initKeysAndMutations</code>, <code>2pc.go:561</code>), groups them by region
+(<code>groupMutations</code>, <code>2pc.go:896</code>), and prewrites each group — locks land
+in TiKV&#39;s <code>CF_LOCK</code> with one key designated primary (<code>primary()</code>,
+<code>2pc.go:779</code>), each lock carrying a TTL sized by transaction footprint
+(<code>txnLockTTL</code>, <code>2pc.go:812</code>).</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="buy-a-commit-time">Buy a commit time</h3>
+<p>A second TSO round gets <code>commit_ts</code>
+(<code>execute</code> → <code>GetTimestampForCommit</code>, <code>2pc.go:1941</code>). Between prewrite
+and this call the transaction checks its own staleness — schema
+compatibility and a max-lifetime bound (<code>IsExpired</code>, <code>2pc.go:1956</code>) —
+the moments where a distributed txn is declared too old to live.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="commit-the-primary-and-only-then-relax">Commit the primary, and only then relax</h3>
+<p>The committer
+sends the commit for the primary key first with a long backoff budget
+(<code>commitTxn</code>, <code>2pc.go:2035</code>): the moment that write is Raft-applied,
+the transaction is committed — secondary keys are finished in the
+background (<code>asyncSecondaries</code>, <code>2pc.go:790</code>). Inside TiKV the request
+entered at the gRPC service (<code>src/server/service/kv.rs:1450</code>), was
+serialized against other writers by per-key latches (<code>latch.rs:158</code>),
+performed its MVCC write (<code>actions/commit.rs:48</code>: delete <code>CF_LOCK</code>,
+put <code>CF_WRITE</code> at <code>key + commit_ts</code>), and reached Raft through
+<code>RaftKv::async_write</code> (<code>src/server/raftkv/mod.rs:503</code>) →
+<code>Peer::propose</code> (<code>peer.rs:3922</code>).</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="a-row-updated-across-a-cluster-crash-anywhere-safe">A row updated across a cluster, crash-anywhere safe</h3>
+<p>The
+row&#39;s new version is visible at <code>commit_ts</code> to any snapshot at or after
+it; the old version stays until GC. If this SQL node had died between
+phases, the next transaction to trip over the locks would resolve them
+by consulting the primary key&#39;s fate (<code>LockResolver.ResolveLocks</code>,
+<code>txnkv/txnlock/lock_resolver.go:453</code>) — no coordinator was ever needed.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="the-encoded-keyspace-tables-are-key-ranges">The encoded keyspace: tables are key ranges</h3>
+<p><code>EncodeRowKeyWithHandle</code> (<code>pkg/tablecodec/tablecodec.go:114</code>) turns
+<code>(tableID, handle)</code> into <code>t&lt;tableID&gt;_r&lt;handle&gt;</code>; index entries become
+<code>t&lt;tableID&gt;_i&lt;idxID&gt;&lt;indexValues&gt;</code> under the same <code>t</code> prefix
+(<code>tablePrefix</code>, tablecodec.go:50). <strong>Why:</strong> this one encoding collapses
+&quot;SQL storage&quot; into &quot;an ordered byte range&quot; — and every downstream
+problem (sharding, routing, balancing, range scans) becomes TiKV&#39;s
+region-splitting problem, which it already knows how to solve. The
+alternative — keeping row-heap/tablespace semantics à la PostgreSQL and
+adding a distributed mapping layer — would put SQL knowledge inside the
+storage tier, breaking the disaggregation contract.</p>
+<h3 id="mvcc-keys-with-a-timestamp-suffix-in-three-column-families">MVCC keys with a timestamp suffix, in three column families</h3>
+<p>TiKV&#39;s <code>Key</code> (<code>components/txn_types/src/types.rs:81</code>) appends an 8-byte
+big-endian timestamp (<code>append_ts</code>, types.rs:150). User keys get a <code>z</code>
+prefix (<code>data_key</code>, <code>components/keys/src/lib.rs:206</code>), then land in
+three RocksDB column families (<code>components/engine_traits/src/cf_defs.rs</code>):
+<code>CF_DEFAULT</code> holds values at <code>key+start_ts</code>; <code>CF_WRITE</code> holds commit
+records at <code>key+commit_ts</code> (<code>src/storage/mvcc/txn.rs:175-187</code> puts both);
+<code>CF_LOCK</code> holds in-flight intents at the bare key (txn.rs:127). <strong>Why:</strong>
+this is Google Percolator&#39;s bigtable layout transplanted onto an LSM
+engine — the write CF <em>is</em> the version index, reads resolve a key by
+seeking <code>CF_WRITE</code> backwards (<code>SnapshotReader.seek_write</code>,
+<code>src/storage/mvcc/reader/reader.rs:99</code>), and commit/rollback are single
+CF operations. Compare PostgreSQL: same MVCC goals, but versions live
+in the heap with visibility bits, because there the storage <em>knows</em>
+about transactions. Here the layout must be legible to a client that
+only speaks KV.</p>
+<h3 id="the-memdb-transaction-buffer-an-art-in-an-arena">The MemDB transaction buffer: an ART in an arena</h3>
+<p>All uncommitted writes of a transaction live client-side in
+<code>MemDB</code> (<code>internal/unionstore/memdb.go:52</code>) — an Adaptive Radix Tree
+with its own arena (<code>internal/unionstore/art/art.go:31</code>), supporting
+iteration, per-key flags, and rollback checkpoints (a Red-Black-tree
+implementation still sits beside it, <code>memdb_rbt.go</code>, for comparison).
+Reads union the buffer with the snapshot (<code>UnionIter</code>,
+<code>internal/unionstore/union_iter.go:58</code>). <strong>Why:</strong> keeping tentative
+state out of TiKV means the storage engine never touches uncommitted
+versions (no PostgreSQL-style abort-cleanup server-side), and the whole
+transaction arrives at prewrite time already batched per region — which
+is also what makes 1PC and pipelined flush (for huge transactions,
+<code>txnkv/transaction/pipelined_flush.go</code>) implementable as client-side
+protocol tweaks.</p>
+<h3 id="the-twophasecommitter-commit-status-stored-in-the-data">The twoPhaseCommitter: commit status stored in the data</h3>
+<p>The committer (<code>txnkv/transaction/2pc.go:126</code>) needs no log, no
+recovery service: prewrite leaves a <code>Lock</code> record
+(<code>components/txn_types/src/lock.rs:87</code>) whose bytes say who is primary;
+commit/rollback of the primary updates a <code>CF_WRITE</code>/rollback record
+that every resolver can read. <code>execute</code> (2pc.go:1701) is the whole
+protocol; <code>cleanup</code> (2pc.go:1630) is rollback. <strong>Why:</strong> Percolator&#39;s
+primary-key trick makes a coordinator-free 2PC — atomicity is a
+property of the data, and crash recovery is an algorithm any client can
+run (see the resolver below), not a service to keep alive.</p>
+<h3 id="the-regioncache-a-routing-table-every-client-maintains">The RegionCache: a routing table every client maintains</h3>
+<p><code>RegionCache</code> (<code>internal/locate/region_cache.go:655</code>) maps key ranges
+to region/peer versions, refreshing from PD on <code>epoch</code> mismatches and
+demoting stores on errors (<code>OnSendFail</code>, region_cache.go:1829); the
+<code>RegionRequestSender</code> (<code>region_request.go:110</code>) retries and redirects.
+<strong>Why:</strong> stateless SQL nodes need placement knowledge with no proxy hop;
+a client-maintained, epoch-validated cache gives them freshness where
+it matters and no coordination where it doesn&#39;t — the same smart-client
+bet as Memcached in this atlas, but backed by an authority (PD) instead
+of a hash function, because ranges move.</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>SQL layer:</strong> concurrency is trivial by design — sessions are
+goroutines over a stateless node; the only cross-session state is
+cached (schema, regions, statistics). Conflict handling lives at
+commit: optimistic transactions that hit <code>WriteConflict</code> are retried
+by <em>re-executing their statements</em> against a new snapshot
+(<code>doCommitWithRetry</code> → <code>session.retry</code>, <code>pkg/session/session.go:805</code>)
+— safe because statements are deterministic given the plan and
+snapshot, an unusually strong bet that PostgreSQL, with its
+server-side transaction state, could not make.</li>
+<li><strong>TiKV write path:</strong> per-region single-threaded FSMs (the
+batch-system: <code>PeerFsm</code> <code>fsm/peer.rs:142</code>, <code>ApplyFsm</code>
+<code>fsm/apply.rs:4007</code>) serialize Raft work; txn writes are additionally
+serialized by per-key <strong>latches</strong> (<code>src/storage/txn/latch.rs:158</code>)
+before <code>process_write</code> (<code>scheduler.rs:1952</code>) runs on a worker pool.
+The latch table is a striped slot array hashing keys — two writers
+touching disjoint keys never see each other.</li>
+<li><strong>Reads:</strong> point gets and scans run on a read pool against RocksDB
+snapshots at <code>start_ts</code>; linearizable Raft reads go through ReadIndex
+(<code>peer.rs:4242 read_index</code>), the same leader-confirmation idea as
+etcd&#39;s ReadIndex — with local reads allowed under leader lease
+(<code>read_local</code>, peer.rs:4159).</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph svc[&quot;TiKV process&quot;]
+        GRPC[&quot;gRPC service threads&lt;br/&gt;(service/kv.rs)&quot;]
+        RP[&quot;read pool — gets/scans&lt;br/&gt;at start_ts snapshots&quot;]
+        SCH[&quot;TxnScheduler worker pool&lt;br/&gt;(scheduler.rs 421) + latches&quot;]
+        FSM[&quot;raftstore FSM threads — one mailbox per region&lt;br/&gt;propose (peer.rs 3922) / apply (apply.rs)&quot;]
+        AP[&quot;apply thread pool&quot;]
+    end
+    RE[(&quot;raft-engine&quot;)]
+    RK[(&quot;RocksDB: lock / write / default CFs&quot;)]
+    GRPC --&gt; RP
+    GRPC --&gt; SCH --&gt; FSM --&gt; AP --&gt; RK
+    FSM --&gt; RE
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Crash mid-transaction:</strong> locks outlive their client; any blocked
+reader or writer resolves them — <code>LockResolver.ResolveLocks</code>
+(<code>txnkv/txnlock/lock_resolver.go:453</code>) checks the primary key&#39;s
+status via TiKV&#39;s <code>CheckTxnStatus</code> action and drives commit/rollback
+of secondaries, honoring the TTL (<code>txnLockTTL</code>, 2pc.go:812) that
+decides when a lock&#39;s owner is presumed dead. Undeclared outcomes
+surface as <code>ErrResultUndetermined</code> (<code>2pc.go:1863</code>) — TiDB refuses to
+pretend a lost RPC meant failure.</li>
+<li><strong>Crash mid-Raft:</strong> raft-engine holds the log; on restart the store
+replays entries past the applied index into RocksDB
+(<code>ApplyFsm</code>, <code>fsm/apply.rs:1473 apply_raft_cmd</code>); Raft guarantees a
+quorum agreed on every applied line before any client saw it.</li>
+<li><strong>Backpressure:</strong> TiKV stalls writers through a flow controller on
+memtable size (<code>src/storage/txn/flow_controller</code>), and TiDB
+schedules by resource group (RU tokens) — overload degrades latency
+per-class rather than collapsing the cluster.</li>
+</ul>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public API is a personality, not a protocol surface: MySQL
+compatibility.</strong> TiDB speaks the MySQL wire protocol (<code>pkg/server</code>)
+and dialect, so the ecosystem (drivers, ORMs, tools) adopts it for
+free — the same compatibility-as-API bet as SQLite&#39;s embedding. The
+trade is that MySQL semantics (from <code>SHOW</code> quirks to implicit
+commits) constrain every layer below, forever.</li>
+<li><strong>The real extension seams are protocol-level.</strong> Between TiDB and
+TiKV lies kvproto — gRPC services for KV ops, coprocessor requests,
+and Raft-transport — and between PD and everyone lies the region
+epoch + placement-rule model. Those two contracts are why <strong>TiFlash</strong>
+(a columnar store) can join as <em>another Raft replica</em> of the same
+regions without the SQL layer changing: placement rules say
+&quot;learner on that store,&quot; TiKV replicates, TiFlash applies to a
+columnar engine. Compare LSP/DAP in the VS Code dive: standardize the
+contract at the process boundary and heterogeneous implementations
+compose.</li>
+<li><strong>Computation extends downward too:</strong> the coprocessor
+(<code>src/coprocessor/endpoint.rs:69</code>) executes pushed-down selection /
+aggregation over a region&#39;s data, and TiDB&#39;s distsql layer
+(<code>pkg/distsql/distsql.go:60</code>) decides per-plan what to push — the
+map-reduce seam that keeps network traffic proportional to answers,
+not data.</li>
+<li><strong>Honest wart:</strong> three pinned repos to understand one commit — the
+disaggregation is also fragmentation. Cross-repo features (say,
+async commit, 2pc.go:1538) must ship in lockstep across SQL layer,
+client library, and storage; and MySQL compatibility plus distributed
+semantics occasionally collide (auto-retry is disabled for
+non-repeatable statements for exactly this reason —
+<code>doCommitWithRetry</code>&#39;s <code>CouldRetry</code> gate, session.go:867).</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-coordinator-free-2pc-percolator-over-a-central-transaction-manager">Trade-off 1: coordinator-free 2PC (Percolator) over a central transaction manager</h3>
+<ul>
+<li><strong>Tension:</strong> transactions span regions on many machines; something
+must guarantee all-or-nothing across crashes of any participant,
+including the client itself.</li>
+<li><strong>Choice:</strong> commit state lives in the data — prewrite locks with an
+elected primary key; the primary&#39;s commit record is the transaction&#39;s
+single point of truth; recovery is data-driven.</li>
+<li><strong>Evidence:</strong> <code>twoPhaseCommitter.execute</code> (<code>2pc.go:1701</code>) — no
+persistent coordinator anywhere; <code>actions/prewrite.rs:37</code> /
+<code>actions/commit.rs:48</code> write <code>CF_LOCK</code>/<code>CF_WRITE</code>;
+<code>LockResolver.ResolveLocks</code> (<code>lock_resolver.go:453</code>) is the
+recovery algorithm any stranger can run.</li>
+<li><strong>Given up:</strong> latency (prewrite RTT + TSO + commit RTT — three
+network rounds minimum), lock TTL machinery, and a garbage-collection
+story for abandoned locks.</li>
+<li><strong>Verdict:</strong> right when write volume and client count are huge and a
+coordinator would be the bottleneck and the SPOF; wrong if you need
+single-digit-millisecond commits — which is exactly why TiDB later
+added 1PC (single-region txns commit in prewrite, <code>checkOnePC</code>,
+2pc.go:1572) and async commit (client proceeds after prewrite,
+<code>checkAsyncCommit</code>, 2pc.go:1538) — protocol patches on the same
+data layout.</li>
+</ul>
+<h3 id="trade-off-2-one-global-tso-over-distributed-clocks">Trade-off 2: one global TSO over distributed clocks</h3>
+<ul>
+<li><strong>Tension:</strong> snapshot isolation needs a total order on transaction
+boundaries; Spanner buys one with atomic clocks, CockroachDB with
+hybrid logical clocks and uncertainty windows.</li>
+<li><strong>Choice:</strong> PD runs a single timestamp oracle; every <code>start_ts</code> and
+<code>commit_ts</code> comes from it (<code>Oracle</code> interface <code>oracle/oracle.go:49</code>,
+<code>pdOracle.GetTimestamp</code> <code>pd.go:218</code>).</li>
+<li><strong>Evidence:</strong> <code>KVTxn</code> allocates <code>start_ts</code> lazily and
+<code>twoPhaseCommitter</code> takes <code>commit_ts</code> from the same source
+(<code>2pc.go:1941</code>); external consistency falls out — a committed txn&#39;s
+commit_ts is globally ordered, no uncertainty retries anywhere in
+TiKV.</li>
+<li><strong>Given up:</strong> PD is an availability point (a TSO outage stalls <em>new</em>
+transactions, though not in-flight ones) and a latency floor (every
+transaction pays two TSO round trips in the naive path).</li>
+<li><strong>Verdict:</strong> right for a system whose value is &quot;MySQL, but elastic&quot;:
+the complexity budget went to disaggregation, and one clock keeps
+isolation semantics brain-dead simple to reason about. Wrong for
+write-everywhere multi-region designs — TiDB itself routes global
+transactions through one region&#39;s PD rather than pretend many clocks
+are one.</li>
+</ul>
+<h3 id="trade-off-3-sql-nodes-that-store-nothing-over-smart-storage-everywhere">Trade-off 3: SQL nodes that store nothing over smart storage everywhere</h3>
+<ul>
+<li><strong>Tension:</strong> where does the system&#39;s intelligence live —
+per-connection compute with local state (PostgreSQL) or shared
+storage with pushdown compute (a storage-disaggregated database)?</li>
+<li><strong>Choice:</strong> TiDB nodes are stateless executors; TiKV is &quot;dumb bytes&quot;
+at the contract level but increasingly smart in practice (MVCC,
+coprocessor, 1PC, resolve) — the split tracks the <em>contract</em>, not
+raw intelligence.</li>
+<li><strong>Evidence:</strong> the executor reads only through distsql/snapshot
+interfaces (<code>distsql.go:60</code>, <code>snapshot.go:55</code>); row layout is decided
+unilaterally by the SQL layer (<code>tablecodec.go:114</code>) and TiKV never
+decodes it — coprocessor pushed-down plans are shipped as encoded
+DAGs (<code>endpoint.rs:205 parse_request</code>), not as SQL knowledge.</li>
+<li><strong>Given up:</strong> every read is a network round trip (no local buffer
+pool), and cross-node operations (e.g., one query joining two
+regions) pay a shuffle tax PostgreSQL never sees.</li>
+<li><strong>Verdict:</strong> right when elasticity and per-layer scaling dominate
+(OLTP that must grow beyond one machine, HTAP with TiFlash
+replicas); wrong for latency-critical single-node workloads, where
+PostgreSQL&#39;s process-local everything is simply faster. TiDB&#39;s
+answer is not to pretend otherwise — it is coprocessor pushdown:
+move the filter to the data.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<p>Prereq: shallow-clone all three repos at the pinned commits (TiDB and
+TiKV are direct clones; client-go is a normal clone checked out at
+<code>7ee0b27f…</code> — TiDB&#39;s <code>go.mod</code> pins it). Roughly a day&#39;s focused
+reading; the TiDB spine is Go and reads fast, TiKV&#39;s raftstore is the
+deepest stop.</p>
+<ol>
+<li><code>pkg/session/session.go:2420</code> (<code>ExecuteStmt</code> → <code>executeStmtImpl</code>) —
+the session spine: statement context, txn preparation, compile,
+execute. Notice everything is per-session; nothing is shared state.</li>
+<li><code>pkg/executor/compiler.go:50</code> (<code>Compile</code>) →
+<code>pkg/planner/optimize.go:122</code> (<code>Optimize</code>) — AST to physical plan;
+the volcano executors the planner emits are pure iterators, storage
+access hidden behind a single interface.</li>
+<li><code>pkg/tablecodec/tablecodec.go:114</code> — encode one row key and one
+index key by hand; then <code>pkg/table/tables/tables.go:748</code>
+(<code>addRecord</code>) to watch a row become KV mutations.</li>
+<li><code>client-go internal/unionstore/memdb.go:52</code> + <code>art/art.go:31</code> —
+the ART MemDB: your transaction so far, in one node&#39;s RAM. Note the
+checkpoints (savepoints) and the RBT alternative beside it.</li>
+<li><code>txnkv/transaction/txn.go:791</code> (<code>KVTxn.Commit</code>) → <code>2pc.go:126</code>
+(<code>twoPhaseCommitter</code> struct) — the transition point: buffer becomes
+protocol. Inventory the struct&#39;s fields against the walkthrough.</li>
+<li><code>2pc.go:1701</code> (<code>execute</code>) — read top to bottom once for the happy
+path, then again for the failure defers (<code>cleanup</code> at 1630,
+<code>undeterminedErr</code>). This function <em>is</em> Percolator&#39;s Section 4.</li>
+<li><code>prewrite.go:222</code> (<code>handleSingleBatch</code>) + <code>2pc.go:896</code>
+(<code>groupMutations</code>) — mutations grouped per region; note the
+pre-split hint (<code>2pc.go:928</code>) when a client sees a hot region
+coming.</li>
+<li><code>internal/locate/region_cache.go:655</code> + <code>region_request.go:110</code> —
+how a request finds its region leader, and what happens when the
+answer is stale (epoch bumps, <code>OnSendFail</code> at 1829).</li>
+<li>TiKV: <code>src/server/service/kv.rs:1450</code> — the generated dispatch
+(macro at 2325) — then <code>src/storage/txn/scheduler.rs:795</code>
+(<code>execute</code>): snapshot, latch, <code>process_write</code>, engine write. This
+is where a KV RPC becomes MVCC bytes.</li>
+<li><code>src/storage/txn/actions/prewrite.rs:37</code> and
+<code>actions/commit.rs:48</code>, with <code>src/storage/mvcc/txn.rs:60</code> and
+<code>reader/reader.rs:40</code> open beside them — the three CFs in action:
+who writes <code>CF_LOCK</code>, who reads it, and what a commit record looks
+like.</li>
+<li><code>src/server/raftkv/mod.rs:503</code> (<code>async_write</code>) →
+<code>components/raftstore/src/store/peer.rs:3922</code> (<code>propose</code>) — the
+request becomes a Raft entry; then <code>fsm/peer.rs:2224</code>
+(<code>collect_ready</code>) and <code>fsm/apply.rs:1473</code> (<code>apply_raft_cmd</code>) to
+see it reach RocksDB. Compare with etcd&#39;s raft adapter: the same
+library discipline, in Rust.</li>
+<li>Finish with <code>txnkv/txnlock/lock_resolver.go:453</code>
+(<code>ResolveLocks</code> → <code>resolveLock</code> at 1536) — kill your client between
+phases in a test cluster, then watch another transaction resolve
+the corpse&#39;s locks by asking the primary key what happened.</li>
+</ol>
+<p>You have now traced one UPDATE from MySQL bytes to Raft-committed LSM
+writes — and back out through the failure path that makes the whole
+thing work without a coordinator.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Encode your domain into an ordered keyspace before you design
+distribution:</strong> tables-as-key-ranges (tablecodec.go:114) turned
+&quot;distributed SQL storage&quot; into &quot;range splitting,&quot; a solved problem
+one layer down.</li>
+<li><strong>Store commit status in the data, not in a coordinator:</strong> the
+Percolator primary-key pattern (2pc.go:779) gives you atomic
+multi-machine writes whose crash recovery is an algorithm, not a
+service you must keep alive.</li>
+<li><strong>One logical clock beats N clever clocks when isolation must be
+explainable:</strong> a single TSO (oracle.go:49) makes snapshot isolation
+and external consistency trivially true; pay the availability price
+knowingly and route around it, don&#39;t pretend it away.</li>
+<li><strong>Buffer writes on the client until commit:</strong> MemDB (memdb.go:52)
+keeps tentative state out of the storage engine and batches the
+commit per region — protocol upgrades (1PC, async commit, pipelined
+flush) become client-side variations.</li>
+<li><strong>Group work by placement owner before you send it:</strong> mutations
+grouped per region (2pc.go:896) is the difference between one RPC
+per key and one per region — the batching seam every distributed
+client needs.</li>
+<li><strong>Put extension contracts at process boundaries:</strong> kvproto + PD
+placement rules are why a columnar engine (TiFlash) could join a row
+engine&#39;s Raft groups without touching the SQL layer — protocols
+compose, APIs merely get called.</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — three repositories, two languages, and
+the full distance from SQL semantics to Raft consensus in one spine.</li>
+<li>Budget: ~10–12 hours for the reading path. Stops 1–7 (the Go side)
+are a comfortable half; stops 9–11 (TiKV&#39;s storage and raftstore)
+deserve the rest.</li>
+<li>Prerequisites: SQL execution basics (the PostgreSQL deep-dive&#39;s
+planner/executor and MVCC sections), Raft (the etcd deep-dive, or
+the Raft paper), and LSM fundamentals (the LevelDB deep-dive). The
+Percolator paper&#39;s Section 4 is short and makes step 6 twice as
+readable.</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Peng &amp; Dabek, &quot;Large-scale Incremental Processing Using Distributed
+Transactions and Notifications&quot; (Percolator, OSDI 2010), Section 4 —
+the transaction protocol TiKV implements, from the source.</li>
+<li>Corbett et al., &quot;Spanner: Google&#39;s Globally-Distributed Database&quot;
+(OSDI 2012) — the other answer to trade-off 2 (TrueTime vs a TSO).</li>
+<li>TiDB&#39;s own docs series &quot;TiDB Internals&quot;
+(<a href="https://docs.pingcap.com/tidb/stable/tidb-internals-overview">https://docs.pingcap.com/tidb/stable/tidb-internals-overview</a>) —
+especially the &quot;The Life of a Write&quot; pages; read after the spine,
+not before.</li>
+<li>The async-commit and 1PC design discussions in the TiDB blog
+(<a href="https://www.pingcap.com/blog/">https://www.pingcap.com/blog/</a>) — what it took to shave network
+rounds off trade-off 1 while keeping the same data layout.</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../prometheus/"><span class="dir">← Previous dive</span>Prometheus: the pull model — polling made correct by absence-as-data</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 40 of 40 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
