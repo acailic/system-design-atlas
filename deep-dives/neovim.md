@@ -93,7 +93,7 @@ flowchart TD
   (`api/ui.c:prepare_call`) → every client (TUI, GUIs) updates its own
   grids.
 
-## Walkthrough: one `dd`, typed in a terminal, seen by two screens
+## Walkthrough: one dd command, typed in a terminal, seen by two screens
 
 ```mermaid
 sequenceDiagram
