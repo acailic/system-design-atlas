@@ -182,7 +182,11 @@ ladder turns overload into published, steerable slowdown states;
 as allocation-paced steps on the main thread plus concurrent jobs on
 the embedder's platform, with the store-path write barrier as the
 mutator's tax that buys never stopping for one big collection
-(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`).
+(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`);
+[ClickHouse](deep-dives/clickhouse.md)
+— background k-way merges keep the part tree shallow while inserts
+seal new parts, and the Aggregator flips to two-level tables at a
+size threshold so the final merge parallelizes.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -377,7 +381,11 @@ protocol (`ui_events.in.h` → packers and handlers);
 targets are TableGen `.td` records expanded into generated selector
 tables (even `default<O2>` is a registry alias, not driver code — so
 the optimizer's configuration, its targets, and its extension
-surface are all data).
+surface are all data;
+[ClickHouse](deep-dives/clickhouse.md) — settings and factory
+registrations (engines, functions, codecs, formats) carry their own
+doc strings, so thousands of knobs and extensions stay
+user-visible without a second handbook).
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems

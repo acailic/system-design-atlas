@@ -241,7 +241,8 @@ checks pass, wiring the service-worker handle and the storage
 partition. This is where Chrome-the-product gets to veto without
 content-the-engine knowing it exists — the same seam VS Code uses
 for its extension contributions.</p></div></div>
-<p><strong>Step 3 — Where will this document live?</strong> The request reaches
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="where-the-document-will-live">Where the document will live</h3>
+<p>The request reaches
 <code>RenderFrameHostManager::GetFrameHostForNavigation</code>
 (render_frame_host_manager.cc:1931) for its frame&#39;s <code>FrameTreeNode</code>.
 The manager computes the destination <code>SiteInstanceImpl</code>
@@ -250,7 +251,7 @@ current renderer; a cross-site navigation gets a new SiteInstance —
 and if that instance needs one, a <em>speculative</em> RenderFrameHost
 (<code>CreateSpeculativeRenderFrameHost</code>, :4483) is created so the old
 page stays interactive until commit. This is the site-isolation
-decision point, in code.</p>
+decision point, in code.</p></div></div>
 <div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="process-allocation-is-a-policy-ladder">Process allocation is a policy ladder</h3>
 <p><code>SiteInstanceImpl::GetProcess</code> bottoms out in
 <code>RenderProcessHostImpl::GetProcessHostForSiteInstance</code>
@@ -746,7 +747,7 @@ seam.</li>
   <a href="../v8/"><span class="dir">← Previous dive</span>V8: an engine that bets — tiers, feedback, and the machinery for taking bets back</a>
   <a href="../caddy/" style="text-align:right"><span class="dir">Next dive →</span>Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 33 of 36 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 33 of 37 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>

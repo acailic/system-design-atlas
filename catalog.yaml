@@ -125,6 +125,30 @@ projects:
       files, and conservative extension points (WAL is the seam logical
       replication hooks into).
 
+  - id: clickhouse
+    name: ClickHouse
+    repo: https://github.com/ClickHouse/ClickHouse
+    language: C++
+    license: Apache-2.0
+    domains: [database, distributed]
+    difficulty: demanding
+    status: deep-dived
+    scores: { design_influence: 5, clarity: 3, teachability: 4, domain_fit: 5 }
+    why: >
+      The database that made "scan a billion rows, answer in a second"
+      a commodity, and it won that slot with one shape applied
+      end-to-end: data is columnar in memory (Block/IColumn), columnar
+      on disk (per-column compressed files inside immutable,
+      primary-key-sorted parts), and processed in whole batches
+      (vectorized functions called once per granule, not once per
+      row) — so a query touches only the columns and granule ranges
+      it needs, guided by a sparse primary index of one key value per
+      ~8,192 rows. Read after LevelDB/RocksDB (LSM) and Elasticsearch
+      (inverted index) to complete the atlas's storage-engine
+      trilogy: the same immutable-parts + background-merges skeleton,
+      with the payload transposed to columns and the workload set to
+      aggregation.
+
   # ── storage engines ───────────────────────────────────────────────────
 
   - id: leveldb

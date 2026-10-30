@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">36 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">37 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 36 (and growing) canonical codebases and walks through
+<p>The atlas points at 37 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -298,6 +298,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A giant airport hub where every airline agrees to repack luggage into standard pallets. Each airline (a frontend: clang, rustc, swiftc) dumps its weirdly shaped bags into identical pallets (LLVM…</span>
   <span class="dc-meta"><span class="chip domain">compiler</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/clickhouse/" data-domains="database distributed" data-search="clickhouse: columns all the way down — rows are an afterthought">
+  <span class="dc-name">ClickHouse</span>
+  <span class="dc-headline">columns all the way down — rows are an afterthought</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A filing warehouse that stores each field of a form in its own drawer, and almost never carries a whole form around. Every column of the table gets one long drawer (the per-column.bin file)…</span>
+  <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -329,7 +335,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 36 projects; 36 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 37 projects; 37 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -343,11 +349,13 @@ transferable design moves you can apply to your own systems.</li>
   <div class="cat-why">The original &quot;scale the database with a cache layer&quot; tool that won the mid-2000s web by being aggressively boring: a text protocol you can speak with netcat, a slab-class allocator that fights fragmentation by never…</div></li></ul>
 </details>
 <details class="catalog-group">
-<summary>database <span class="count">(2)</span></summary>
+<summary>database <span class="count">(3)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/sqlite/">SQLite</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The most deployed database on earth — in every phone, browser, and airliner — because of one architectural choice: strict layering with every environment assumption isolated behind one interface. Tokenizer → parser →…</div></li>
 <li><span class="cat-name"><a href="dive/postgresql/">PostgreSQL</a></span><span class="cat-status deep-dived">deep-dived</span>
-  <div class="cat-why">The reference relational server that outlived every proprietary rival: process-per-connection (not threads), MVCC via tuple versioning, write-ahead logging, and a planner/executor split that has shaped every database…</div></li></ul>
+  <div class="cat-why">The reference relational server that outlived every proprietary rival: process-per-connection (not threads), MVCC via tuple versioning, write-ahead logging, and a planner/executor split that has shaped every database…</div></li>
+<li><span class="cat-name"><a href="dive/clickhouse/">ClickHouse</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The database that made &quot;scan a billion rows, answer in a second&quot; a commodity, and it won that slot with one shape applied end-to-end: data is columnar in memory (Block/IColumn), columnar on disk (per-column…</div></li></ul>
 </details>
 <details class="catalog-group">
 <summary>storage-engine <span class="count">(2)</span></summary>

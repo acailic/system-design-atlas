@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClickHouse: columns all the way down — rows are an afterthought — System Design Atlas</title>
+<meta name="description" content="ClickHouse is the analytical database that made &quot;scan a billion rows, answer in a second&quot; a commodity — and it won that slot not with one clever algorithm but with one shape applied end-to-e">
+<meta property="og:title" content="ClickHouse: columns all the way down — rows are an afterthought — System Design Atlas">
+<meta property="og:description" content="ClickHouse is the analytical database that made &quot;scan a billion rows, answer in a second&quot; a commodity — and it won that slot not with one clever algorithm but with one shape applied end-to-e">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="System Design Atlas">
+<meta property="og:url" content="https://acailic.github.io/system-design-atlas/dive/clickhouse/">
+<link rel="canonical" href="https://acailic.github.io/system-design-atlas/dive/clickhouse/">
+<link rel="stylesheet" href="../../assets/site.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧭%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<nav class="site-nav" aria-label="Site">
+  <a class="brand" href="../../"><span class="compass">🧭</span> System Design Atlas</a>
+  <a href="../../#dives">Deep-dives</a>
+  <a href="../../patterns/">Patterns</a>
+  <span class="spacer"></span>
+  <a href="https://github.com/acailic/system-design-atlas" rel="noopener">GitHub ↗</a>
+</nav>
+<main id="main">
+<div class="page article-layout">
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-insert-becomes-a-part-one-select-skips-most-of-it">Walkthrough: one INSERT becomes a part, one SELECT skips most of it</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<div>
+  <header class="article-header">
+    <h1>ClickHouse: columns all the way down — rows are an afterthought</h1>
+    <div class="meta-chips"><span class="chip domain">database</span><span class="chip domain">distributed</span><span class="chip diff-demanding">difficulty: demanding</span><span class="chip">license: <a href="https://github.com/ClickHouse/ClickHouse" rel="noopener">Apache-2.0</a></span></div>
+    <p class="pinned-commit">Pinned commit: <code>eb9d89e2a30c66eea972b2f11aa279c751616393</code> · v26.9.24.8-stable, 2026-10-21 · <a href="https://github.com/ClickHouse/ClickHouse" rel="noopener">upstream ↗</a></p>
+  </header>
+  <article>
+<p class="lead">ClickHouse is the analytical database that made &quot;scan a billion rows,
+answer in a second&quot; a commodity — and it won that slot not with one
+clever algorithm but with one <em>shape</em> applied end-to-end: data lives as
+columns in memory (<code>Block</code>/<code>IColumn</code>), as columns on disk (per-column
+compressed files inside immutable, primary-key-sorted parts), and is
+processed as columns (vectorized functions called once per batch, not
+once per row). This deep-dive teaches that shape through the MergeTree
+engine — the third storage-engine form in this atlas after
+<a href="../leveldb/">LevelDB</a>/RocksDB (LSM-trees) and
+<a href="../elasticsearch/">Elasticsearch</a> (inverted index): the same
+immutable-parts-plus-background-merges skeleton as LevelDB, but the
+payload is columns and the payload-side index is <em>sparse</em> — one primary
+key value per ~8,192 rows, small enough to sit in memory while still
+letting every query skip most of the data.</p>
+<section class="eli10">
+<h2 id="explain-like-i-m-10"><span class="eli-emoji">🧒</span> Explain like I'm 10</h2>
+
+<p><strong>A filing warehouse that stores each field of a form in its own drawer,
+and almost never carries a whole form around.</strong> Every column of the
+table gets one long drawer (the per-column <code>.bin</code> file) holding just
+that field for millions of forms, and all drawers in one filing box
+(the immutable <em>part</em>) are in the same sorted order, so drawer position
+234 lines up with drawer position 234. New forms arrive in armfuls (an
+INSERT block); a clerk sorts each armful and seals it into its <em>own</em>
+box (a new part) — existing boxes are never edited, only eventually
+recycled. Each drawer carries a bookmark every ~8,192 entries (a
+<em>mark</em>), recording exactly where to jump; and each box has a tiny tab
+card listing just the first entry of every 8,192-stretch for the
+sorting fields (<code>primary.idx</code> — the <em>sparse primary index</em>). When you
+ask &quot;show me everyone aged 40,&quot; the clerk first reads the cheap age
+drawer&#39;s tab cards, skips whole stretches that can&#39;t contain a 40
+(PREWHERE), and only then opens the expensive drawers (long bios,
+photos) for the survivors. Clerks never handle one form at a time: they
+slide a whole tray of 8,192+ values through the counting machine in one
+pass (vectorized execution over a <code>Block</code>). When boxes pile up, a night
+crew builds bigger boxes by shuffling sorted piles together (background
+merges) — never rewriting a sealed box in place.</p>
+<p class="eli-why"><strong>Why the grown-ups did it this way:</strong> analytical questions are &quot;sum
+this column over a billion rows&quot; — handling rows one at a time costs
+more than the math itself, so the stretch (granule/batch) is made the
+unit of storage, of skipping, and of computing, letting disks stream
+and CPUs vectorize.</p>
+
+</section><h2 id="1-architecture-overview">1. Architecture overview</h2>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    SQL[&quot;SQL over native/HTTP protocol&quot;]
+
+    subgraph frontend[&quot;per-query frontend&quot;]
+        PARSE[&quot;Parser → Analyzer (AST → resolved columns)&quot;]
+        PLAN[&quot;Planner → QueryPlan&lt;br/&gt;(Processors/QueryPlan/QueryPlan.h:110)&quot;]
+    end
+
+    subgraph exec[&quot;execution — PullingAsyncPipelineExecutor&quot;]
+        PIPE[&quot;QueryPipelineBuilder (QueryPipeline/…) →&lt;br/&gt;PipelineExecutor over IProcessor graph&lt;br/&gt;(Executors/Runtime/PipelineExecutor.h:32)&quot;]
+        MERGEPROC[&quot;MergingSortedTransform / Expression /&lt;br/&gt;Aggregation / Filter transforms&quot;]
+    end
+
+    subgraph storage[&quot;storage — the IStorage seam (IStorage.h:481)&quot;]
+        MTSE[&quot;MergeTreeDataSelectExecutor.cpp:229 read()&lt;br/&gt;prune parts → mark ranges → read pools&quot;]
+        MTSINK[&quot;MergeTreeSink.cpp:135 consume()&lt;br/&gt;→ writeTempPart (MergeTreeDataWriter.cpp:786)&quot;]
+        PARTS[&quot;immutable parts: [Column].bin + .mrk3 marks&lt;br/&gt;+ primary.idx + minmax + checksums.txt&lt;br/&gt;(MergeTreeData.h:159 design comment)&quot;]
+        MERGES[&quot;background merges &amp; mutations&lt;br/&gt;(MergeTreeDataMergerMutator.cpp:273/435)&quot;]
+    end
+
+    subgraph cluster[&quot;cluster layer&quot;]
+        REPL[&quot;ReplicatedMergeTreeQueue on Keeper&lt;br/&gt;(ReplicatedMergeTreeQueue.h:38)&lt;br/&gt;executeLogEntry (src/Storages/StorageReplicatedMergeTree.cpp:2581)&quot;]
+        DIST[&quot;StorageDistributed.cpp:1101 —&lt;br/&gt;scatter INSERTs / gather SELECTs&quot;]
+    end
+
+    SQL --&gt; PARSE --&gt; PLAN --&gt; PIPE
+    PIPE --&gt; MERGEPROC
+    PIPE --&gt; MTSE
+    MTSINK --&gt; PARTS
+    PARTS --&gt; MTSE
+    PARTS --&gt; MERGES --&gt; PARTS
+    REPL -.-&gt;|&quot;orders merges/fetches&quot;| MERGES
+    DIST -.-&gt;|&quot;remote shards&quot;| MTSE
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<ul>
+<li><strong>Frontend:</strong> every query text becomes an AST, then a resolved,
+typed analysis (the Analyzer), then a <code>QueryPlan</code> that the Planner
+lowers into a pipeline of <code>IProcessor</code> nodes. The plan — not the
+interpreter — is where optimization happens; the pipeline is a
+pull-based dataflow graph executed by a thread pool.</li>
+<li><strong>Storage seam:</strong> a table is an <code>IStorage</code>; <code>IStorage::write</code>
+(<code>src/Storages/IStorage.h:481</code>) hands INSERT blocks to a sink, and
+the select executor turns a WHERE clause into a list of parts and
+mark ranges. Everything MergeTree-specific lives behind this seam —
+the same pipeline machinery serves Kafka, URL, and in-memory tables.</li>
+<li><strong>The spine</strong> — insert one block, then aggregate over a filtered
+range — is: <code>MergeTreeSink::consume</code> → <code>writeTempPart</code> (sort by
+primary key, write per-column streams, marks, <code>primary.idx</code>) → a new
+immutable part; then for reads <code>MergeTreeDataSelectExecutor::read</code> →
+partition/PK/skip-index pruning → mark-range tasks → granule reads
+through the PREWHERE column chain → vectorized expression and
+aggregation transforms → output format. The Walkthrough traces it.</li>
+</ul>
+<div class="walkthrough">
+<h2 id="walkthrough-one-insert-becomes-a-part-one-select-skips-most-of-it">Walkthrough: one INSERT becomes a part, one SELECT skips most of it</h2>
+<p class="walkthrough-intro">The spine as a story: writes seal sorted boxes; reads skip to the
+stretches that matter and open heavy drawers last.</p>
+<figure class="diagram"><pre class="mermaid">sequenceDiagram
+    autonumber
+    participant C as Client
+    participant S as MergeTreeSink (135)
+    participant W as writeTempPart (MergeTreeDataWriter.cpp:786)
+    participant P as part on disk
+    participant R as MergeTreeDataSelectExecutor (229)
+    participant X as MergeTreeSelectProcessor (395)
+    C-&gt;&gt;S: INSERT 1M rows (Block, column-shaped)
+    S-&gt;&gt;S: splitBlockIntoParts — by partition key
+    S-&gt;&gt;W: per partition block
+    W-&gt;&gt;W: sort rows by primary key (stableGetPermutation)
+    W-&gt;&gt;P: per column: compressed .bin + marks, primary.idx = PK of every granule start
+    Note over P: part is immutable, background merges&lt;br/&gt;combine parts later (LSM lineage)
+    C-&gt;&gt;R: SELECT sum(x) WHERE pk BETWEEN a AND b
+    R-&gt;&gt;R: filterPartsByPartition (714) + markRangesFromPKRange (2107)&lt;br/&gt;KeyCondition over primary.idx → granule ranges
+    R-&gt;&gt;X: tasks = (part, mark ranges) from read pool
+    X-&gt;&gt;P: PREWHERE: read filter columns of surviving granules only,&lt;br/&gt;late columns fetched for surviving rows (RangeReader chain)
+    X-&gt;&gt;X: vectorized expressions over Blocks, Aggregator two-level tables
+    X--&gt;&gt;C: aggregated result stream
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-block-arrives-already-columnar">The block arrives already columnar</h3>
+<p>Client and server
+exchange <code>Block</code>s — the unit of processing in this system is never a
+row, but a batch of columns (<code>src/Core/Block.h:32</code>, whose class comment
+declares it &quot;unit of data processing&quot;). A million-row INSERT is a
+handful of long arrays, not a million tuples.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="split-sort-seal">Split, sort, seal</h3>
+<p><code>MergeTreeSink::consume</code>
+(<code>src/Storages/MergeTree/MergeTreeSink.cpp:135</code>) splits the block by
+partition key (<code>splitBlockIntoParts</code>), then
+<code>MergeTreeDataWriter::writeTempPartImpl</code>
+(<code>src/Storages/MergeTree/MergeTreeDataWriter.cpp:786</code>) sorts each
+partition block by the primary key (<code>stableGetPermutation</code>), so every
+part is one sorted run — exactly LevelDB&#39;s &quot;log + sorted run&quot; split,
+except the run&#39;s columns stay separate on disk.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="write-columns-marks-and-the-sparse-index">Write columns, marks, and the sparse index</h3>
+<p><code>MergeTreeDataPartWriterWide::write</code>
+(<code>src/Storages/MergeTree/MergeTreeDataPartWriterOnDisk.cpp</code> family,
+Wide variant at <code>MergeTreeDataPartWriterWide.cpp:360</code>) streams each
+column into its own compressed <code>.bin</code> file, dropping a <em>mark</em> every
+granule (default 8,192 rows, <code>MergeTreeSettings.cpp:72</code>; adaptive
+granularity capped in bytes, <code>index_granularity_bytes</code> 10MiB default,
+<code>:1929</code>) into <code>.mrk3</code> — a mark is just
+two offsets (<code>MarkInCompressedFile</code>,
+<code>src/Formats/MarkInCompressedFile.h:17</code>). Then
+<code>calculateAndSerializePrimaryIndex</code>
+(<code>src/Storages/MergeTree/MergeTreeDataPartWriterOnDisk.cpp:255</code>)
+writes <code>primary.idx</code>: the primary key of every granule&#39;s <em>first</em> row.
+That is the whole &quot;index&quot; — one key row per 8,192 data rows.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="the-query-prunes-parts">The query prunes parts</h3>
+<p>A SELECT with a WHERE hits
+<code>MergeTreeDataSelectExecutor::read</code>
+(<code>src/Storages/MergeTree/MergeTreeDataSelectExecutor.cpp:229</code>):
+<code>filterPartsByPartition</code> (<code>:714</code>) drops whole parts using per-part
+<code>minmax_[Column].idx</code> files (partition pruning), and
+<code>markRangesFromPKRange</code> (<code>:2107</code>) walks <code>primary.idx</code> in memory,
+asking the <code>KeyCondition</code> (<code>src/Storages/MergeTree/KeyCondition.h:66</code>)
+whether each granule&#39;s key range can still match — survivors become
+mark ranges. In a well-partitioned table this one step skips the
+majority of bytes without reading them.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="granule-precise-reads-with-prewhere">Granule-precise reads with PREWHERE</h3>
+<p>The read pool hands
+out (part, mark-range) tasks (<code>MergeTreeReadPoolBase::createTask</code>,
+<code>src/Storages/MergeTree/MergeTreeReadPoolBase.cpp:387</code>);
+<code>MergeTreeSelectProcessor::read</code>
+(<code>src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:395</code>) executes
+them through a chain of <code>MergeTreeRangeReader</code>s: the filter columns
+are read first (PREWHERE — <code>MergeTreeWhereOptimizer.cpp:139</code>
+auto-demotes suitable WHERE conjuncts), rows that fail are filtered,
+and only surviving rows pull the remaining, possibly wide, columns
+(<code>MergeTreeRangeReader::executePrewhereActionsAndFilterColumns</code>,
+<code>src/Storages/MergeTree/MergeTreeRangeReader.cpp:1727</code>). Positional
+seeks land via <code>MergeTreeReaderStream::seekToMark</code>
+(<code>src/Storages/MergeTree/MergeTreeReaderStream.h:45</code>): decompress from
+this compressed-block offset, skip this many rows.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="vectorized-compute">Vectorized compute</h3>
+<p>Surviving granules are <code>Block</code>s; the
+pipeline&#39;s transforms call functions like <code>plus</code> not per row but per
+column (<code>IFunctionBase::executeImpl</code>,
+<code>src/Functions/IFunction.h:64</code>), which run tight
+<code>for (i &lt; size) c[i] = a[i] + b[i]</code> loops the compiler vectorizes
+(<code>BinaryOperation::process</code>,
+<code>src/Functions/FunctionBinaryArithmetic.h:292</code> — with an explicit
+opt-out for integer division, which no mainstream ISA vectorizes).
+GROUP BY fills the <code>Aggregator</code>&#39;s hash table
+(<code>src/Interpreters/Aggregator.h:94</code>), flipping to a two-level table
+(<code>:132</code>) past a size threshold so the merge phase can parallelize, and
+spilling to temporary files (<code>writeToTemporaryFile</code>, <code>:537</code>) when
+<code>max_bytes_before_external_group_by</code> is hit.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">7</span><div class="step-body"><h3 class="step-title" id="background-merges-keep-the-tree-shallow">Background merges keep the tree shallow</h3>
+<p>Later, while
+queries run, <code>MergeTreeDataMergerMutator::selectPartsToMerge</code>
+(<code>src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp:273</code>) picks
+adjacent sorted parts and <code>mergePartsToTemporaryPart</code> (<code>:435</code>) k-way
+merges them (<code>MergingSortedAlgorithm</code>,
+<code>src/Processors/Merges/Algorithms/MergingSortedAlgorithm.h:14</code>) into a
+new part at a higher <code>level</code> — the part name carries that level, the
+LSM signature. UPDATE/DELETE never edit parts: mutations enqueue
+rewrites (<code>src/Interpreters/MutationsInterpreter.h:66</code>), executed by the same machinery.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="scans-touch-only-what-they-need">Scans touch only what they need</h3>
+<p>The INSERT became a
+sealed, sorted, granulated part with no read-modify-write anywhere;
+the SELECT read (per surviving granule) only the filter columns, then
+only the needed columns of surviving rows — and every byte that <em>was</em>
+read moved as a contiguous, compressed column stream through
+batch-at-a-time arithmetic.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+<h3 id="block-the-unit-of-processing-src-core-block-h-32">Block — the unit of processing (<code>src/Core/Block.h:32</code>)</h3>
+<p>A <code>Block</code> is a list of named, typed columns — &quot;container for set of
+columns for bunch of rows… this is unit of data processing&quot; (class
+comment at <code>src/Core/Block.h:26</code>). Pipelines, formats, functions, the
+client protocol: everything exchanges Blocks. <strong>Why:</strong> making the
+batch the universal currency amortizes per-call overhead (virtual
+dispatch, name/type checks) across 65k+ rows, and lets one engine
+serve a whole ecosystem of transforms; the cost is that every
+developer must think in column slices (<code>IColumn::cut</code>,
+<code>insertRangeFrom</code>) instead of objects.</p>
+<h3 id="icolumn-podarray-columns-as-contiguous-memory">IColumn + PODArray — columns as contiguous memory</h3>
+<p><code>IColumn</code> (<code>src/Columns/IColumn.h:114</code>) is the abstract column;
+<code>ColumnVector&lt;T&gt;</code> (<code>src/Columns/ColumnVector.h:25</code>) wraps a
+<code>PODArray&lt;T&gt;</code> (<code>src/Common/PODArray.h:328</code>) — plain memory padded for
+SIMD loads at both ends (<code>PADDING_FOR_SIMD</code>), with <code>insertRangeFrom</code>
+as the bulk-copy primitive. Strings are one <code>UInt8</code> char array plus an
+offsets array (<code>ColumnString.h:26</code>) — never one heap object per value.
+<strong>Why:</strong> this is the layout SIMD and memory prefetchers want; compare
+PostgreSQL&#39;s row pages where every sum(y) walks a row header per
+value. The template-explosion cost is real (thousands of typed
+specializations) but pays for itself in scan speed.</p>
+<h3 id="the-part-an-immutable-sorted-columnar-file-set">The part — an immutable, sorted, columnar file set</h3>
+<p>Each part directory holds, per column, a compressed <code>.bin</code> plus
+<code>.mrk3</code> marks, and <code>primary.idx</code>, <code>partition.dat</code>, <code>minmax_*.idx</code>,
+<code>checksums.txt</code> — the layout documented in the design comment at
+<code>src/Storages/MergeTree/MergeTreeData.h:159</code>. Parts are chosen wide
+(one file per column) or compact (single <code>all.bin</code>) by expected size
+(<code>choosePartFormat</code> in <code>writeTempPartImpl</code>). <strong>Why:</strong> identical shape
+in memory and on disk means reading a column <em>is</em> one contiguous
+decompress stream; per-column compression exploits intra-column
+homogeneity (sortedness makes Delta/DoubleDelta codecs near-free).
+Compare LevelDB&#39;s SSTables: same immutability, but one payload file
+per row-block because its workload is point lookups.</p>
+<h3 id="the-sparse-primary-index-marks">The sparse primary index + marks</h3>
+<p><code>primary.idx</code> stores the primary key of each granule&#39;s first row — one
+index entry per ~8,192 data rows (<code>MergeTreeDataPartWriterOnDisk.cpp:255</code>,
+the write loop at <code>:278</code>). Marks are two file offsets per granule per
+column (<code>MarkInCompressedFile.h:17</code>). <strong>Why not a B-tree per row?</strong>
+An OLAP index doesn&#39;t need row-precision: an answer may over-read a
+few thousand rows per range boundary, and the index stays small
+enough to cache every part&#39;s in memory. This is the structural
+opposite of PostgreSQL&#39;s B-tree-on-tuples — precision traded for scan
+amplitude, the right trade when every query aggregates millions of
+rows anyway.</p>
+<h3 id="keycondition-a-where-compiled-against-ranges">KeyCondition — a WHERE compiled against ranges</h3>
+<p><code>KeyCondition</code> (<code>src/Storages/MergeTree/KeyCondition.h:66</code>) turns the
+WHERE into an RPN over key columns, evaluating <code>checkInRange</code>
+(<code>:159</code>) against granule boundaries; <code>mayBeTrueInRange</code> (<code>:196</code>) is
+the prune test. Monotonic functions (<code>toMonth(date)</code> is monotonic) are
+reasoned about, so <code>WHERE toMonth(d) = 3</code> still prunes. <strong>Why:</strong> the
+index only pays if the planner can <em>prove</em> a granule can&#39;t match;
+this is ClickHouse&#39;s tiny, honest query-optimizer-for-skipping (the
+rest of &quot;optimization&quot; is mostly deferred to PREWHERE ordering and
+projection choice).</p>
+<h2 id="3-concurrency-and-failure-model">3. Concurrency and failure model</h2>
+<ul>
+<li><strong>Queries:</strong> the pipeline is a graph of <code>IProcessor</code> nodes
+(<code>src/Processors/IProcessor.h:122</code>) executed by <code>PipelineExecutor</code>
+(<code>src/Processors/Executors/Runtime/PipelineExecutor.h:32</code>) on up to
+<code>max_threads</code> workers; MergeTree read tasks are handed out from the
+shared <code>MergeTreeReadPool</code> so threads that finish early steal mark
+ranges (<code>MergeTreeReadPoolBase::refineReadRanges</code>,
+<code>src/Storages/MergeTree/MergeTreeReadPoolBase.cpp:482</code>). No thread
+owns a connection or a table: work is granule-shaped and portable.</li>
+<li><strong>Crash-safety by immutability:</strong> a half-written part lives in a
+<code>tmp_insert_</code> directory and is simply dropped on restart; a part
+becomes visible only after its files and <code>checksums.txt</code> are
+complete (see the layout comment, <code>MergeTreeData.h:159</code>). Merges
+write to temporary directories too — a crashed merge costs the
+wasted work, never the data. There is no undo log and none is
+needed; recovery is &quot;delete tmp, trust checksums.&quot;</li>
+<li><strong>Replication:</strong> <code>ReplicatedMergeTree</code> keeps an ordered log of
+intended operations (INSERT, MERGE, MUTATION, DROP…) in
+ClickHouse Keeper (ZooKeeper lineage); each replica tails its own
+<code>ReplicatedMergeTreeQueue</code>
+(<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:38</code>), and
+entries may execute out of order when safe
+(<code>shouldExecuteLogEntry</code>, <code>ReplicatedMergeTreeQueue.cpp:1656</code>;
+<code>executeLogEntry</code>, <code>src/Storages/StorageReplicatedMergeTree.cpp:2581</code>). Parts
+themselves are exchanged peer-to-peer, not through Keeper.
+INSERT deduplication is also a Keeper fact: block hashes under
+<code>/blocks/&lt;hash&gt;</code> make a retried insert idempotent.</li>
+<li><strong>Overload:</strong> per-query memory accounting (the memory tracker
+threaded through PODArray allocators), external aggregation/sort
+spilling (<code>Aggregator.h:537</code>), cancellation checks even inside
+skip-index building (<code>MergeTreeDataPartWriterOnDisk.cpp</code> comment),
+and settings-bounded thread pools. A query that blows up dies; the
+table&#39;s background machinery keeps its own budgets.</li>
+</ul>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    subgraph keeper[&quot;Keeper (consensus)&quot;]
+        LOG[&quot;replicated log + /blocks dedup hashes&quot;]
+    end
+    subgraph replica[&quot;each replica&quot;]
+        Q[&quot;ReplicatedMergeTreeQueue (39)&lt;br/&gt;shouldExecuteLogEntry (1656) reorders&quot;]
+        EX[&quot;executeLogEntry (2581)&lt;br/&gt;→ merge/mutate/insert task&quot;]
+        POOL[&quot;background pool&lt;br/&gt;MergePlainMergeTreeTask / MutatePlainMergeTreeTask&quot;]
+        PARTS2[&quot;immutable parts&quot;]
+    end
+    LOG --&gt;|&quot;queue per replica&quot;| Q --&gt; EX --&gt; POOL --&gt; PARTS2
+    PARTS2 -.-&gt;|&quot;P2P DataPartsExchange (no data through Keeper)&quot;| PARTS2
+</pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
+<h2 id="4-api-and-extension-design">4. API and extension design</h2>
+<ul>
+<li><strong>The public surface is SQL + DDL-embedded structure.</strong> Users
+describe <em>shape</em> — <code>ENGINE=MergeTree ORDER BY (a,b) PARTITION BY toYYYYMM(d)</code>, per-column <code>CODEC(Delta(2), ZSTD)</code>, skip indices,
+TTLs — and the engine derives all file layout, merges, and expiry
+from that declaration. Configuration of internals is data in the
+schema, the same &quot;declarative shape, reconciling engine&quot; stance as
+Kubernetes resources.</li>
+<li><strong>Extension seams are all factories with identical grammar:</strong>
+storage engines (<code>StorageFactory.cpp:57</code>),
+table functions, scalar functions (<code>FunctionFactory.cpp:39</code>),
+aggregate functions (<code>AggregateFunctions/…registerAggregateFunctions.cpp</code>),
+data types (<code>DataTypeFactory.cpp:289</code>), codecs
+(<code>Compression/CompressionFactory.cpp</code>), and input/output formats
+(<code>Formats/FormatFactory.h:73</code>). Each registrant gets a name, a
+creator, and generated documentation — settings declare their own
+docs inline (<code>MergeTreeSettings.cpp:72</code> style <code>DECLARE</code> macros),
+which is how thousands of settings stay user-visible without a
+second handbook.</li>
+<li><strong>Honest wart:</strong> the engine family tree (MergeTree,
+ReplicatedMergeTree, Replacing/Collapsing/Summing/Aggregating — the
+modes listed at <code>MergeTreeData.h:190-198</code> — plus projections,
+KeeperMap, &amp;c.) grew by <em>subclassing the merge semantics</em> rather
+than by a small combinator; the payoff is a stable part format, but
+the interaction matrix (replication × TTL × projections ×
+mutations × codec changes) is the system&#39;s chronic source of edge
+cases and long queues. And because the index is coarse, point-style
+OLTP workloads (many tiny UPDATEs, single-row reads) run
+pathologically — that is by design, not omission.</li>
+</ul>
+<h2 id="5-the-defining-trade-offs">5. The defining trade-offs</h2>
+<h3 id="trade-off-1-column-major-immutable-parts-over-row-major-mutable-pages">Trade-off 1: column-major immutable parts over row-major mutable pages</h3>
+<ul>
+<li><strong>Tension:</strong> analytical scans want contiguous columns; updates and
+single-row reads want rows together and mutable.</li>
+<li><strong>Choice:</strong> parts are per-column compressed files in an immutable
+directory, sorted by primary key; all change is new parts plus
+background rewrites.</li>
+<li><strong>Evidence:</strong> <code>writeTempPartImpl</code> sorts every insert
+(<code>MergeTreeDataWriter.cpp:786</code>); column files written per-column
+with marks (<code>MergeTreeDataPartWriterWide.cpp:360</code>); the design
+comment <code>MergeTreeData.h:159</code> states the invariant &quot;the table
+consists of several sorted parts… merged in the background.&quot;</li>
+<li><strong>Given up:</strong> in-place UPDATE/DELETE (mutations are asynchronous
+part rewrites), fast point lookups (a hit still reads a whole
+granule per column), row-level transactions.</li>
+<li><strong>Verdict:</strong> for append-mostly aggregation workloads this is the
+winning shape — the same verdict LevelDB reached for key-value,
+transposed. It would be wrong for your order-entry table; that is
+what PostgreSQL (this atlas) is for.</li>
+</ul>
+<h3 id="trade-off-2-sparse-index-granule-skipping-over-dense-row-indexes">Trade-off 2: sparse index + granule skipping over dense row indexes</h3>
+<ul>
+<li><strong>Tension:</strong> read less data vs index size and write amplification.</li>
+<li><strong>Choice:</strong> index only every granule&#39;s first key (~8,192 rows,
+<code>MergeTreeSettings.cpp:72</code>); over-read at range boundaries;
+compensate with PREWHERE to filter before wide columns are read.</li>
+<li><strong>Evidence:</strong> <code>calculateAndSerializePrimaryIndex</code>
+(<code>MergeTreeDataPartWriterOnDisk.cpp:255</code>, &quot;index contains Primary
+Key value for each <code>index_granularity</code> row&quot;); pruning in
+<code>markRangesFromPKRange</code> (<code>MergeTreeDataSelectExecutor.cpp:2107</code>);
+PREWHERE late materialization
+(<code>MergeTreeRangeReader.cpp:1727</code>).</li>
+<li><strong>Given up:</strong> row-precise seeks; queries without useful predicates
+on the primary key read everything (skip indexes and partitions
+soften this).</li>
+<li><strong>Verdict:</strong> when queries aggregate ranges, a few thousand extra
+rows per boundary is noise while a 100×-smaller index is pure win.
+Wrong for your workload when predicates are mostly on non-key
+columns at high selectivity — that is inverted-index territory
+(<a href="../elasticsearch/">Elasticsearch</a>).</li>
+</ul>
+<h3 id="trade-off-3-vectorized-batch-interpretation-over-per-row-or-full-jit-execution">Trade-off 3: vectorized batch interpretation over per-row (or full JIT) execution</h3>
+<ul>
+<li><strong>Tension:</strong> interpretation overhead vs code flexibility vs compile
+time.</li>
+<li><strong>Choice:</strong> every operator, function, and format works on whole
+columns per call; tight loops auto-vectorize; selected hot
+expressions additionally compile to native code via LLVM
+(<code>USE_EMBEDDED_COMPILER</code> paths, e.g. <code>PlusImpl::compile</code> in
+<code>src/Functions/plus.cpp</code>).</li>
+<li><strong>Evidence:</strong> <code>IFunctionBase::executeImpl</code> takes whole columns
+(<code>src/Functions/IFunction.h:64</code>); <code>BinaryOperation::process</code>
+pointer-loops with explicit vectorization policy
+(<code>FunctionBinaryArithmetic.h:292</code>); PREWHERE reorders column reads
+by cost (<code>MergeTreeWhereOptimizer.cpp:139</code>).</li>
+<li><strong>Given up:</strong> row-at-a-time APIs (a UDF gets whole columns in,
+must return whole columns out), and a combinatorial mess of typed
+specializations; codegen would be faster still but is paid only
+where it amortizes.</li>
+<li><strong>Verdict:</strong> for scan-heavy analytics the batch IS the right unit —
+memory bandwidth, not interpretation, is the ceiling, and this
+design keeps you at that ceiling with plain, debuggable C++.</li>
+</ul>
+<h2 id="6-reading-path">6. Reading path</h2>
+<ol>
+<li><code>src/Storages/MergeTree/MergeTreeData.h:159</code> — the file header&#39;s
+design comment: incremental sorting, part file structure, merge
+modes. The whole engine in 50 lines of comments; read it first.</li>
+<li><code>src/Storages/MergeTree/MergeTreeSettings.cpp:72</code> —
+<code>index_granularity</code> 8192 and <code>index_granularity_bytes</code> (10MiB,
+adaptive): the granule is the atom of reading; every later
+structure is sized around it.</li>
+<li><code>src/Storages/MergeTree/MergeTreeSink.cpp:135</code> — <code>consume</code>:
+partition split, and the pipeline-facing write entry point
+(<code>IStorage.h:481</code> is the seam it hangs from).</li>
+<li><code>src/Storages/MergeTree/MergeTreeDataWriter.cpp:786</code> —
+<code>writeTempPartImpl</code>: sort by primary key, part naming
+(partition_id, block range, <em>level</em> — the LSM signature),
+wide-vs-compact choice.</li>
+<li><code>src/Storages/MergeTree/MergeTreeDataPartWriterWide.cpp:360</code> —
+<code>write</code> and <code>writeSingleMark</code> (<code>:457</code>): one column file at a time,
+marks as (compressed, decompressed) offsets; then
+<code>MergeTreeDataPartWriterOnDisk.cpp:255</code> —
+<code>calculateAndSerializePrimaryIndex</code>: <code>primary.idx</code> = first key per
+granule. Pair with <code>src/Formats/MarkInCompressedFile.h:17</code>.</li>
+<li><code>src/Storages/MergeTree/MergeTreeDataSelectExecutor.cpp:714</code> and
+<code>:2107</code> — <code>filterPartsByPartition</code> then <code>markRangesFromPKRange</code>:
+minmax files and the in-memory sparse index deciding which
+granules exist for this query at all.</li>
+<li><code>src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:395</code> —
+<code>read</code>: the task loop pulling (part, mark-range) work from the
+pool, and <code>:259 readCurrentTask</code> running the PREWHERE reader
+chain; then <code>src/Storages/MergeTree/MergeTreeReaderStream.h:45</code> —
+<code>seekToMark</code>: how a mark becomes a file position.</li>
+<li><code>src/Storages/MergeTree/MergeTreeRangeReader.cpp:1727</code> —
+<code>executePrewhereActionsAndFilterColumns</code>: filter columns read
+first, wide columns only for survivors; the atlas&#39;s clearest
+example of cost-ordered lazy materialization.</li>
+<li><code>src/Core/Block.h:26</code>, <code>src/Columns/IColumn.h:114</code>,
+<code>src/Columns/ColumnVector.h:25</code>, <code>src/Common/PODArray.h:328</code> —
+the in-memory column model every previous step produced or
+consumed; note <code>insertRangeFrom</code> as the bulk-mutation verb.</li>
+<li><code>src/Functions/IFunction.h:64</code> and
+<code>src/Functions/FunctionBinaryArithmetic.h:292</code> — the vectorized
+function contract and a canonical tight loop; then
+<code>src/Interpreters/Aggregator.h:94</code> for two-level hash tables and
+external spill — batch-ness extends to grouping.</li>
+<li><code>src/Processors/Executors/Runtime/PipelineExecutor.h:32</code> and
+<code>ExecutingGraph.h</code> — the executor that schedules processors over
+ports; queries are just graphs, sources and sinks included.</li>
+<li><code>src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp:273</code> —
+<code>selectPartsToMerge</code> and <code>:435 mergePartsToTemporaryPart</code>; then
+<code>src/Storages/MergeTree/ReplicatedMergeTreeQueue.h:38</code> and
+<code>src/Storages/StorageReplicatedMergeTree.cpp:2581 executeLogEntry</code> —
+background merges and the Keeper-published log that orders them
+on every replica.</li>
+</ol>
+<p>You have now traced one row batch from INSERT block to sorted,
+granulated, compressed part (and onward through background merges),
+and one SELECT from SQL text to granule-pruned PREWHERE reads,
+vectorized arithmetic, and a merged aggregation — the full life of
+analytical data in ClickHouse.</p>
+<h2 id="7-what-to-steal">7. What to steal</h2>
+<ul>
+<li><strong>Make the batch the unit everywhere — memory, disk, and calls.</strong>
+One consistent granularity (<code>Block</code> in RAM, granule on disk) is why
+the whole engine feels like a library instead of a pile of
+special cases; you saw it in <code>Block.h:26</code> and
+<code>MergeTreeSettings.cpp:72</code>.</li>
+<li><strong>Index blocks, not rows, when answers aggregate over ranges.</strong> The
+sparse primary index (<code>MergeTreeDataPartWriterOnDisk.cpp:255</code>)
+keeps the index cache-sized while skipping gigabytes — the same
+coarse-index insight as Kafka&#39;s sparse offsets and Lucene&#39;s
+segment-level terms, applied to columns.</li>
+<li><strong>Reorder work by data cost, not by query syntax.</strong> PREWHERE
+(<code>MergeTreeWhereOptimizer.cpp:139</code>) moves cheap filters ahead of
+expensive column reads at execution time — a general rule for any
+system with heterogeneous fetch costs.</li>
+<li><strong>Immutable sorted runs + background k-way merges generalize beyond
+LSM key-value.</strong> <code>MergeTreeDataMergerMutator.cpp:435</code> shows merges
+as the place to also apply semantics (dedup, collapsing, TTL) —
+compaction as a programmable stage, not just garbage collection.</li>
+<li><strong>Declarative shape, reconciling engine.</strong> ORDER BY/PARTITION
+BY/CODEC/TTL in DDL describe intent; merges, moves, and expiry are
+derived consequences (<code>MergeTreeData.h:159</code>) — Kubernetes&#39; stance,
+inside a storage engine.</li>
+<li><strong>Factories with self-describing registrations.</strong> Every extension
+axis (engines, functions, codecs, formats) registers name + creator<ul>
+<li>docs in one place (<code>StorageFactory.cpp:57</code>); settings generate
+their own documentation. Two thousand knobs stay governable only
+this way.</li>
+</ul>
+</li>
+</ul>
+<h2 id="8-difficulty-and-prerequisites">8. Difficulty and prerequisites</h2>
+<ul>
+<li>Difficulty: <strong>demanding</strong> — a very large modern-C++ codebase with
+heavy templating; the MergeTree subsystem alone is a directory of
+~250 files.</li>
+<li>Budget: ~8 hours for the reading path; steps 1–8 are the core
+(write + read spine), 9–12 pay off on a second pass.</li>
+<li>Prerequisites: C++ reading fluency (templates, CRTP); what a B-tree
+and an LSM-tree are (read <a href="../leveldb/">LevelDB</a> first — ClickHouse
+reuses its run+merge skeleton); basic SIMD/vectorization awareness;
+SQL query execution vocabulary (predicate pushdown, aggregation).</li>
+</ul>
+<h2 id="9-further-reading">9. Further reading</h2>
+<ul>
+<li>Upstream docs: &quot;MergeTree table engine&quot;, &quot;Sparse primary index&quot;,
+and &quot;PREWHERE&quot; pages — the operational twins of the code read here.</li>
+<li>Schulze et al., <em>ClickHouse: Blazing Fast Analytics for Everyone</em>
+(PVLDB 17(12), 2024): the architecture paper by the authors,
+including the vectorized-execution rationale and benchmark
+discussion.</li>
+<li>Pair with <a href="../leveldb/">LevelDB</a> (the LSM skeleton this engine
+transposes to columns), <a href="../elasticsearch/">Elasticsearch</a> (the
+other inverted-index answer to &quot;find a few of many&quot;), and
+<a href="../postgresql/">PostgreSQL</a> (the row-major, transactional world
+this design deliberately declines to serve).</li>
+</ul>
+
+  </article>
+  <div class="dive-nav">
+  <a href="../llvm/"><span class="dir">← Previous dive</span>LLVM: one shared IR, and the pass pipeline as its plugin architecture</a>
+  <span></span>
+</div>
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 37 of 37 ·
+    <a href="../../patterns/">see which patterns this system instantiates</a></p>
+</div>
+</div>
+</main>
+<footer class="site-footer">
+  <span>Prose <a href="https://github.com/acailic/system-design-atlas/blob/main/LICENSES.md">CC-BY-4.0</a> · Tooling MIT · Site generated from the markdown source.</span>
+  <span><a href="https://github.com/acailic/system-design-atlas">github.com/acailic/system-design-atlas</a></span>
+</footer>
+<noscript><div class="read-bar-unsupported">JavaScript is off — diagrams show as source and read-aloud is unavailable. Everything is still readable.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js" integrity="sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV" crossorigin="anonymous" defer></script>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

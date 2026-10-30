@@ -25,7 +25,7 @@
 </nav>
 <main id="main">
 <div class="page article-layout">
-<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-dd-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one dd, typed in a terminal, seen by two screens</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
+<nav class="toc" aria-label="Contents"><div class="toc-title">On this page</div><ol><li><a href="#explain-like-i-m-10">🧒 Explain like I'm 10</a></li><li><a href="#1-architecture-overview">1. Architecture overview</a></li><li><a href="#walkthrough-one-dd-command-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one dd command, typed in a terminal, seen by two screens</a></li><li><a href="#2-core-data-structures-and-why-these">2. Core data structures — and why these</a></li><li><a href="#3-concurrency-and-failure-model">3. Concurrency and failure model</a></li><li><a href="#4-api-and-extension-design">4. API and extension design</a></li><li><a href="#5-the-defining-trade-offs">5. The defining trade-offs</a></li><li><a href="#6-reading-path">6. Reading path</a></li><li><a href="#7-what-to-steal">7. What to steal</a></li><li><a href="#8-difficulty-and-prerequisites">8. Difficulty and prerequisites</a></li><li><a href="#9-further-reading">9. Further reading</a></li></ol></nav>
 <div>
   <header class="article-header">
     <h1>Neovim: the editor as an RPC server — one seam for every face</h1>
@@ -118,7 +118,8 @@ events → <code>RemoteUI</code> packs them into one batched <code>redraw</code>
 (<code>api/ui.c:prepare_call</code>) → every client (TUI, GUIs) updates its own
 grids.</li>
 </ul>
-<h2 id="walkthrough-one-dd-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one <code>dd</code>, typed in a terminal, seen by two screens</h2>
+<div class="walkthrough">
+<h2 id="walkthrough-one-dd-command-typed-in-a-terminal-seen-by-two-screens">Walkthrough: one dd command, typed in a terminal, seen by two screens</h2>
 <figure class="diagram"><pre class="mermaid">sequenceDiagram
     autonumber
     participant T as User terminal
@@ -137,54 +138,61 @@ grids.</li>
     TU-&gt;&gt;T: ugrid updated → terminfo escape codes
     G-&gt;&gt;G: renders the same scene its own way
 </pre><span class="diagram-fallback-note">Diagram source — enable JavaScript to render the diagram.</span></figure>
-<p><strong>Step 1 — The keystroke crosses the first process boundary.</strong> The TUI
+<div class="step"><span class="step-marker" aria-hidden="true">1</span><div class="step-body"><h3 class="step-title" id="the-keystroke-crosses-the-first-process-boundary">The keystroke crosses the first process boundary</h3>
+<p>The TUI
 process reads terminal bytes on a libuv stream
 (<code>tui/input.c:tinput_read_cb:897</code>), translates escape sequences to keys via
 its bundled terminfo/keycode tables, and forwards them as data:
 <code>rpc_send_event(ui_client_channel_id, &quot;nvim_input&quot;, keys)</code>
 (<code>tui/input.c:207</code>). The process you typed in does not edit text; it
-<em>reports typing</em>.</p>
-<p><strong>Step 2 — The core parses, dispatches, and queues input.</strong> The stdio
+<em>reports typing</em>.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">2</span><div class="step-body"><h3 class="step-title" id="the-core-parses-dispatches-and-queues-input">The core parses, dispatches, and queues input</h3>
+<p>The stdio
 channel&#39;s read event runs <code>parse_msgpack</code> (<code>msgpack_rpc/channel.c:249</code>),
 which feeds the unpacker and hands complete messages to <code>handle_request</code>
 (312). <code>nvim_input</code> is declared <code>FUNC_API_FAST</code> (<code>api/vim.c:376</code>), so its
 wrapper runs immediately on the loop and only enqueues bytes into the
 typeahead ring (<code>os/input.c:input_enqueue:285</code>) — editor state is touched
-later, at a safe point, never from the socket read.</p>
-<p><strong>Step 3 — The modal loop reaches a safe point.</strong> <code>state_enter</code>
+later, at a safe point, never from the socket read.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">3</span><div class="step-body"><h3 class="step-title" id="the-modal-loop-reaches-a-safe-point">The modal loop reaches a safe point</h3>
+<p><code>state_enter</code>
 (<code>state.c:34</code>) is the editor&#39;s heart: each mode (normal, insert, cmdline)
 is a <code>VimState</code> with <code>check</code>/<code>execute</code> callbacks (<code>state_defs.h:8</code>). When
 keys are pending it consumes them via <code>safe_vgetc</code>; when the event queues
 are non-empty it injects the synthetic <code>K_EVENT</code> key so mode handlers can
 drain callbacks at a moment of <em>their</em> choosing. <code>dd</code> executes as
 operator+motion: one line leaves the memline, its grid rows are marked
-dirty, not repainted yet.</p>
-<p><strong>Step 4 — Redraw becomes protocol.</strong> <code>ui_flush</code> (<code>ui.c:540</code>) walks dirty
+dirty, not repainted yet.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">4</span><div class="step-body"><h3 class="step-title" id="redraw-becomes-protocol">Redraw becomes protocol</h3>
+<p><code>ui_flush</code> (<code>ui.c:540</code>) walks dirty
 rows and emits <code>grid_line</code> events per row segment
 (<code>ui.c:482</code>). The <code>UI_CALL</code> macro (<code>ui.c:104</code>) fans each event out to every
 attached <code>RemoteUI</code> — the TUI channel, the GUI channel, all of them — through
 <code>remote_ui_*</code> packer functions <em>generated</em> from the declarative protocol
 (<code>api/ui_events.in.h</code> → <code>src/gen/gen_api_ui_events.lua</code>). Rendering is
-not a subroutine call; it is a broadcast of facts.</p>
-<p><strong>Step 5 — Events are batched under a cell budget.</strong> <code>push_call</code> →
+not a subroutine call; it is a broadcast of facts.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">5</span><div class="step-body"><h3 class="step-title" id="events-are-batched-under-a-cell-budget">Events are batched under a cell budget</h3>
+<p><code>push_call</code> →
 <code>prepare_call</code> (<code>api/ui.c:600</code>) bundles adjacent calls to the same method
 into one msgpack array inside a single <code>redraw</code> notification, flushing when
 the pack buffer nears <code>UI_BUF_SIZE</code> or 500 cells (<code>ncells_pending</code>) are
 pending; array sizes unknown at pack time are back-patched afterwards
 (<code>flush_event</code>, 583). A full-screen redraw crosses the wire as bundled
-batches (4 KiB pack buffer per flush), not one notification per event.</p>
-<p><strong>Step 6 — Two clients render the same facts.</strong> The TUI process receives
+batches (4 KiB pack buffer per flush), not one notification per event.</p></div></div>
+<div class="step"><span class="step-marker" aria-hidden="true">6</span><div class="step-body"><h3 class="step-title" id="two-clients-render-the-same-facts">Two clients render the same facts</h3>
+<p>The TUI process receives
 <code>redraw</code>, dispatches each event by hash to a <code>ui_client_event_*</code> handler
 (<code>ui_client.c:ui_client_get_redraw_handler</code>) that updates its own
 <code>ScreenGrid</code>, then writes terminfo escape sequences to the terminal. The
 GUI, attached on another channel through the <em>same</em> <code>nvim_ui_attach</code>
 handshake (<code>api/ui.c:208</code>, with its <code>ext_*</code> capability negotiation), got
-the identical batch and drew it with entirely different code.</p>
-<p><strong>Outcome — The core never knew who was watching.</strong> One edit executed once;
+the identical batch and drew it with entirely different code.</p></div></div>
+<div class="step step-outcome"><span class="step-marker" aria-hidden="true">✓</span><div class="step-body"><h3 class="step-title" id="the-core-never-knew-who-was-watching">The core never knew who was watching</h3>
+<p>One edit executed once;
 input arrived as data, the scene change left as data. Swap the TUI for a
 test harness, a GUI, or a browser — the core cannot tell the difference,
-and that indifference <em>is</em> the architecture.</p>
-<h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
+and that indifference <em>is</em> the architecture.</p></div></div>
+</div><h2 id="2-core-data-structures-and-why-these">2. Core data structures — and why these</h2>
 <h3 id="channel-one-struct-for-every-transport-channel-h-18"><code>Channel</code> — one struct for every transport (<code>channel.h:18</code>)</h3>
 <p><strong>What:</strong> id, refcount, a private child event queue, <code>is_rpc</code>, an optional
 attached <code>Terminal</code>, and a tagged union over the stream: spawned process,
@@ -487,7 +495,7 @@ side; <code>runtime/doc/dev_arch.txt</code> — upstream&#39;s own module map.</
   <a href="../caddy/"><span class="dir">← Previous dive</span>Caddy: the runtime is the architecture — config as a document, goroutines instead of state machines</a>
   <a href="../llvm/" style="text-align:right"><span class="dir">Next dive →</span>LLVM: one shared IR, and the pass pipeline as its plugin architecture</a>
 </div>
-  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 35 of 36 ·
+  <p style="font-family:var(--sans);font-size:.8rem;color:var(--ink-faint)">Deep-dive 35 of 37 ·
     <a href="../../patterns/">see which patterns this system instantiates</a></p>
 </div>
 </div>
