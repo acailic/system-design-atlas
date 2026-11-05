@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">38 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">39 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 38 (and growing) canonical codebases and walks through
+<p>The atlas points at 39 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -68,6 +68,7 @@ alongside it. That is the whole method.</p>
       <button type="button" class="filter-chip" data-domain="media" aria-pressed="false">media</button>
       <button type="button" class="filter-chip" data-domain="ml-framework" aria-pressed="false">ml-framework</button>
       <button type="button" class="filter-chip" data-domain="networking" aria-pressed="false">networking</button>
+      <button type="button" class="filter-chip" data-domain="observability" aria-pressed="false">observability</button>
       <button type="button" class="filter-chip" data-domain="orchestration" aria-pressed="false">orchestration</button>
       <button type="button" class="filter-chip" data-domain="os-kernel" aria-pressed="false">os-kernel</button>
       <button type="button" class="filter-chip" data-domain="proxy-lb" aria-pressed="false">proxy-lb</button>
@@ -310,6 +311,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A kitchen that learns your favorite dishes and keeps a safety copy of every recipe. When you first order a dish (call a method), the cook follows the recipe card line by line (the interpreter,…</span>
   <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/prometheus/" data-domains="observability storage-engine" data-search="prometheus: the pull model — polling made correct by absence-as-data">
+  <span class="dc-name">Prometheus</span>
+  <span class="dc-headline">the pull model — polling made correct by absence-as-data</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A health inspector who visits every house on a schedule. Instead of waiting for houses to phone in complaints (push), the inspector (Prometheus) rings every doorbell on the street every 15 seconds…</span>
+  <span class="dc-meta"><span class="chip domain">observability</span><span class="chip domain">storage-engine</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -341,7 +348,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 38 projects; 38 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 39 projects; 39 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -460,6 +467,11 @@ transferable design moves you can apply to your own systems.</li>
   <div class="cat-why">Raft consensus in production clothes: a WAL-backed state machine, leader election, log replication, and snapshot/compaction — plus the watch API that turned it into Kubernetes' brain. Teaches the gap between a…</div></li>
 <li><span class="cat-name"><a href="dive/zookeeper/">Apache ZooKeeper</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The coordination kernel beneath the entire Hadoop-era stack: it won because it turned consensus into a usable product — a tiny ordered namespace of znodes backed by an atomic-broadcast (ZAB) log, with ephemeral nodes…</div></li></ul>
+</details>
+<details class="catalog-group">
+<summary>observability <span class="count">(1)</span></summary>
+<ul class="catalog-list"><li><span class="cat-name"><a href="dive/prometheus/">Prometheus</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The monitoring system that owns the metrics slot in the cloud-native stack, and it won by inverting the ingestion model: pull, don't push. The server scrapes every target on a known interval over plain HTTP, so…</div></li></ul>
 </details>
 <details class="catalog-group">
 <summary>editor <span class="count">(2)</span></summary>
