@@ -182,7 +182,17 @@ ladder turns overload into published, steerable slowdown states;
 as allocation-paced steps on the main thread plus concurrent jobs on
 the embedder's platform, with the store-path write barrier as the
 mutator's tax that buys never stopping for one big collection
-(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`).
+(`ConcurrentMarking::RunMajor`, `IncrementalMarking::AdvanceOnAllocation`);
+[ClickHouse](deep-dives/clickhouse.md)
+— background k-way merges keep the part tree shallow while inserts
+seal new parts, and the Aggregator flips to two-level tables at a
+size threshold so the final merge parallelizes; [HotSpot](deep-dives/hotspot.md) — the
+whole tiering idea is amortized optimization (compile only what the
+counters say is hot), and G1 shrinks each pause by evacuating only a
+region collection set sized against a declared pause goal
+(`G1YoungCollector::collect`, the `MaxGCPauseMillis` MMU tracker in
+`G1Policy`), while ZGC moves marking and relocation off the mutator
+entirely — the pauses left are two sub-millisecond stack scans.
 
 **Why it recurs:** latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone's tail.
@@ -303,7 +313,17 @@ BPF programs — extend a monolith without forking it;
 [Neovim](deep-dives/neovim.md) — msgpack-RPC as the one seam for
 UIs, embedders, plugin hosts, and even the built-in terminal UI
 (a child process speaking the same protocol), with additive-only
-versioning making it safe for a decade of clients.
+versioning making it safe for a decade of clients;
+[LLVM](deep-dives/llvm.md) — passes as the plugin unit: one C symbol
+(`llvmGetPassPluginInfo`) registers pipeline-parsing callbacks into
+the PassBuilder, so out-of-tree optimizers (Enzyme's autodiff) hook
+the compiler without forking it — and the pass registry itself is the
+seam the `-passes` pipeline language plugs into; [HotSpot](deep-dives/hotspot.md) — garbage collection as the
+pluggable room: five collectors (Serial, Parallel, G1, ZGC,
+Shenandoah) behind one `CollectedHeap` + `BarrierSet` contract, each
+also emitting its barriers per compiler and per architecture
+(`gc/g1/c1`, `gc/g1/c2`, `cpu/x86/gc/z/z_x86_64.ad`), selected by a
+startup factory (`GCConfig::select_gc`).
 
 **Why it recurs:** ecosystems compound only where extension is
 contractual; the seams' *placement* decides which ecosystem you get.
@@ -366,7 +386,21 @@ artifacts, not review diligence;
 declared once with FUNC_API attributes in `api/*.c`; generators
 emit the perfect-hash dispatch table, Lua bindings, runtime
 metadata, docs, and the twin server/client halves of the UI event
-protocol (`ui_events.in.h` → packers and handlers).
+protocol (`ui_events.in.h` → packers and handlers);
+[LLVM](deep-dives/llvm.md) — the pass vocabulary is a macro table
+(`PassRegistry.def`) that generates the pipeline parser, and CPU
+targets are TableGen `.td` records expanded into generated selector
+tables (even `default<O2>` is a registry alias, not driver code — so
+the optimizer's configuration, its targets, and its extension
+surface are all data;
+[ClickHouse](deep-dives/clickhouse.md) — settings and factory
+registrations (engines, functions, codecs, formats) carry their own
+doc strings, so thousands of knobs and extensions stay
+user-visible without a second handbook); [HotSpot](deep-dives/hotspot.md) —
+the interpreter itself is generated at JVM startup from one `def()`
+per bytecode (`TemplateTable::initialize`), emitting a dispatch
+table of machine code per platform — the same move as CPython's
+`bytecodes.c`, one step further down to native code.
 
 **Why it recurs:** one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
@@ -435,6 +469,44 @@ learning. Costs: warmup latency (cold code runs the baseline),
 memory for feedback and multiple code versions, and deopt storms
 when shapes churn. Short-lived processes should stay at CPython's
 specialization tier or Lua's none at all.
+## 15. The intermediate representation is the architecture
+
+**Shape:** instead of translating problem → solution in one step, the
+system freezes a serializable intermediate representation at the
+seam, checks it with a verifier, and makes every transformation a
+small, composable stage over it — so N producers and M consumers
+cost N+M, not N×M.
+
+**Seen in:** [LLVM](deep-dives/llvm.md) — the pattern's cathedral: a
+pointer-graph IR with def-use chains, a Verifier enforcing the
+contract, passes scheduled by a parseable pipeline string, and the
+whole design cloned again into machine IR; [SQLite](deep-dives/sqlite.md)
+— every SQL statement compiles to a VDBE bytecode program before it
+runs, making the query plan inspectable and re-executable;
+[CPython](deep-dives/cpython.md) — bytecode as a poor man's IR: no
+SSA and a stack machine, yet the same bet (serialize the program,
+then transform it — the adaptive interpreter specializing hot opcodes
+in place is a mini-optimizer over it); [PyTorch](deep-dives/pytorch.md)
+— torch.compile captures the eager tape into a graph IR that
+TorchInductor lowers into Triton/C++ (kernels that bottom out in
+LLVM — the pattern composing with itself); [llama.cpp](deep-dives/llama-cpp.md)
+— ggml tensor graphs: models *are* dataflow IR that a generic backend
+executes, which is why 160 architectures are just files.
+
+**Why it recurs:** the IR is where every concern meets — frontends,
+optimizers, backends, debuggers, serializers — so freezing it (with a
+verifier) turns each of those into an independently developed,
+independently testable program over shared data. V8's tiering
+(Ignition bytecode → Maglev → TurboFan) is the same insight inside a
+runtime: each tier is one more lowering over an IR.
+
+**Reach for it when:** more than one producer or more than one
+consumer of the program/work exists, or will. The price is paying for
+the IR itself — a data structure that must stay honest under mutation
+(LLVM's Use lists, its Verifier, and its serialize-then-parallelize
+concurrency boundary are the invoice) — and losing whatever your
+source language knew that the IR doesn't (LLVM's intrinsics list is
+that loss, itemized).
 
 ---
 
