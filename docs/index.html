@@ -28,7 +28,7 @@
 <section class="hero">
   <div class="kicker">A curated atlas of great open-source code</div>
   <h1>Learn system design by reading the code that proved it</h1>
-  <p class="tagline">37 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
+  <p class="tagline">38 canonical codebases, walked file-by-file at a pinned commit — the trade-offs frozen into real code, not folklore. Every page reads aloud, every system gets an “explain it like I'm 10”, every walkthrough steps through the request path.</p>
   <div class="cta">
     <a class="btn btn-primary" href="#dives">Browse the deep-dives</a>
     <a class="btn btn-ghost" href="patterns/">Patterns index</a>
@@ -43,7 +43,7 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 37 (and growing) canonical codebases and walks through
+<p>The atlas points at 38 (and growing) canonical codebases and walks through
 the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
@@ -304,6 +304,12 @@ alongside it. That is the whole method.</p>
   <span class="dc-eli"><b>Like you're 10:</b> A filing warehouse that stores each field of a form in its own drawer, and almost never carries a whole form around. Every column of the table gets one long drawer (the per-column.bin file)…</span>
   <span class="dc-meta"><span class="chip domain">database</span><span class="chip domain">distributed</span><span class="chip diff-demanding">demanding</span></span>
 </a>
+<a class="dive-card" href="dive/hotspot/" data-domains="runtime language" data-search="openjdk hotspot: watch first, compile later, retract anytime">
+  <span class="dc-name">OpenJDK HotSpot</span>
+  <span class="dc-headline">watch first, compile later, retract anytime</span>
+  <span class="dc-eli"><b>Like you're 10:</b> A kitchen that learns your favorite dishes and keeps a safety copy of every recipe. When you first order a dish (call a method), the cook follows the recipe card line by line (the interpreter,…</span>
+  <span class="dc-meta"><span class="chip domain">runtime</span><span class="chip domain">language</span><span class="chip diff-demanding">demanding</span></span>
+</a>
   </div>
 </section>
 
@@ -335,7 +341,7 @@ transferable design moves you can apply to your own systems.</li>
 
 <section class="home-section">
   <h2>The wider catalog</h2>
-  <p style="color:var(--ink-soft)">The atlas tracks 37 projects; 37 have deep-dives so far. Grouped by primary domain:</p>
+  <p style="color:var(--ink-soft)">The atlas tracks 38 projects; 38 have deep-dives so far. Grouped by primary domain:</p>
   <details class="catalog-group">
 <summary>os-kernel <span class="count">(1)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/linux/">Linux kernel</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -393,7 +399,7 @@ transferable design moves you can apply to your own systems.</li>
   <div class="cat-why">A messaging server whose entire protocol is a handful of text lines (INFO/CONNECT/PUB/SUB), with subject-based addressing (foo.*.bar) and per-subscription goroutine delivery. Teaches protocol minimalism and the…</div></li></ul>
 </details>
 <details class="catalog-group">
-<summary>runtime <span class="count">(5)</span></summary>
+<summary>runtime <span class="count">(6)</span></summary>
 <ul class="catalog-list"><li><span class="cat-name"><a href="dive/nodejs/">Node.js</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">V8 + libuv + a module system, glued so that JavaScript became a server language. Teaches the embedding lesson: how you wrap an engine (handles/scopes/contexts in V8) and an event loop (libuv) into a coherent…</div></li>
 <li><span class="cat-name"><a href="dive/cpython/">CPython</a></span><span class="cat-status deep-dived">deep-dived</span>
@@ -402,6 +408,8 @@ transferable design moves you can apply to your own systems.</li>
   <div class="cat-why">The portable event loop, distilled: poll/epoll/kqueue/IOCP behind one API, plus the async-cross-thread escape hatch (uv_async_t) and thread pool for blocking work (fs, dns). Small enough to read completely in a…</div></li>
 <li><span class="cat-name"><a href="dive/v8/">V8</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The fastest widely-deployed JS engine: Ignition interpreter, TurboFan optimizing compiler, concurrent+incremental marking, generational heap, hidden classes. Included for influence and as a reference, not a first…</div></li>
+<li><span class="cat-name"><a href="dive/hotspot/">OpenJDK HotSpot</a></span><span class="cat-status deep-dived">deep-dived</span>
+  <div class="cat-why">The most-deployed managed runtime in existence — it runs on millions of servers and desktops, and its patterns (tiered JIT, concurrent copying collectors) are mirrored in Android's ART — and it won that position with…</div></li>
 <li><span class="cat-name"><a href="dive/go/">Go runtime</a></span><span class="cat-status deep-dived">deep-dived</span>
   <div class="cat-why">The canonical M:N green-thread runtime: goroutines are 2 KiB resumable stacks (escape analysis + copy-on-grow stacks make that safe), scheduled onto a handful of OS threads by per-P run queues and work stealing, with…</div></li></ul>
 </details>

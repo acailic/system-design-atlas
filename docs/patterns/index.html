@@ -186,7 +186,13 @@ mutator&#39;s tax that buys never stopping for one big collection
 <a href="../dive/clickhouse/">ClickHouse</a>
 — background k-way merges keep the part tree shallow while inserts
 seal new parts, and the Aggregator flips to two-level tables at a
-size threshold so the final merge parallelizes.</p>
+size threshold so the final merge parallelizes; <a href="../dive/hotspot/">HotSpot</a> — the
+whole tiering idea is amortized optimization (compile only what the
+counters say is hot), and G1 shrinks each pause by evacuating only a
+region collection set sized against a declared pause goal
+(<code>G1YoungCollector::collect</code>, the <code>MaxGCPauseMillis</code> MMU tracker in
+<code>G1Policy</code>), while ZGC moves marking and relocation off the mutator
+entirely — the pauses left are two sub-millisecond stack scans.</p>
 <p><strong>Why it recurs:</strong> latency SLOs are p99 problems; any O(n) pause
 inside a request path eventually lands in someone&#39;s tail.</p>
 <p><strong>Reach for it when:</strong> anything grows. The rule of thumb from these
@@ -294,7 +300,12 @@ versioning making it safe for a decade of clients;
 (<code>llvmGetPassPluginInfo</code>) registers pipeline-parsing callbacks into
 the PassBuilder, so out-of-tree optimizers (Enzyme&#39;s autodiff) hook
 the compiler without forking it — and the pass registry itself is the
-seam the <code>-passes</code> pipeline language plugs into.</p>
+seam the <code>-passes</code> pipeline language plugs into; <a href="../dive/hotspot/">HotSpot</a> — garbage collection as the
+pluggable room: five collectors (Serial, Parallel, G1, ZGC,
+Shenandoah) behind one <code>CollectedHeap</code> + <code>BarrierSet</code> contract, each
+also emitting its barriers per compiler and per architecture
+(<code>gc/g1/c1</code>, <code>gc/g1/c2</code>, <code>cpu/x86/gc/z/z_x86_64.ad</code>), selected by a
+startup factory (<code>GCConfig::select_gc</code>).</p>
 <p><strong>Why it recurs:</strong> ecosystems compound only where extension is
 contractual; the seams&#39; <em>placement</em> decides which ecosystem you get.</p>
 <p><strong>Reach for it when:</strong> you can name who will extend you and what they
@@ -357,7 +368,11 @@ surface are all data;
 <a href="../dive/clickhouse/">ClickHouse</a> — settings and factory
 registrations (engines, functions, codecs, formats) carry their own
 doc strings, so thousands of knobs and extensions stay
-user-visible without a second handbook).</p>
+user-visible without a second handbook); <a href="../dive/hotspot/">HotSpot</a> —
+the interpreter itself is generated at JVM startup from one <code>def()</code>
+per bytecode (<code>TemplateTable::initialize</code>), emitting a dispatch
+table of machine code per platform — the same move as CPython&#39;s
+<code>bytecodes.c</code>, one step further down to native code.</p>
 <p><strong>Why it recurs:</strong> one source of truth removes drift between
 implementation, documentation, and tooling — the places large systems
 rot first.</p>
