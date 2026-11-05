@@ -277,6 +277,10 @@ compatible implementations coexist in one program;
 [PyTorch](deep-dives/pytorch.md) — every extension (custom
 ops, backends, interceptors, compilers) registers at the one
 dispatch table, which is how eager Python stayed a platform;
+[Caddy](deep-dives/caddy.md) — every extension point is a
+namespace-addressed slot in one typed JSON config, resolved by
+reflection at provisioning time, which is how 133 modules compose
+behind one static binary;
 [Servo](deep-dives/servo.md) — the engine grew an embedding API
 (ServoBuilder/WebView delegates, protocol registry, factory traits)
 so shells and C hosts (servoshell, ffi/capi) extend without forking;

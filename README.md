@@ -103,9 +103,10 @@ Deep-dives (the exemplars — more added over time):
 - [RocksDB](deep-dives/rocksdb.md) — LevelDB paged into production: column families over one WAL, stall ladders and I/O budgets, pluggable compaction
 - [V8](deep-dives/v8.md) — speculative optimization as architecture: feedback-driven tiering (Ignition → Sparkplug → Maglev → TurboFan), hidden classes, guarded deopt, concurrent GC, isolate-per-realm embedding
 - [Chromium](deep-dives/chromium.md) — a security model that forced the architecture: sandboxed renderer processes, site isolation, Mojo capability IPC, the browser's mirrored frame tree
+- [Caddy](deep-dives/caddy.md) — goroutines instead of state machines, config as a provisioned document, automatic HTTPS as a subsystem
 
-The catalog tracks 2 further heavyweight and high-teaching-value
-candidates awaiting deep-dives — Caddy, Neovim, and more —
+The catalog tracks 1 further heavyweight and high-teaching-value
+candidates awaiting deep-dives — Neovim, and more —
 across databases, queues, runtimes, containers, ML, browser engines,
 load balancers, and editors.
 
