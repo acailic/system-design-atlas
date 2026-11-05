@@ -649,7 +649,7 @@ projects:
     license: Apache-2.0
     domains: [editor]
     difficulty: demanding
-    status: cataloged
+    status: deep-dived
     scores: { design_influence: 3, clarity: 4, teachability: 4, domain_fit: 3 }
     why: >
       A 40-year-old editor architecture modernized without forking its
