@@ -17,6 +17,11 @@
  *                   (37.9 html + 20.2 css + 15.2 js), i.e. ~32% headroom
  *   SITE.JS 24 KiB — site.js was 15.2 KiB (read-aloud + steppers), ~57%
  *   SITE.CSS 28 KiB — site.css was 20.2 KiB, ~38%
+ *   PAGE bumped 96 → 112 KiB (2026-11) for the home facets/sort/surprise
+ *                   feature: index.html went 92.6 → 104.9 KiB (+6.4 KiB
+ *                   per-card facet data + options, +3.4 KiB site.js,
+ *                   +1.5 KiB site.css) and the shared-asset growth pushed
+ *                   dive/linux to 96.5 KiB; 112 keeps ~7% headroom.
  * Exceeding a budget is a deliberate act: bump the constant here with a
  * justification, the same way the SEL constant in readaloud.test.mjs is
  * maintained.
@@ -35,7 +40,7 @@ import { join, dirname, resolve, relative } from 'node:path';
 import { DOCS, discoverPages } from './helpers.mjs';
 
 const KiB = 1024;
-const PAGE_BUDGET = 96 * KiB;
+const PAGE_BUDGET = 112 * KiB;
 const SITE_JS_BUDGET = 24 * KiB;
 const SITE_CSS_BUDGET = 28 * KiB;
 

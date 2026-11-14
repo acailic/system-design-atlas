@@ -182,6 +182,10 @@ function parseDive(raw, id, catalogEntry) {
   meta.commit = commit ? commit[1] : null;
   meta.commitNote = commit && commit[2] ? commit[2] : '';
   meta.difficulty = catalogEntry?.difficulty || 'moderate';
+  /* hour budget from section 8 ("a focused 6–8 hours"), for the home time filter */
+  const sec8 = (raw.split(/^## 8\.[^\n]*\n/m)[1] || '').split(/^## /m)[0];
+  const hm = sec8.match(/(\d+)(?:\s*[–-]\s*(\d+))?\s*(?:focused\s+)?hours/i);
+  meta.hours = hm ? [Number(hm[1]), Number(hm[2] || hm[1])] : null;
 
   const body = raw.replace(/^# .+\n/, '');
   let html = renderMd(body);
@@ -314,6 +318,26 @@ const ordered = [...dives].sort((a, b) => {
   return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
 });
 
+/* home-page filter facets: languages (catalog), patterns (PATTERNS.md "Seen in") */
+const NOT_A_FILTER_LANG = new Set(['shell', 'Perl', 'Assembly']);
+const langsOf = (entry) => [...new Set(String(entry?.language || '')
+  .replace(/\([^)]*\)/g, '').split(/[,/]/).map((l) => l.trim())
+  .filter((l) => l && !NOT_A_FILTER_LANG.has(l)))];
+const patternFacets = [];
+{
+  const raw = readFileSync(join(ROOT, 'PATTERNS.md'), 'utf8');
+  for (const sec of raw.split(/^## (?=\d+\. )/m).slice(1)) {
+    const [, num, title] = sec.match(/^(\d+)\. ([^\n]+)/);
+    const seen = (sec.match(/\*\*Seen in:\*\*([\s\S]*?)\n\n/) || [])[1] || '';
+    const ids = [...new Set([...seen.matchAll(/\]\((?:deep-dives\/)?([a-z0-9-]+)\.md\)/g)].map((m) => m[1]))]
+      .filter((id) => diveIdSet.has(id));
+    /* drop explanatory parentheticals ("(name things by their hash)"), keep acronyms ("(MVCC)") */
+    patternFacets.push({ num, name: title.replace(/\s*\([^)]*\s[^)]*\)/g, '').trim(), ids });
+  }
+}
+const timeBucket = (h) => (!h ? '' : h[0] <= 5 ? 'evening' : h[0] < 10 ? 'weekend' : 'expedition');
+const DIFF_RANK = { gentle: 0, moderate: 1, demanding: 2 };
+
 /* ── dive pages ────────────────────────────────────────────────── */
 
 function divePage(d, prev, next, i, total) {
@@ -401,16 +425,49 @@ ${rewriteLinks(withIds, 'patterns/')}
 
 function homePage() {
   const domainSet = [...new Set(dives.flatMap((d) => d.meta.domains))].sort();
+  const entryOf = (d) => catalog.projects.find((p) => p.id === d.id) || {};
   const cards = ordered
+    .map((d, i) => {
+      const e = entryOf(d);
+      const sc = e.scores || {};
+      const h = d.meta.hours;
+      const pats = patternFacets.filter((p) => p.ids.includes(d.id)).map((p) => p.num);
+      return { d, i, langs: langsOf(e), sc, h, pats };
+    })
     .map(
-      (d) => `<a class="dive-card" href="dive/${d.id}/" data-domains="${escapeAttr(d.meta.domains.join(' '))}" data-search="${escapeAttr(d.title.toLowerCase())}">
+      ({ d, i, langs, sc, h, pats }) => `<a class="dive-card" href="dive/${d.id}/" data-domains="${escapeAttr(d.meta.domains.join(' '))}" data-search="${escapeAttr(d.title.toLowerCase())}" data-order="${i}" data-lang="${escapeAttr(langs.join(' '))}" data-patterns="${pats.join(' ')}" data-time="${timeBucket(h)}" data-hours="${h ? h[0] : 99}" data-diff="${DIFF_RANK[d.meta.difficulty] ?? 1}" data-influence="${sc.design_influence || 0}" data-teach="${(sc.teachability || 0) + (sc.clarity || 0)}">
   <span class="dc-name">${escapeAttr(d.title.split(':')[0])}</span>
   <span class="dc-headline">${escapeAttr(d.headline)}</span>
   ${d.eliTeaser ? `<span class="dc-eli"><b>Like you're 10:</b> ${escapeAttr(d.eliTeaser)}</span>` : ''}
-  <span class="dc-meta">${d.meta.domains.map((dom) => chip(escapeAttr(dom), 'domain')).join('')}${chip(d.meta.difficulty, `diff-${d.meta.difficulty}`)}</span>
+  <span class="dc-meta">${d.meta.domains.map((dom) => chip(escapeAttr(dom), 'domain')).join('')}${chip(d.meta.difficulty, `diff-${d.meta.difficulty}`)}${h ? chip(`⏱ ${h[0] === h[1] ? h[0] : `${h[0]}–${h[1]}`} h`, 'hours') : ''}</span>
 </a>`,
     )
     .join('\n');
+
+  const countBy = (pred) => ordered.filter(pred).length;
+  const langCounts = new Map();
+  ordered.forEach((d) => langsOf(entryOf(d)).forEach((l) => langCounts.set(l, (langCounts.get(l) || 0) + 1)));
+  const langOptions = [...langCounts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([l, n]) => [l, `${l} (${n})`]);
+  const patternOptions = patternFacets.filter((p) => p.ids.length)
+    .map((p) => [p.num, `${p.name} (${p.ids.length})`]);
+  const timeOptions = [
+    ['evening', '☕ An evening, ≤ 5 h'],
+    ['weekend', '🏕️ A weekend, 6–9 h'],
+    ['expedition', '🧗 An expedition, 10 h+'],
+  ].map(([v, label]) => [v, `${label} (${countBy((d) => timeBucket(d.meta.hours) === v)})`]);
+  const sortOptions = [
+    ['gentle', 'Gentlest first'],
+    ['quick', 'Quickest read'],
+    ['influence', 'Most influential design'],
+    ['teach', 'Most teachable code'],
+    ['az', 'A → Z'],
+  ];
+  const facetSelect = (key, label, options, anyLabel = 'Any') =>
+    `<label class="filter-select"><span>${label}</span><select data-facet="${key}">` +
+    `<option value="">${anyLabel}</option>` +
+    options.map(([v, t]) => `<option value="${escapeAttr(v)}">${escapeAttr(t)}</option>`).join('') +
+    `</select></label>`;
 
   const groups = new Map();
   for (const p of catalog.projects) {
@@ -466,6 +523,14 @@ ${rewriteLinks(whySection, '')}
       ${domainSet.map((d) => `<button type="button" class="filter-chip" data-domain="${escapeAttr(d)}" aria-pressed="false">${escapeAttr(d)}</button>`).join('\n      ')}
     </div>
     <input type="search" class="filter-search" id="dive-search" placeholder="Search by name…" aria-label="Search deep-dives by name" autocomplete="off">
+  </div>
+  <div class="filter-tools">
+    ${facetSelect('lang', 'Language', langOptions)}
+    ${facetSelect('pattern', 'Uses pattern', patternOptions)}
+    ${facetSelect('time', 'Time I have', timeOptions)}
+    ${facetSelect('sort', 'Sort', sortOptions, 'Suggested reading order')}
+    <button type="button" class="surprise-btn">🎲 Surprise me</button>
+    <button type="button" class="filter-reset" hidden>Clear filters</button>
   </div>
   <p class="filter-status" aria-live="polite"></p>
   <div class="dive-grid">

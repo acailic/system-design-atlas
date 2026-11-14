@@ -1,6 +1,6 @@
 /* system-design-atlas site behaviors — generated into docs/assets/site.js by site/build.mjs
    Read-aloud (speechSynthesis), walkthrough steppers, mermaid diagrams, TOC spy,
-   home domain filter + name search. */
+   home domain filter + name search + facets/sort/surprise. */
 
 /* ── mermaid diagrams ─────────────────────────────────────────────
    Diagram source lives in the markdown as fenced ```mermaid blocks; the
@@ -334,57 +334,116 @@ function initTocSpy() {
   setActive();
 }
 
-/* ── home: domain filter + name search ────────────────────────── */
+/* ── home: domain chips, name search, facet selects, sort, surprise ── */
 function initFilter() {
-  const cards = document.querySelectorAll('.dive-card');
+  const grid = document.querySelector('.dive-grid');
+  const cards = Array.from(document.querySelectorAll('.dive-card'));
   const domainChips = document.querySelectorAll('.filter-chip[data-domain]');
   const allChip = document.querySelector('.filter-chip:not([data-domain])');
   const search = document.querySelector('.filter-search');
   const status = document.querySelector('.filter-status');
+  const selects = Array.from(document.querySelectorAll('select[data-facet]'));
+  const surprise = document.querySelector('.surprise-btn');
+  const reset = document.querySelector('.filter-reset');
   if (!domainChips.length || !cards.length) return;
-  let active = null;   // selected domain, or null for all
-  let query = '';      // lowercased name search, '' for none
+  /* state: domain chip, name query, and one value per facet select ('' = any) */
+  const st = { domain: null, q: '', lang: '', pattern: '', time: '', sort: '' };
+  const num = (c, k) => Number(c.dataset[k]) || 0;
+  const SORTS = {
+    gentle: (a, b) => num(a, 'diff') - num(b, 'diff') || num(a, 'hours') - num(b, 'hours'),
+    quick: (a, b) => num(a, 'hours') - num(b, 'hours') || num(a, 'diff') - num(b, 'diff'),
+    influence: (a, b) => num(b, 'influence') - num(a, 'influence') || num(b, 'teach') - num(a, 'teach'),
+    teach: (a, b) => num(b, 'teach') - num(a, 'teach') || num(a, 'diff') - num(b, 'diff'),
+    az: (a, b) => a.dataset.search.localeCompare(b.dataset.search),
+  };
+  const has = (card, key, v) => !v || (card.dataset[key] || '').split(' ').includes(v);
+  const matches = (card) =>
+    has(card, 'domains', st.domain) && has(card, 'lang', st.lang) &&
+    has(card, 'patterns', st.pattern) && (!st.time || card.dataset.time === st.time) &&
+    (!st.q || (card.dataset.search || '').includes(st.q));
+  const clearPick = () => cards.forEach((c) => c.classList.remove('picked'));
+  /* shareable views: mirror the state into ?domain=…&lang=…&sort=… */
+  const syncUrl = () => {
+    if (!history.replaceState) return;
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(st)) if (v) params.set(k, v);
+    const qs = params.toString();
+    try { history.replaceState(null, '', (qs ? `?${qs}` : location.pathname) + location.hash); } catch (e) { /* file:// etc. */ }
+  };
   const apply = () => {
-    domainChips.forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.domain === active)));
-    if (allChip) allChip.setAttribute('aria-pressed', String(active === null));
+    clearPick();
+    domainChips.forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.domain === st.domain)));
+    if (allChip) allChip.setAttribute('aria-pressed', String(st.domain === null));
+    selects.forEach((s) => { s.value = st[s.dataset.facet]; s.classList.toggle('active', !!s.value); });
+    const order = [...cards].sort((a, b) => (SORTS[st.sort] || (() => 0))(a, b) || num(a, 'order') - num(b, 'order'));
+    if (grid) order.forEach((c) => grid.appendChild(c));
     let shown = 0;
     cards.forEach((card) => {
-      const domains = (card.dataset.domains || '').split(' ');
-      const hay = card.dataset.search || '';
-      const show = (!active || domains.includes(active)) && (!query || hay.includes(query));
+      const show = matches(card);
       card.style.display = show ? '' : 'none';
       if (show) shown += 1;
     });
+    const filtered = !!(st.domain || st.q || st.lang || st.pattern || st.time);
+    if (reset) reset.hidden = !(filtered || st.sort);
     if (status) {
       status.textContent =
-        !active && !query ? ''
+        !filtered ? ''
         : shown === 0 ? `0 of ${cards.length} deep-dives match — try another area or search.`
         : `${shown} of ${cards.length} deep-dives`;
     }
+    syncUrl();
   };
   domainChips.forEach((chip) => {
     chip.addEventListener('click', () => {
       const d = chip.dataset.domain;
-      active = active === d ? null : d;
+      st.domain = st.domain === d ? null : d;
       apply();
     });
   });
-  if (allChip) allChip.addEventListener('click', () => {
-    active = null;
-    apply();
-  });
+  if (allChip) allChip.addEventListener('click', () => { st.domain = null; apply(); });
+  selects.forEach((s) => s.addEventListener('change', () => { st[s.dataset.facet] = s.value; apply(); }));
   if (search) {
     search.addEventListener('input', () => {
-      query = search.value.trim().toLowerCase().replace(/\s+/g, ' ');
+      st.q = search.value.trim().toLowerCase().replace(/\s+/g, ' ');
       apply();
     });
     search.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && search.value) {
         search.value = '';
-        query = '';
+        st.q = '';
         apply();
       }
     });
+  }
+  if (reset) reset.addEventListener('click', () => {
+    Object.assign(st, { domain: null, q: '', lang: '', pattern: '', time: '', sort: '' });
+    if (search) search.value = '';
+    apply();
+  });
+  /* 🎲 pick a random dive among the visible ones: highlight + focus it */
+  if (surprise) surprise.addEventListener('click', () => {
+    const pool = cards.filter((c) => c.style.display !== 'none');
+    if (!pool.length) return;
+    clearPick();
+    const card = pool[Math.floor(Math.random() * pool.length)];
+    card.classList.add('picked');
+    if (card.scrollIntoView) card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    card.focus({ preventScroll: true });
+    if (status) status.textContent = `🎲 Tonight's read: ${card.querySelector('.dc-name').textContent} — press Enter to open it.`;
+  });
+  /* restore a shared view from the URL (unknown values are ignored) */
+  const params = new URLSearchParams(location.search);
+  const valid = (k, v) => k === 'q' || (k === 'domain'
+    ? [...domainChips].some((c) => c.dataset.domain === v)
+    : selects.some((s) => s.dataset.facet === k && [...s.options].some((o) => o.value === v)));
+  let restored = false;
+  for (const k of Object.keys(st)) {
+    const v = params.get(k);
+    if (v && valid(k, v)) { st[k] = k === 'q' ? v.toLowerCase() : v; restored = true; }
+  }
+  if (restored) {
+    if (search && st.q) search.value = st.q;
+    apply();
   }
 }
 
