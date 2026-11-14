@@ -20,7 +20,7 @@ quality bars differ; follow the checklist for what you're adding.
 
 ## Adding a catalog entry
 
-1. Read [`CURATION.md`](CURATION.md). Score the candidate on the four axes
+1. Read [`contributing/CURATION.md`](contributing/CURATION.md). Score the candidate on the four axes
    (1–5 each) against the inclusion bar defined there — including its
    reference-reading carve-out. Below the bar, it does not belong in the
    catalog — propose it in an issue instead, with what you'd fix.
@@ -52,7 +52,7 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
 
 ### Checklist
 
-1. Copy [`DEEP-DIVE-TEMPLATE.md`](DEEP-DIVE-TEMPLATE.md) to
+1. Copy [`contributing/DEEP-DIVE-TEMPLATE.md`](contributing/DEEP-DIVE-TEMPLATE.md) to
    `deep-dives/<id>.md` (same `<id>` as the catalog entry).
 2. Pin the commit: full SHA + date in the header block.
 3. Walk the spine yourself before writing: find the main loop / request
@@ -72,7 +72,8 @@ cd clones/<id> && git rev-parse HEAD   # record this SHA in the deep-dive
    paragraph).
 7. Fill difficulty/prerequisites honestly, including an hour budget.
 8. Update the catalog entry: `status: deep-dived`.
-9. Add the deep-dive to the coverage list in `README.md`.
+9. Add the deep-dive to the deep-dive table in `README.md` (and bump the
+   dive counts in its intro and badges).
 10. Cross-link `PATTERNS.md`: if the deep-dive instantiates (or adds) a
     recurring pattern, add/extend its "Seen in" pointer list.
 11. Rebuild the site: `npm ci && npm run build`, commit the regenerated

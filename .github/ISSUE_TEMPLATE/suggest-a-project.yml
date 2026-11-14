@@ -1,0 +1,50 @@
+name: Suggest a project
+description: Propose an open-source codebase that teaches system design unusually well.
+title: "catalog: <project name>"
+labels: ["catalog"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a codebase. The atlas selects projects for what their code *teaches*, not for popularity alone. See [contributing/CURATION.md](https://github.com/acailic/system-design-atlas/blob/main/contributing/CURATION.md) for the inclusion bar.
+  - type: input
+    id: repo
+    attributes:
+      label: Repository
+      placeholder: https://github.com/org/repo
+    validations:
+      required: true
+  - type: input
+    id: domains
+    attributes:
+      label: Domain(s)
+      description: Tags from CURATION.md's domain list, e.g. database, queue-log, runtime
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What design lesson does this codebase teach unusually well?
+      description: This becomes the catalog's `why:` paragraph. Name the decisions frozen into the code, not features.
+    validations:
+      required: true
+  - type: textarea
+    id: scores
+    attributes:
+      label: Scores (1–5)
+      value: |
+        design_influence:
+        clarity:
+        teachability:
+        domain_fit:
+  - type: textarea
+    id: incumbent
+    attributes:
+      label: Domain balance
+      description: If the domain already has 3+ entries, which incumbent does this beat, and why?
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to write the deep-dive for this project

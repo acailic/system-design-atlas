@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Read the atlas
+    url: https://acailic.github.io/system-design-atlas/
+    about: The rendered website, with diagrams, step-through walkthroughs and read-aloud.
+  - name: Contributing guide
+    url: https://github.com/acailic/system-design-atlas/blob/main/CONTRIBUTING.md
+    about: The checklist and quality bar for catalog entries and deep-dives.

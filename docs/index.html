@@ -43,8 +43,8 @@
 event loops for I/O-bound work&quot;, &quot;content-address your data&quot;. Those are true
 and useless until you have watched a real codebase pay for them — where the
 loop lives, what the log record looks like, what trade was made to get there.</p>
-<p>The atlas points at 40 (and growing) canonical codebases and walks through
-the <em>decisions frozen into their code</em>: the two or three defining trade-offs,
+<p>The atlas points at 40 canonical codebases and walks through the
+<em>decisions frozen into their code</em>: the two or three defining trade-offs,
 the data structures that carry the design, the concurrency model, the seams
 where the system extends. You read the atlas entry, then you read the code
 alongside it. That is the whole method.</p>
@@ -330,24 +330,26 @@ alongside it. That is the whole method.</p>
   <h2>How to use the atlas</h2>
   <div class="readable">
 <ol>
-<li><strong>Pick a domain you want to understand</strong> — cache, storage engine, VCS,
-web server, database, runtime... Browse <a href="https://github.com/acailic/system-design-atlas/blob/main/catalog.yaml"><code>catalog.yaml</code></a>
-(entries are tagged by domain and difficulty).</li>
-<li><strong>Read the catalog entry&#39;s &quot;why&quot; paragraph</strong> — it tells you what design
-lesson this codebase is unusually good at teaching.</li>
+<li><strong>Pick a system or a domain</strong> — cache, storage engine, VCS, web server,
+database, runtime… Browse the deep-dives (filterable by domain on the
+website), or start from a <a href="https://github.com/acailic/system-design-atlas/blob/main/guides/start-here.md">guided path</a> if you
+don&#39;t know where to begin.</li>
+<li><strong>Read why it&#39;s here.</strong> Every entry in <a href="https://github.com/acailic/system-design-atlas/blob/main/catalog.yaml"><code>catalog.yaml</code></a>
+has a &quot;why&quot; paragraph naming the design lesson this codebase is unusually
+good at teaching.</li>
 <li><strong>Shallow-clone the project</strong> so you can follow along:<pre><code class="language-bash">mkdir -p clones &amp;&amp; git clone --depth 1 &lt;repo-url&gt; clones/&lt;id&gt;
 </code></pre>
-Deep-dives pin the commit they were written against; expect small drift,
-the file/function landmarks are stable for years in mature projects.</li>
+Deep-dives pin the commit they were written against. Expect small drift;
+file and function landmarks in mature projects stay stable for years.</li>
 <li><strong>Read the deep-dive top to bottom once</strong> (architecture → data
 structures → concurrency → trade-offs), then <strong>work the reading path</strong>
 in the actual clone, opening every cited file. The reading path is the
 product; the prose is the guide.</li>
-<li><strong>Steal the lessons</strong> — each deep-dive ends with &quot;what to steal&quot;:
+<li><strong>Steal the lessons.</strong> Each deep-dive ends with &quot;what to steal&quot;:
 transferable design moves you can apply to your own systems.</li>
 </ol>
-<p>Time budget: a deep-dive plus its reading path is a focused 3–8 hours
-(depending on the entry&#39;s difficulty rating). Do not rush the reading path.</p>
+<p>Time budget: a deep-dive plus its reading path is a focused 3–8 hours,
+depending on the entry&#39;s difficulty. Don&#39;t rush the reading path.</p>
 
   </div>
 </section>

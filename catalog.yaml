@@ -7,7 +7,7 @@
 #   repo:        canonical public repo
 #   language:    primary implementation language(s)
 #   license:     SPDX id of upstream license
-#   domains:     tags from CURATION.md's domain list
+#   domains:     tags from contributing/CURATION.md's domain list
 #   difficulty:  gentle | moderate | demanding (of the READER)
 #   status:      cataloged (entry only) | deep-dived (deep-dives/<id>.md exists)
 #   scores:      design_influence / clarity / teachability / domain_fit (1–5)

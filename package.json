@@ -2,7 +2,23 @@
   "name": "system-design-atlas",
   "version": "1.0.0",
   "private": true,
-  "description": "Curated atlas of open-source design deep-dives. Markdown-first; the GitHub Pages site under docs/ is generated from it.",
+  "description": "Learn system design by reading great open-source code: curated deep-dives into 40 canonical codebases, pinned to a commit. Markdown-first; the GitHub Pages site under docs/ is generated from it.",
+  "homepage": "https://acailic.github.io/system-design-atlas/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acailic/system-design-atlas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/acailic/system-design-atlas/issues"
+  },
+  "keywords": [
+    "system-design",
+    "software-architecture",
+    "distributed-systems",
+    "databases",
+    "source-code-reading",
+    "learning"
+  ],
   "type": "module",
   "scripts": {
     "build": "node site/build.mjs",
