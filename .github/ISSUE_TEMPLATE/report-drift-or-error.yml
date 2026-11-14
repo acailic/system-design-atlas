@@ -1,0 +1,34 @@
+name: Report a drifted landmark or error
+description: A cited file or function moved upstream, or a claim in a deep-dive is wrong.
+title: "<dive id>: "
+labels: ["accuracy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every claim in a deep-dive should be verifiable in a clone at the pinned commit. Reports like this are what keep the atlas trustworthy, so thank you.
+  - type: input
+    id: dive
+    attributes:
+      label: Deep-dive
+      placeholder: deep-dives/redis.md, section 6 (reading path)
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem?
+      options:
+        - Landmark moved upstream (file/function renamed or relocated)
+        - Factual error at the pinned commit
+        - Broken link or diagram
+        - Unclear or misleading explanation
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What the deep-dive says, what the code actually shows, and the upstream commit or permalink you checked.
+    validations:
+      required: true

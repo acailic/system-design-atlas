@@ -117,4 +117,4 @@ A new ~100k-line codebase takes several weeks of honest effort before
 orientation clicks. That's normal. The second codebase in a domain takes half
 that; the fifth takes days, because the *patterns* recur. Those recurring
 patterns are collected in
-[`../atlas/design-patterns.md`](../atlas/design-patterns.md).
+[`../atlas/design-patterns.md`](design-patterns.md).
