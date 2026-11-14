@@ -47,8 +47,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Site tests: `npm test` = `node --test "site/tests/*.test.mjs"` — staleness gate
   plus jsdom DOM/JS wiring tests over the published `docs/` output (sitemap/
   robots/og/canonical per page; per-paragraph read-aloud play/stop toggle;
-  home domain-filter + name-search wiring), plus a per-page weight budget (`site/tests/perfbudget.test.mjs`: HTML +
-  local JS/CSS per page under 96 KiB, site.js 24 KiB, site.css 28 KiB —
+  home domain-filter + name-search + facet/sort/URL-state/surprise wiring), plus a per-page weight budget (`site/tests/perfbudget.test.mjs`: HTML +
+  local JS/CSS per page under 112 KiB, site.js 24 KiB, site.css 28 KiB —
   exceeding a budget is deliberate: bump the constant there with a reason).
   CI (`.github/workflows/ci.yml`) runs it on every PR. Keep the SEL constant
   in `site/tests/readaloud.test.mjs` in sync with site.js, and never run a
